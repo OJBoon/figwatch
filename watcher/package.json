@@ -1,0 +1,14 @@
+{
+  "name": "figma-comment-watcher",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Watches Figma file comments for @triggers and responds with AI-powered audits",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
+  }
+}

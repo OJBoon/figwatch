@@ -1,0 +1,9 @@
+node_modules/
+dist/
+build/
+*.app
+.env
+.processed-comments.json
+__pycache__/
+*.pyc
+.DS_Store
