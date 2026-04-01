@@ -1,9 +1,9 @@
-node_modules/
-dist/
 build/
+dist/
 *.app
 .env
 .processed-comments.json
 __pycache__/
 *.pyc
 .DS_Store
+node_modules/

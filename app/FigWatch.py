@@ -18,22 +18,16 @@ RECENTS_PATH = os.path.join(CONFIG_DIR, "recent-watches.json")
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _RESOURCES = os.path.join(os.path.dirname(_THIS_DIR), "Resources") if _THIS_DIR.endswith("MacOS") else _THIS_DIR
 
-# Bundled node binary (inside .app) or system node
-BUNDLED_NODE = os.path.join(_RESOURCES, "node")
-WATCHER_ENTRY = os.path.join(_RESOURCES, "watcher", "index.js")
-
 # figma-ds-cli is optional — used for daemon (screenshot fallback)
 FIGMA_CLI_PATH = os.path.join(HOME, "figma-cli", "src", "index.js")
+
+# Resolve claude CLI path
+CLAUDE_PATH = next((p for p in ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
+                    if os.path.exists(p)), "claude")
 
 W = 320
 PAD = 12
 ROW_H = 30
-
-# Resolve node path — prefer bundled, then system
-NODE_PATH = next((p for p in [
-    BUNDLED_NODE,
-    "/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"
-] if os.path.exists(p)), None)
 
 
 def _load_config():
@@ -76,6 +70,17 @@ def _figma_get(path, pat):
         with urllib.request.urlopen(req, timeout=10) as r: return json.loads(r.read())
     except Exception: return None
 
+def _post_notification(title, message):
+    try:
+        from Foundation import NSUserNotification, NSUserNotificationCenter
+        notif = NSUserNotification.alloc().init()
+        notif.setTitle_(title)
+        notif.setInformativeText_(message)
+        NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(notif)
+    except Exception:
+        pass
+
+
 def _validate_token(pat):
     d = _figma_get("/me", pat)
     return d.get("handle") if d else None
@@ -111,7 +116,6 @@ class HoverRow(NSButton):
         if self:
             self.setBordered_(False)
             self.setTitle_("")
-            self.setTransparent_(True)
             self.setWantsLayer_(True)
             self.layer().setCornerRadius_(6)
         return self
@@ -205,19 +209,23 @@ def check_deps(open_files=None):
     """Check all dependencies. Returns dict of status per dep."""
     deps = {}
 
-    # Node.js (bundled or system)
-    deps["node"] = {"ok": NODE_PATH is not None, "path": NODE_PATH}
-
-    # Homebrew (needed to install node/claude if missing)
-    deps["brew"] = {"ok": os.path.exists("/opt/homebrew/bin/brew") or os.path.exists("/usr/local/bin/brew")}
-
     # Claude Code CLI
-    claude_path = None
-    for p in ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"]:
-        if os.path.exists(p):
-            claude_path = p
-            break
-    deps["claude"] = {"ok": claude_path is not None, "path": claude_path}
+    claude_ok = os.path.exists(CLAUDE_PATH) if CLAUDE_PATH != "claude" else False
+    deps["claude"] = {"ok": claude_ok, "path": CLAUDE_PATH if claude_ok else None}
+
+    # Claude auth status
+    if claude_ok:
+        try:
+            result = subprocess.run(
+                [CLAUDE_PATH, 'auth', 'status'],
+                capture_output=True, timeout=5,
+                env={**os.environ, "PATH": f"/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"}
+            )
+            deps["claude_auth"] = {"ok": result.returncode == 0}
+        except Exception:
+            deps["claude_auth"] = {"ok": False}
+    else:
+        deps["claude_auth"] = {"ok": False}
 
     # Figma PAT
     config = _load_config()
@@ -225,14 +233,14 @@ def check_deps(open_files=None):
 
     # Figma Desktop (accept pre-fetched file list to avoid double HTTP request)
     figma_installed = os.path.exists("/Applications/Figma.app")
-    figma_running = open_files is not None and len(open_files) > 0 if open_files is not None else len(_get_open_files()) > 0
+    figma_running = len(open_files) > 0 if open_files is not None else len(_get_open_files()) > 0
     deps["figma"] = {
         "ok": figma_running,
         "installed": figma_installed,
         "running": figma_running,
     }
 
-    deps["all_required"] = deps["node"]["ok"] and deps["claude"]["ok"] and deps["pat"]["ok"]
+    deps["all_required"] = deps["claude"]["ok"] and deps["claude_auth"]["ok"] and deps["pat"]["ok"]
     return deps
 
 
@@ -257,20 +265,20 @@ def build_onboarding_view(app, deps):
     # Dependency rows
     items = [
         {
-            "key": "node",
-            "name": "Node.js",
-            "desc": "Runs the comment watcher",
-            "ok": deps["node"]["ok"],
-            "installing": app._state.get("installing_node"),
-            "action": b"doInstallNode:",
-        },
-        {
             "key": "claude",
             "name": "Claude Code",
             "desc": "Powers the AI audits",
             "ok": deps["claude"]["ok"],
             "installing": app._state.get("installing_claude"),
             "action": b"doInstallClaude:",
+        },
+        {
+            "key": "claude_auth",
+            "name": "Claude Login",
+            "desc": "Sign in to your Claude account",
+            "ok": deps["claude_auth"]["ok"],
+            "installing": False,
+            "action": b"doClaudeAuth:",
         },
         {
             "key": "pat",
@@ -287,7 +295,7 @@ def build_onboarding_view(app, deps):
             "ok": deps["figma"]["ok"],
             "installing": False,
             "action": b"doOpenFigma:",
-            "recommended": True,  # not strictly required
+            "recommended": True,
         },
     ]
 
@@ -451,7 +459,17 @@ def build_popover_view(app):
         hdr.setFrameOrigin_((PAD + 4, y))
         root.addSubview_(hdr)
         y += 20
+    else:
+        no_files = _label("No Figma files detected.", size=12, color=NSColor.secondaryLabelColor())
+        no_files.setFrameOrigin_((PAD + 4, y + 2))
+        root.addSubview_(no_files)
+        y += 20
+        hint2 = _label("Open a file in Figma Desktop.", size=11, color=NSColor.tertiaryLabelColor())
+        hint2.setFrameOrigin_((PAD + 4, y))
+        root.addSubview_(hint2)
+        y += 20
 
+    if files:
         for i, f in enumerate(files):
             row = HoverRow.alloc().initWithFrame_(NSMakeRect(PAD - 2, y, cw + 4, ROW_H))
             row.setTag_(i)
@@ -507,21 +525,6 @@ def build_popover_view(app):
             root.addSubview_(row)
             y += ROW_H
 
-    # ── Watch from URL ──────────────────────────────────────────
-    y += 2
-    url_row = HoverRow.alloc().initWithFrame_(NSMakeRect(PAD - 2, y, cw + 4, ROW_H))
-    url_row.setTarget_(app); url_row.setAction_(b"doUrl:")
-
-    plus = _sf_symbol("link.badge.plus", size=12, color=NSColor.secondaryLabelColor())
-    if plus:
-        plus.setFrameOrigin_((10, 7))
-        url_row.addSubview_(plus)
-
-    ul = _label("Watch from URL\u2026", size=13, color=NSColor.secondaryLabelColor())
-    ul.setFrameOrigin_((30, 7))
-    url_row.addSubview_(ul)
-    root.addSubview_(url_row)
-    y += ROW_H
 
     # ── Separator ───────────────────────────────────────────────
     y += 6
@@ -564,7 +567,7 @@ def build_popover_view(app):
     gear.setWantsLayer_(True)
     gear.layer().setBackgroundColor_(pill_bg.CGColor())
     gear.layer().setCornerRadius_(pill_r)
-    gi = _sf_symbol("gearshape", size=12, color=NSColor.secondaryLabelColor())
+    gi = _sf_symbol("key.fill", size=12, color=NSColor.secondaryLabelColor())
     if gi: gear.setImage_(gi.image())
     gear.setTarget_(app); gear.setAction_(b"doToken:")
     footer.addSubview_(gear)
@@ -586,9 +589,9 @@ class FigWatch(NSObject):
     def applicationDidFinishLaunching_(self, notif):
         self._state = {
             "pat": None, "user": None, "locale": "uk",
-            "files": [], "current": None, "process": None,
+            "files": [], "current": None, "watcher": None,
             "daemon_running": False,
-            "installing_node": False, "installing_claude": False,
+            "installing_claude": False,
             "force_onboarding": False, "deps": None,
         }
         config = _load_config()
@@ -630,11 +633,18 @@ class FigWatch(NSObject):
         self._check_watcher_health()
 
     def _check_daemon(self):
-        """Check if figma-ds-cli daemon is running."""
-        if not NODE_PATH: self._state["daemon_running"] = False; return
+        """Check if figma-ds-cli daemon is running (optional, for screenshot fallback)."""
+        if not os.path.exists(FIGMA_CLI_PATH):
+            self._state["daemon_running"] = False
+            return
+        node_path = next((p for p in ["/opt/homebrew/bin/node", "/usr/local/bin/node"]
+                          if os.path.exists(p)), None)
+        if not node_path:
+            self._state["daemon_running"] = False
+            return
         try:
             result = subprocess.run(
-                [NODE_PATH, FIGMA_CLI_PATH, "daemon", "status"],
+                [node_path, FIGMA_CLI_PATH, "daemon", "status"],
                 capture_output=True, timeout=5
             )
             self._state["daemon_running"] = b"running" in result.stdout.lower()
@@ -642,20 +652,19 @@ class FigWatch(NSObject):
             self._state["daemon_running"] = False
 
     def _is_watching(self):
-        p = self._state.get("process")
-        return p is not None and p.poll() is None
+        w = self._state.get("watcher")
+        return w is not None and w.is_alive()
 
     def _check_watcher_health(self):
         """Auto-restart the watcher if it died unexpectedly."""
         current = self._state.get("current")
         if not current:
-            return  # user hasn't selected a file
-        p = self._state.get("process")
-        if p is None:
-            return  # user explicitly stopped
-        if p.poll() is not None:
-            # Process died — restart it
-            self._state["process"] = None
+            return
+        w = self._state.get("watcher")
+        if w is None:
+            return
+        if not w.is_alive():
+            self._state["watcher"] = None
             self._do_start(current)
 
     @objc.typedSelector(b"v@:@")
@@ -704,6 +713,10 @@ class FigWatch(NSObject):
         self._state["files"] = files
         deps = check_deps(open_files=files)
         self._state["deps"] = deps
+        # Debug
+        with open("/tmp/figwatch-debug.log", "w") as f:
+            f.write(f"files={len(files)}\ndeps={json.dumps({k: str(v) for k, v in deps.items()})}\n")
+            f.write(f"all_required={deps['all_required']}\nforce={self._state.get('force_onboarding')}\n")
         if deps["all_required"] and not self._state.get("force_onboarding"):
             self._check_daemon()
             return build_popover_view(self)
@@ -830,6 +843,9 @@ class FigWatch(NSObject):
                         self._state["pat"] = tok; self._state["user"] = name
                         c = _load_config(); c["figmaPat"] = tok; _save_config(c)
                         self._state["files"] = _get_open_files()
+                        _post_notification("FigWatch", f"Connected as {name}")
+                    else:
+                        _post_notification("FigWatch", "Invalid token \u2014 please check and try again.")
                 threading.Thread(target=validate, daemon=True).start()
         elif r == NSAlertSecondButtonReturn:
             NSWorkspace.sharedWorkspace().openURL_(
@@ -850,49 +866,18 @@ class FigWatch(NSObject):
     # ── Onboarding Actions ──────────────────────────────────────
 
     @objc.typedSelector(b"v@:@")
-    def doInstallNode_(self, sender):
-        deps = self._state.get("deps", {})
-        has_brew = deps.get("brew", {}).get("ok", False)
-        if not has_brew:
-            # No Homebrew — open Node.js download page
-            NSWorkspace.sharedWorkspace().openURL_(
-                NSURL.URLWithString_("https://nodejs.org/en/download/"))
-            return
-        # Install via Homebrew in background
-        self._state["installing_node"] = True
-        self._refresh_popover()
-        def install():
-            try:
-                subprocess.run(
-                    ["/opt/homebrew/bin/brew", "install", "node"],
-                    capture_output=True, timeout=120
-                )
-            except Exception:
-                pass
-            self._state["installing_node"] = False
-            self._refresh_popover()
-        threading.Thread(target=install, daemon=True).start()
+    def doInstallClaude_(self, sender):
+        # Open Claude Code download page
+        NSWorkspace.sharedWorkspace().openURL_(
+            NSURL.URLWithString_("https://docs.anthropic.com/en/docs/claude-code/getting-started"))
 
     @objc.typedSelector(b"v@:@")
-    def doInstallClaude_(self, sender):
-        if not check_deps()["node"]["ok"]:
-            # Can't install without Node
-            return
-        self._state["installing_claude"] = True
-        self._refresh_popover()
-        def install():
-            try:
-                node_dir = os.path.dirname(check_deps()["node"]["path"])
-                npm = os.path.join(node_dir, "npm")
-                subprocess.run(
-                    [npm, "install", "-g", "@anthropic-ai/claude-code"],
-                    capture_output=True, timeout=120
-                )
-            except Exception:
-                pass
-            self._state["installing_claude"] = False
-            self._refresh_popover()
-        threading.Thread(target=install, daemon=True).start()
+    def doClaudeAuth_(self, sender):
+        # Open Terminal to run claude login
+        subprocess.run([
+            'osascript', '-e',
+            'tell application "Terminal" to do script "claude login"'
+        ], capture_output=True)
 
     @objc.typedSelector(b"v@:@")
     def doOpenFigma_(self, sender):
@@ -916,62 +901,52 @@ class FigWatch(NSObject):
         self._state["force_onboarding"] = True
         self._refresh_popover()
 
-    # ── Process ─────────────────────────────────────────────────
+    # ── Watcher ─────────────────────────────────────────────────
 
     def _do_start(self, fi):
-        # Stop watcher process only (keep daemon alive for file switches)
+        from watcher import FigmaWatcher
         self._stop_watcher()
         self._state["current"] = fi
         _add_recent(fi["key"], fi["name"])
 
-        # Auto-start daemon if not running (needed for @ux screenshots)
-        if not self._state.get("daemon_running") and NODE_PATH:
-            try:
-                result = subprocess.run(
-                    [NODE_PATH, FIGMA_CLI_PATH, "daemon", "start"],
-                    capture_output=True, timeout=15
-                )
-                self._state["daemon_running"] = b"started" in result.stdout.lower() or b"running" in result.stdout.lower()
-            except Exception:
-                self._state["daemon_running"] = False
+        def on_reply(trigger, user_handle, node_id):
+            _post_notification("FigWatch", f"{trigger} audit posted for {user_handle}")
 
-        cmd = f"exec '{NODE_PATH}' '{WATCHER_ENTRY}' watch '{fi['key']}' -l {self._state['locale']}"
-        try:
-            self._state["process"] = subprocess.Popen(
-                ["/bin/zsh", "-l", "-c", cmd],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                preexec_fn=os.setsid)  # new process group for clean kill
-            self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"setIconActive:", True, False)
-        except Exception:
-            self._state["current"] = None
+        w = FigmaWatcher(
+            fi["key"], self._state["pat"],
+            locale=self._state.get("locale", "uk"),
+            claude_path=CLAUDE_PATH,
+            log=lambda msg: open("/tmp/fw-watcher.log", "a", encoding="utf-8").write(msg + "\n"),
+            on_reply=on_reply,
+        )
+        w.start()
+        self._state["watcher"] = w
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            b"setIconActive:", True, False)
 
     def _do_stop(self):
-        """Full stop — watcher + daemon."""
+        """Full stop — watcher + optional daemon."""
         self._stop_watcher()
-        if NODE_PATH:
+        # Optionally stop figma-ds-cli daemon
+        node_path = next((p for p in ["/opt/homebrew/bin/node", "/usr/local/bin/node"]
+                          if os.path.exists(p)), None)
+        if node_path and os.path.exists(FIGMA_CLI_PATH):
             try:
-                subprocess.run([NODE_PATH, FIGMA_CLI_PATH, "daemon", "stop"],
+                subprocess.run([node_path, FIGMA_CLI_PATH, "daemon", "stop"],
                                capture_output=True, timeout=5)
             except Exception:
                 pass
         self._state["daemon_running"] = False
 
     def _stop_watcher(self):
-        """Stop only the watcher process and its children."""
-        import signal
-        p = self._state.get("process")
-        if p:
-            try:
-                # Kill the entire process group (zsh + node)
-                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-                p.wait(timeout=5)
-            except Exception:
-                try: os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-                except Exception: pass
-        self._state["process"] = None
+        """Stop the watcher thread."""
+        w = self._state.get("watcher")
+        if w:
+            w.stop()
+        self._state["watcher"] = None
         self._state["current"] = None
         self._set_icon(False)
+
 
 
 # ── Entry ───────────────────────────────────────────────────────────
