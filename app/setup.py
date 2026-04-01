@@ -1,6 +1,6 @@
 from setuptools import setup
 
-APP = ['Sources/FigWatch.py']
+APP = ['FigWatch.py']
 OPTIONS = {
     'argv_emulation': False,
     'plist': {
@@ -9,11 +9,12 @@ OPTIONS = {
         'CFBundleDisplayName': 'FigWatch',
         'CFBundleVersion': '1.0.0',
         'CFBundleShortVersionString': '1.0',
+        'CFBundleIconFile': 'AppIcon',
         'LSUIElement': True,
         'NSHighResolutionCapable': True,
     },
     'packages': ['rumps'],
-    'resources': ['Sources/FigWatch-icon.pdf'],
+    'resources': ['FigWatch-icon.pdf', 'AppIcon.icns'],
 }
 
 setup(

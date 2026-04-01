@@ -14,9 +14,13 @@ CONFIG_DIR = os.path.join(HOME, ".figwatch")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 RECENTS_PATH = os.path.join(CONFIG_DIR, "recent-watches.json")
 
-# Resolve project root (app/ is one level down from project root)
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-WATCHER_ENTRY = os.path.join(PROJECT_ROOT, "watcher", "index.js")
+# Resolve paths — bundled .app or dev mode
+_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+_RESOURCES = os.path.join(os.path.dirname(_THIS_DIR), "Resources") if _THIS_DIR.endswith("MacOS") else _THIS_DIR
+
+# Bundled node binary (inside .app) or system node
+BUNDLED_NODE = os.path.join(_RESOURCES, "node")
+WATCHER_ENTRY = os.path.join(_RESOURCES, "watcher", "index.js")
 
 # figma-ds-cli is optional — used for daemon (screenshot fallback)
 FIGMA_CLI_PATH = os.path.join(HOME, "figma-cli", "src", "index.js")
@@ -25,9 +29,11 @@ W = 320
 PAD = 12
 ROW_H = 30
 
-# Resolve node path once — supports both Apple Silicon and Intel Macs
-NODE_PATH = next((p for p in ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"]
-                  if os.path.exists(p)), None)
+# Resolve node path — prefer bundled, then system
+NODE_PATH = next((p for p in [
+    BUNDLED_NODE,
+    "/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"
+] if os.path.exists(p)), None)
 
 
 def _load_config():
@@ -199,13 +205,8 @@ def check_deps(open_files=None):
     """Check all dependencies. Returns dict of status per dep."""
     deps = {}
 
-    # Node.js
-    node_path = None
-    for p in ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"]:
-        if os.path.exists(p):
-            node_path = p
-            break
-    deps["node"] = {"ok": node_path is not None, "path": node_path}
+    # Node.js (bundled or system)
+    deps["node"] = {"ok": NODE_PATH is not None, "path": NODE_PATH}
 
     # Homebrew (needed to install node/claude if missing)
     deps["brew"] = {"ok": os.path.exists("/opt/homebrew/bin/brew") or os.path.exists("/usr/local/bin/brew")}
@@ -934,7 +935,7 @@ class FigWatch(NSObject):
             except Exception:
                 self._state["daemon_running"] = False
 
-        cmd = f"exec node '{WATCHER_ENTRY}' watch '{fi['key']}' -l {self._state['locale']}"
+        cmd = f"exec '{NODE_PATH}' '{WATCHER_ENTRY}' watch '{fi['key']}' -l {self._state['locale']}"
         try:
             self._state["process"] = subprocess.Popen(
                 ["/bin/zsh", "-l", "-c", cmd],
