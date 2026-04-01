@@ -157,7 +157,7 @@ def _load_menu_icon():
     paths = [
         bundle.pathForResource_ofType_("FigWatch-icon", "pdf"),
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "FigWatch-icon.pdf"),
-        os.path.join(PROJECT_ROOT, "app", "FigWatch-icon.pdf"),
+        os.path.join(_RESOURCES, "FigWatch-icon.pdf"),
     ]
     for p in paths:
         if p and os.path.exists(p):
