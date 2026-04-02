@@ -598,6 +598,18 @@ class FigWatch(NSObject):
         self._state["pat"] = config.get("figmaPat")
         self._state["locale"] = config.get("watchLocale", "uk")
 
+        # Add hidden Edit menu so Cmd+V/C/X/A work in text fields and dialogs
+        menubar = NSMenu.alloc().init()
+        edit_menu = NSMenu.alloc().initWithTitle_("Edit")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Cut", "cut:", "x")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Copy", "copy:", "c")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Paste", "paste:", "v")
+        edit_menu.addItemWithTitle_action_keyEquivalent_("Select All", "selectAll:", "a")
+        edit_item = NSMenuItem.alloc().init()
+        edit_item.setSubmenu_(edit_menu)
+        menubar.addItem_(edit_item)
+        NSApp.setMainMenu_(menubar)
+
         self.statusItem = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
         btn = self.statusItem.button()
         self._set_icon(False)
