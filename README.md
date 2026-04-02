@@ -86,7 +86,18 @@ Unzip and drag **FigWatch.app** to your **Applications** folder.
 
 ### 3. First launch
 
-**Right-click** FigWatch.app and select **Open** (required once — macOS blocks unsigned apps on first launch). After this, it opens normally from Spotlight, Launchpad, or the Applications folder.
+macOS will block the app on first launch since it's not signed with an Apple Developer ID. To open it:
+
+1. Open **System Settings → Privacy & Security**
+2. Scroll down — you'll see "FigWatch was blocked"
+3. Click **Open Anyway**
+
+Or run this in Terminal:
+```bash
+xattr -cr /Applications/FigWatch.app
+```
+
+After this, it opens normally from Spotlight, Launchpad, or the Applications folder.
 
 ### 4. Onboarding
 
