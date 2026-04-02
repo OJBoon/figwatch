@@ -696,6 +696,15 @@ class FigWatch(NSObject):
         self._check_daemon()
         self._check_watcher_health()
 
+        # Check for updates every 30 minutes (tick runs every 30s = every 60 ticks)
+        self._state["_update_tick"] = self._state.get("_update_tick", 0) + 1
+        if self._state["_update_tick"] >= 60:
+            self._state["_update_tick"] = 0
+            result = _check_for_update()
+            if result and result != self._state.get("update_available"):
+                self._state["update_available"] = result
+                _post_notification("FigWatch", "Update available: v" + result[0])
+
     def _check_daemon(self):
         """Check if figma-ds-cli daemon is running (optional, for screenshot fallback)."""
         if not os.path.exists(FIGMA_CLI_PATH):
