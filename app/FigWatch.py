@@ -25,6 +25,9 @@ FIGMA_CLI_PATH = os.path.join(HOME, "figma-cli", "src", "index.js")
 CLAUDE_PATH = next((p for p in ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
                     if os.path.exists(p)), "claude")
 
+APP_VERSION = "1.1.0"
+GITHUB_REPO = "OJBoon/figwatch"
+
 W = 320
 PAD = 12
 ROW_H = 30
@@ -79,6 +82,32 @@ def _post_notification(title, message):
         NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(notif)
     except Exception:
         pass
+
+
+def _check_for_update():
+    """Check GitHub releases for a newer version. Returns (new_version, download_url) or None."""
+    try:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+            headers={"Accept": "application/vnd.github.v3+json"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            data = json.loads(r.read())
+        tag = data.get("tag_name", "").lstrip("v")
+        if not tag:
+            return None
+        # Simple version comparison (works for semver)
+        current = [int(x) for x in APP_VERSION.split(".")]
+        latest = [int(x) for x in tag.split(".")]
+        if latest > current:
+            # Find the zip asset
+            for asset in data.get("assets", []):
+                if asset.get("name", "").endswith(".zip"):
+                    return (tag, asset["browser_download_url"])
+            return (tag, data.get("html_url", ""))
+        return None
+    except Exception:
+        return None
 
 
 def _validate_token(pat):
@@ -404,6 +433,27 @@ def build_popover_view(app):
     root = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 800))
     accent = NSColor.controlAccentColor()
 
+    # ── Update banner ───────────────────────────────────────────
+    update = app._state.get("update_available")
+    if update:
+        new_ver, _ = update
+        banner = HoverRow.alloc().initWithFrame_(NSMakeRect(PAD - 2, y, cw + 4, ROW_H))
+        banner.setTarget_(app); banner.setAction_(b"doUpdate:")
+        banner.setWantsLayer_(True)
+        banner.layer().setBackgroundColor_(accent.colorWithAlphaComponent_(0.1).CGColor())
+        banner.layer().setCornerRadius_(8)
+
+        arrow = _sf_symbol("arrow.down.circle.fill", size=12, color=accent)
+        if arrow:
+            arrow.setFrameOrigin_((10, 7))
+            banner.addSubview_(arrow)
+
+        ul = _label("Update available (v" + new_ver + ")", size=12, weight=NSFontWeightMedium, color=accent)
+        ul.setFrameOrigin_((30, 7))
+        banner.addSubview_(ul)
+        root.addSubview_(banner)
+        y += ROW_H + 4
+
     # ── Status ──────────────────────────────────────────────────
     if app._is_watching() and app._state["current"]:
         # Green dot + file name
@@ -593,6 +643,7 @@ class FigWatch(NSObject):
             "daemon_running": False,
             "installing_claude": False,
             "force_onboarding": False, "deps": None,
+            "update_available": None,  # (version, url) or None
         }
         config = _load_config()
         self._state["pat"] = config.get("figmaPat")
@@ -626,6 +677,7 @@ class FigWatch(NSObject):
         self._state["user"] = _validate_token(self._state["pat"])
         self._state["files"] = _get_open_files()
         self._check_daemon()
+        self._state["update_available"] = _check_for_update()
         # Start CDP refresh timer on main thread
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             b"startCdpTimer:", None, False)
@@ -898,6 +950,69 @@ class FigWatch(NSObject):
         else:
             NSWorkspace.sharedWorkspace().openURL_(
                 NSURL.URLWithString_("https://www.figma.com/downloads/"))
+
+    @objc.typedSelector(b"v@:@")
+    def doUpdate_(self, sender):
+        update = self._state.get("update_available")
+        if not update:
+            return
+        new_ver, url = update
+        self._close_popover()
+
+        if url.endswith(".zip"):
+            # Auto-update: download, extract, replace, relaunch
+            _post_notification("FigWatch", "Downloading update v" + new_ver + "...")
+            def do_update():
+                try:
+                    import tempfile, zipfile, shutil
+                    # Download
+                    zip_path = os.path.join(tempfile.gettempdir(), "FigWatch-update.zip")
+                    urllib.request.urlretrieve(url, zip_path)
+
+                    # Extract
+                    extract_dir = os.path.join(tempfile.gettempdir(), "FigWatch-update")
+                    if os.path.exists(extract_dir):
+                        shutil.rmtree(extract_dir)
+                    with zipfile.ZipFile(zip_path) as zf:
+                        zf.extractall(extract_dir)
+
+                    # Find the .app in the extracted contents
+                    app_path = None
+                    for root_dir, dirs, files in os.walk(extract_dir):
+                        for d in dirs:
+                            if d.endswith(".app"):
+                                app_path = os.path.join(root_dir, d)
+                                break
+                        if app_path:
+                            break
+
+                    if not app_path:
+                        _post_notification("FigWatch", "Update failed: no .app found in download")
+                        return
+
+                    # Replace current app
+                    current_app = os.path.join("/Applications", "FigWatch.app")
+                    if os.path.exists(current_app):
+                        shutil.rmtree(current_app)
+                    shutil.copytree(app_path, current_app)
+
+                    # Clean up
+                    os.unlink(zip_path)
+                    shutil.rmtree(extract_dir)
+
+                    _post_notification("FigWatch", "Updated to v" + new_ver + ". Relaunching...")
+
+                    # Relaunch
+                    subprocess.Popen(["open", current_app])
+                    os.kill(os.getpid(), 9)  # kill current process
+
+                except Exception as e:
+                    _post_notification("FigWatch", "Update failed: " + str(e))
+
+            threading.Thread(target=do_update, daemon=True).start()
+        else:
+            # Fallback: open the release page
+            NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(url))
 
     @objc.typedSelector(b"v@:@")
     def doCheckDeps_(self, sender):
