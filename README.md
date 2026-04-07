@@ -59,7 +59,8 @@ FigWatch stores its config in `~/.figwatch/`:
 
 ## What's new in v1.1.1
 
-- FigWatch now auto-relaunches Figma Desktop with CDP debugging enabled if it detects Figma is running without it — no manual `--remote-debugging-port=9222` flag needed.
+- **Settings panel** — new gear icon in the footer opens a settings dialog with Figma token management and AI model switching (Sonnet, Opus, Haiku). Model choice is persisted and auto-restarts the watcher.
+- **Auto-CDP** — FigWatch now auto-relaunches Figma Desktop with CDP debugging enabled if it detects Figma is running without it — no manual `--remote-debugging-port=9222` flag needed.
 - `@ux` audits now reply as plain-text Figma comments (like `@tone`), instead of generating a separate `.md` report file.
 
 ## What's new in v1.1.0

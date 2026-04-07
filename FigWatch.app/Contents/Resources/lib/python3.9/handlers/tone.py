@@ -61,7 +61,7 @@ def _strip_markdown(text):
     return text
 
 
-def tone_handler(*, texts, targeted, target_name, primary_text, locale, node_name, extra, claude_path, **_):
+def tone_handler(*, texts, targeted, target_name, primary_text, locale, node_name, extra, claude_path, model='sonnet', **_):
     tov_guide = _load_tov_guide(locale) or UK_GUIDELINES
     skill = _cached_load('skill', _SKILL_PATH, _FALLBACK_SKILL)
 
@@ -97,7 +97,7 @@ def tone_handler(*, texts, targeted, target_name, primary_text, locale, node_nam
     )
 
     result = subprocess.run(
-        [claude_path, '--print', '-p', prompt],
+        [claude_path, '--print', '-p', prompt, '--model', model],
         capture_output=True, timeout=60
     )
 

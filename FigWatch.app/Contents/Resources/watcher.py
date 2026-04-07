@@ -157,7 +157,7 @@ def save_processed(ids):
 EM_DASH = '\u2014'
 
 
-def poll_once(file_key, pat, processed_ids, *, locale, claude_path, log, on_reply=None):
+def poll_once(file_key, pat, processed_ids, *, locale, claude_path, model='sonnet', log, on_reply=None):
     data = figma_get(f'/files/{file_key}/comments', pat)
     comments = data.get('comments', []) if data else []
 
@@ -231,7 +231,7 @@ def poll_once(file_key, pat, processed_ids, *, locale, claude_path, log, on_repl
                 log(f'\U0001f4dd Running {trigger} audit...')
                 response = handler(
                     node_id=node_id, file_key=file_key, pat=pat,
-                    extra=extra, claude_path=claude_path,
+                    extra=extra, claude_path=claude_path, model=model,
                 )
             else:
                 enc_id = urllib.parse.quote(node_id, safe='')
@@ -261,7 +261,7 @@ def poll_once(file_key, pat, processed_ids, *, locale, claude_path, log, on_repl
                     texts=targeting['texts'], targeted=targeting['targeted'],
                     target_name=targeting['target_name'], primary_text=targeting['primary_text'],
                     locale=detected_locale, node_name=node.get('name', 'Unnamed frame'),
-                    extra=extra, claude_path=claude_path,
+                    extra=extra, claude_path=claude_path, model=model,
                 )
 
             # Delete ack, post response
@@ -290,11 +290,12 @@ def poll_once(file_key, pat, processed_ids, *, locale, claude_path, log, on_repl
 # ── Watcher class ───────────────────────────────────────────────────
 
 class FigmaWatcher:
-    def __init__(self, file_key, pat, *, locale='uk', interval=30,
+    def __init__(self, file_key, pat, *, locale='uk', model='sonnet', interval=30,
                  claude_path='claude', log=print, on_reply=None):
         self.file_key = file_key
         self.pat = pat
         self.locale = locale
+        self.model = model
         self.interval = interval
         self.claude_path = claude_path
         self.log = log
@@ -323,7 +324,7 @@ class FigmaWatcher:
             try:
                 poll_once(
                     self.file_key, self.pat, self._processed,
-                    locale=self.locale, claude_path=self.claude_path,
+                    locale=self.locale, claude_path=self.claude_path, model=self.model,
                     log=self.log, on_reply=self.on_reply,
                 )
             except Exception as err:

@@ -135,7 +135,7 @@ def _get_node_tree(file_key, frame_id, pat):
         return None
 
 
-def ux_handler(*, node_id, file_key, pat, extra, claude_path, **_):
+def ux_handler(*, node_id, file_key, pat, extra, claude_path, model='sonnet', **_):
     # Phase 1: Resolve parent frame
     frame = _resolve_parent_frame(file_key, node_id, pat)
     if not frame:
@@ -217,7 +217,7 @@ No preamble, no explanation — just the formatted reply.'''
 
     try:
         result = subprocess.run(
-            [claude_path, '-p', prompt, '--print', '--allowedTools', 'Read'],
+            [claude_path, '-p', prompt, '--print', '--allowedTools', 'Read', '--model', model],
             capture_output=True, timeout=120
         )
         reply = _strip_markdown(result.stdout.decode('utf-8', errors='replace').strip() or 'Unable to generate evaluation.')
@@ -231,7 +231,7 @@ No preamble, no explanation — just the formatted reply.'''
                 fallback_prompt += f'\n\nNODE TREE JSON:\n{tree_data[:50000]}'
 
             result = subprocess.run(
-                [claude_path, '--print', '-p', fallback_prompt],
+                [claude_path, '--print', '-p', fallback_prompt, '--model', model],
                 capture_output=True, timeout=120
             )
             reply = _strip_markdown(result.stdout.decode('utf-8', errors='replace').strip() or 'Unable to generate evaluation.')

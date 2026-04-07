@@ -595,9 +595,9 @@ def build_popover_view(app):
     gear.setWantsLayer_(True)
     gear.layer().setBackgroundColor_(pill_bg.CGColor())
     gear.layer().setCornerRadius_(pill_r)
-    gi = _sf_symbol("key.fill", size=12, color=NSColor.secondaryLabelColor())
+    gi = _sf_symbol("gearshape.fill", size=12, color=NSColor.secondaryLabelColor())
     if gi: gear.setImage_(gi.image())
-    gear.setTarget_(app); gear.setAction_(b"doToken:")
+    gear.setTarget_(app); gear.setAction_(b"doSettings:")
     footer.addSubview_(gear)
 
     root.addSubview_(footer)
@@ -616,7 +616,7 @@ class FigWatch(NSObject):
 
     def applicationDidFinishLaunching_(self, notif):
         self._state = {
-            "pat": None, "user": None, "locale": "uk",
+            "pat": None, "user": None, "locale": "uk", "model": "sonnet",
             "files": [], "current": None, "watcher": None,
             "daemon_running": False,
             "installing_claude": False,
@@ -625,6 +625,7 @@ class FigWatch(NSObject):
         config = _load_config()
         self._state["pat"] = config.get("figmaPat")
         self._state["locale"] = config.get("watchLocale", "uk")
+        self._state["model"] = config.get("aiModel", "sonnet")
 
         # Add hidden Edit menu so Cmd+V/C/X/A work in text fields and dialogs
         menubar = NSMenu.alloc().init()
@@ -892,6 +893,78 @@ class FigWatch(NSObject):
                 NSURL.URLWithString_("https://www.figma.com/developers/api#access-tokens"))
 
     @objc.typedSelector(b"v@:@")
+    def doSettings_(self, sender):
+        self._close_popover()
+        NSApp.activateIgnoringOtherApps_(True)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("FigWatch Settings")
+        alert.setInformativeText_("")
+        alert.addButtonWithTitle_("Save")
+        alert.addButtonWithTitle_("Cancel")
+
+        # Build accessory view
+        acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 340, 140))
+
+        # ── Figma Token ──
+        tok_label = _label("Figma Personal Access Token", size=12, weight=NSFontWeightMedium)
+        tok_label.setFrameOrigin_((0, 0))
+        acc.addSubview_(tok_label)
+
+        tok_input = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 22, 340, 24))
+        tok_input.setPlaceholderString_("figd_...")
+        if self._state["pat"]:
+            tok_input.setStringValue_(self._state["pat"])
+        acc.addSubview_(tok_input)
+
+        tok_hint = _label("Figma \u2192 Settings \u2192 Security \u2192 Personal Access Tokens",
+                          size=10, color=NSColor.tertiaryLabelColor())
+        tok_hint.setFrameOrigin_((0, 50))
+        acc.addSubview_(tok_hint)
+
+        # ── AI Model ──
+        model_label = _label("AI Model", size=12, weight=NSFontWeightMedium)
+        model_label.setFrameOrigin_((0, 74))
+        acc.addSubview_(model_label)
+
+        model_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 96, 200, 24), False)
+        model_popup.addItemWithTitle_("Sonnet (faster, cheaper)")
+        model_popup.addItemWithTitle_("Opus (most capable)")
+        model_popup.addItemWithTitle_("Haiku (fastest, cheapest)")
+        model_map = {"sonnet": 0, "opus": 1, "haiku": 2}
+        model_popup.selectItemAtIndex_(model_map.get(self._state.get("model", "sonnet"), 0))
+        acc.addSubview_(model_popup)
+
+        alert.setAccessoryView_(acc)
+        alert.window().setInitialFirstResponder_(tok_input)
+
+        if alert.runModal() == NSAlertFirstButtonReturn:
+            # Save token
+            tok = tok_input.stringValue().strip()
+            if tok and tok != self._state.get("pat"):
+                def validate():
+                    name = _validate_token(tok)
+                    if name:
+                        self._state["pat"] = tok
+                        self._state["user"] = name
+                        c = _load_config(); c["figmaPat"] = tok; _save_config(c)
+                        self._state["files"] = _get_open_files()
+                        _post_notification("FigWatch", f"Connected as {name}")
+                    else:
+                        _post_notification("FigWatch", "Invalid token \u2014 please check and try again.")
+                threading.Thread(target=validate, daemon=True).start()
+
+            # Save model
+            rmap = {0: "sonnet", 1: "opus", 2: "haiku"}
+            new_model = rmap.get(model_popup.indexOfSelectedItem(), "sonnet")
+            if new_model != self._state.get("model"):
+                self._state["model"] = new_model
+                c = _load_config(); c["aiModel"] = new_model; _save_config(c)
+                # Restart watcher if running so it picks up new model
+                if self._is_watching() and self._state["current"]:
+                    self._do_stop()
+                    self._do_start(self._state["current"])
+
+    @objc.typedSelector(b"v@:@")
     def doLocale_(self, sender):
         rmap = {0: "uk", 1: "de", 2: "fr", 3: "nl", 4: "benelux"}
         self._state["locale"] = rmap.get(sender.indexOfSelectedItem(), "uk")
@@ -955,6 +1028,7 @@ class FigWatch(NSObject):
         w = FigmaWatcher(
             fi["key"], self._state["pat"],
             locale=self._state.get("locale", "uk"),
+            model=self._state.get("model", "sonnet"),
             claude_path=CLAUDE_PATH,
             log=lambda msg: open("/tmp/fw-watcher.log", "a", encoding="utf-8").write(msg + "\n"),
             on_reply=on_reply,
