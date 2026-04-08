@@ -94,8 +94,24 @@ def _is_figma_running():
         return False
 
 
-def _relaunch_figma_with_cdp():
-    """Quit Figma and relaunch it with --remote-debugging-port=9222."""
+# Auto-relaunch latch — fires at most once per FigWatch session.
+# If relaunching Figma with --remote-debugging-port=9222 doesn't bring CDP up
+# (some Figma builds ignore the flag, the port is taken, session restore
+# drops args, etc.) we must NOT keep killing Figma every 30 seconds.
+_cdp_relaunch_attempted = False
+
+
+def _relaunch_figma_with_cdp(force=False):
+    """Quit Figma and relaunch it with --remote-debugging-port=9222.
+
+    Auto path is one-shot per session so a Figma build that ignores the
+    debug flag can't make us kill + reopen Figma on every refresh tick.
+    Pass force=True from an explicit user action to bypass the latch.
+    """
+    global _cdp_relaunch_attempted
+    if not force and _cdp_relaunch_attempted:
+        return
+    _cdp_relaunch_attempted = True
     try:
         subprocess.run(["osascript", "-e", 'tell application "Figma" to quit'], capture_output=True, timeout=5)
         # Wait for Figma to fully quit
@@ -109,13 +125,16 @@ def _relaunch_figma_with_cdp():
         pass
 
 
-def _get_open_files():
+def _get_open_files(auto_relaunch=False):
     try:
         with urllib.request.urlopen(urllib.request.Request("http://localhost:9222/json"), timeout=2) as r:
             pages = json.loads(r.read())
     except Exception:
-        # CDP not available — if Figma is running, relaunch it with CDP enabled
-        if _is_figma_running():
+        # CDP not available. Only attempt a relaunch when explicitly asked
+        # (i.e. at first boot) — never from the background refresh timer,
+        # otherwise a Figma build that ignores the debug flag would make us
+        # kill and reopen Figma on every 30-second tick.
+        if auto_relaunch and _is_figma_running():
             _relaunch_figma_with_cdp()
         return []
     import html as _html
@@ -497,10 +516,30 @@ def build_popover_view(app):
         no_files.setFrameOrigin_((PAD + 4, y + 2))
         root.addSubview_(no_files)
         y += 20
-        hint2 = _label("Open a file in Figma Desktop.", size=11, color=NSColor.tertiaryLabelColor())
+        hint2 = _label("Open a file in Figma Desktop, or paste a link below.",
+                        size=11, color=NSColor.tertiaryLabelColor())
         hint2.setFrameOrigin_((PAD + 4, y))
         root.addSubview_(hint2)
-        y += 20
+        y += 22
+
+        # Manual fallback: some Figma builds (v126+) no longer expose the
+        # remote-debugging port, so auto-detect silently fails. Let the user
+        # paste a Figma URL to start watching directly.
+        url_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + 4, y, 140, 24))
+        url_btn.setTitle_("Watch from URL\u2026")
+        url_btn.setBordered_(False)
+        url_btn.setWantsLayer_(True)
+        url_btn.layer().setBackgroundColor_(
+            NSColor.labelColor().colorWithAlphaComponent_(0.08).CGColor())
+        url_btn.layer().setCornerRadius_(12)
+        url_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+        url_btn.setTarget_(app); url_btn.setAction_(b"doUrl:")
+        url_btn.sizeToFit()
+        bf = url_btn.frame()
+        url_btn.setFrameSize_(NSMakeSize(bf.size.width + 20, 24))
+        url_btn.setFrameOrigin_((PAD + 4, y))
+        root.addSubview_(url_btn)
+        y += 30
 
     if files:
         for i, f in enumerate(files):
@@ -659,7 +698,8 @@ class FigWatch(NSObject):
 
     def _bg_init(self):
         self._state["user"] = _validate_token(self._state["pat"])
-        self._state["files"] = _get_open_files()
+        # First boot: allow a one-shot auto-relaunch of Figma with CDP enabled.
+        self._state["files"] = _get_open_files(auto_relaunch=True)
         self._check_daemon()
         # Start CDP refresh timer on main thread
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
@@ -1023,7 +1063,14 @@ class FigWatch(NSObject):
     @objc.typedSelector(b"v@:@")
     def doOpenFigma_(self, sender):
         if os.path.exists("/Applications/Figma.app"):
-            subprocess.run(["open", "-a", "Figma", "--args", "--remote-debugging-port=9222"], capture_output=True)
+            # If Figma is already running, `open --args` is ignored by macOS.
+            # Force a quit + relaunch so the debug flag actually applies.
+            if _is_figma_running():
+                threading.Thread(
+                    target=_relaunch_figma_with_cdp, kwargs={"force": True}, daemon=True
+                ).start()
+            else:
+                subprocess.run(["open", "-a", "Figma", "--args", "--remote-debugging-port=9222"], capture_output=True)
         else:
             NSWorkspace.sharedWorkspace().openURL_(
                 NSURL.URLWithString_("https://www.figma.com/downloads/"))

@@ -59,6 +59,8 @@ FigWatch stores its config in `~/.figwatch/`:
 
 ## What's new in v1.1.2
 
+- **Watch from URL** — paste a Figma file link directly when auto-detect can't see your file. Recent Figma Desktop builds (v126+) no longer expose the remote-debugging port, which broke auto-detect for some users; this gives you a manual path that always works.
+- **Fixed Figma relaunch loop** — FigWatch will no longer quit and reopen Figma every 30 seconds when CDP isn't reachable. Auto-relaunch is now one-shot per session.
 - Fixed the Disconnect button overlapping long file names in the header.
 - Reply language setting — `@tone` and `@ux` can now reply in Chinese (简体中文) in addition to the source locale.
 - Refreshed AI model labels (Sonnet, Opus, Haiku) — version numbers dropped in the settings dropdown.
