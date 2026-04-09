@@ -77,7 +77,9 @@ def _resolve_claude_path():
 
 W = 320
 PAD = 12
-ROW_H = 30
+ROW_H = 24
+ROW_H_ACTIVE = 40  # expanded row for processing/error states
+MAX_FILE_ROWS = 12  # scroll if more than this
 
 
 def _load_config():
@@ -488,125 +490,177 @@ def build_onboarding_view(app, deps):
 
 
 def build_popover_view(app):
-    """Build the main popover — multi-file watch list with status indicators."""
+    """Build the main popover — compact file list with SF symbol icons."""
     cw = W - PAD * 2
     y = PAD
 
     root = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 800))
+    file_statuses = app._state.get("file_statuses", {})
+    watched = app._state.get("watched", [])
 
     # ── Header ─────────────────────────────────────────────────
-    file_statuses = app._state.get("file_statuses", {})
-    n_watching = len(file_statuses)
-
-    if n_watching > 0:
-        title_text = f"FigWatch  \u00B7  {n_watching} watching"
-    else:
-        title_text = "FigWatch"
-
-    title = _label(title_text, size=13, weight=NSFontWeightSemibold)
+    title = _label("FigWatch", size=13, weight=NSFontWeightSemibold)
     title.setFrameOrigin_((PAD + 4, y))
     root.addSubview_(title)
 
     # Gear button
-    pill_bg = NSColor.labelColor().colorWithAlphaComponent_(0.08)
-    gear = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 32, y - 2, 32, 24))
+    gear = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 26, y - 1, 22, 22))
     gear.setBordered_(False); gear.setTitle_("")
-    gear.setWantsLayer_(True)
-    gear.layer().setBackgroundColor_(pill_bg.CGColor())
-    gear.layer().setCornerRadius_(12)
-    gi = _sf_symbol("gearshape.fill", size=12, color=NSColor.secondaryLabelColor())
+    gi = _sf_symbol("gearshape.fill", size=11, color=NSColor.tertiaryLabelColor())
     if gi: gear.setImage_(gi.image())
     gear.setTarget_(app); gear.setAction_(b"doSettings:")
     root.addSubview_(gear)
-    y += 22
+    y += 18
+
+    # Subline: triggers + locale
+    trigger_config = app._state.get("trigger_config", [])
+    triggers_str = " \u00B7 ".join(t.get("trigger", "") for t in trigger_config) if trigger_config else "@tone \u00B7 @ux"
+    locale_str = app._state.get("locale", "uk").upper()
+    subline = _label(f"{triggers_str}  \u00B7  {locale_str}", size=10, color=NSColor.tertiaryLabelColor())
+    subline.setFrameOrigin_((PAD + 4, y))
+    root.addSubview_(subline)
+    y += 16
 
     # ── Separator ──────────────────────────────────────────────
-    y += 4
+    y += 2
     sep0 = NSBox.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 1))
     sep0.setBoxType_(2)
     root.addSubview_(sep0)
-    y += 8
+    y += 6
 
     # ── File list or empty state ───────────────────────────────
-    watched = app._state.get("watched", [])
-
     if not watched:
-        # Empty state
-        no_files = _label("No Figma files detected.", size=12, color=NSColor.secondaryLabelColor())
+        no_files = _label("No Figma files detected.", size=11, color=NSColor.secondaryLabelColor())
         no_files.setFrameOrigin_((PAD + 4, y + 2))
         root.addSubview_(no_files)
-        y += 20
+        y += 18
 
-        hint = _label("Open a file in Figma Desktop to start watching.", size=11, color=NSColor.tertiaryLabelColor())
+        hint = _label("Open a file in Figma Desktop to start watching.", size=10, color=NSColor.tertiaryLabelColor())
         hint.setFrameOrigin_((PAD + 4, y))
         root.addSubview_(hint)
-        y += 24
+        y += 20
 
     else:
-        # File rows with status
+        # Count non-live statuses for the summary
+        active_count = sum(1 for s in file_statuses.values() if s.get("status") not in (STATUS_LIVE, None))
+
+        # Build file rows into a container (for optional scrolling)
+        list_y = 0
+        list_container = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, cw + 4, 2000))
+
         for i, f in enumerate(watched):
             key = f["key"]
             status_info = file_statuses.get(key, {})
             status = status_info.get("status", STATUS_LIVE)
-            is_processing = status == STATUS_PROCESSING
-            row_h = 48 if is_processing else ROW_H
+            is_active = status in (STATUS_PROCESSING, STATUS_DETECTED)
+            row_h = ROW_H_ACTIVE if is_active else ROW_H
 
-            row = NSView.alloc().initWithFrame_(NSMakeRect(PAD - 2, y, cw + 4, row_h))
+            row = NSView.alloc().initWithFrame_(NSMakeRect(0, list_y, cw + 4, row_h))
 
-            # Status indicator
-            status_displays = {
-                STATUS_LIVE:       ("\u25CF live", NSColor.systemGreenColor()),
-                STATUS_DETECTED:   ("\u26A1 " + status_info.get("trigger", ""), NSColor.systemOrangeColor()),
-                STATUS_PROCESSING: ("\u27F3 Claude", NSColor.systemOrangeColor()),
-                STATUS_REPLIED:    ("\u2713 replied", NSColor.systemGreenColor()),
-                STATUS_ERROR:      ("\u26A0 error", NSColor.systemRedColor()),
-            }
-            status_text, status_color = status_displays.get(status, ("\u25CF live", NSColor.systemGreenColor()))
-            sl = _label(status_text, size=10, color=status_color)
-            sl.setFrameOrigin_((10, 7))
-            row.addSubview_(sl)
+            # Status dot / icon (left edge)
+            if status == STATUS_LIVE:
+                dot = _label("\u25CF", size=7, color=NSColor.systemGreenColor())
+                dot.setFrameOrigin_((6, 6))
+                row.addSubview_(dot)
+            elif status == STATUS_REPLIED:
+                icon = _sf_symbol("checkmark.circle.fill", size=10, color=NSColor.systemGreenColor())
+                if icon:
+                    icon.setFrameOrigin_((3, 3))
+                    row.addSubview_(icon)
+            elif status == STATUS_PROCESSING:
+                icon = _sf_symbol("arrow.triangle.2.circlepath", size=10, color=NSColor.systemOrangeColor())
+                if icon:
+                    icon.setFrameOrigin_((3, 3))
+                    row.addSubview_(icon)
+            elif status == STATUS_DETECTED:
+                icon = _sf_symbol("bolt.fill", size=10, color=NSColor.systemOrangeColor())
+                if icon:
+                    icon.setFrameOrigin_((3, 3))
+                    row.addSubview_(icon)
+            elif status == STATUS_ERROR:
+                icon = _sf_symbol("exclamationmark.triangle.fill", size=10, color=NSColor.systemRedColor())
+                if icon:
+                    icon.setFrameOrigin_((3, 3))
+                    row.addSubview_(icon)
 
-            # File name (full width now, no room needed for x button)
-            name_x = 80
-            nl = _label(f["name"], size=12)
-            nl.setFrameSize_(NSMakeSize(cw - name_x - 4, 16))
-            nl.setFrameOrigin_((name_x, 7))
+            # File type icon
+            file_icon_name = "scribble.variable" if not f.get("figjam") else "doc.plaintext"
+            file_icon_color = NSColor.secondaryLabelColor() if status == STATUS_LIVE else NSColor.labelColor()
+            fi = _sf_symbol(file_icon_name, size=10, color=file_icon_color)
+            if fi:
+                fi.setFrameOrigin_((18, 4))
+                row.addSubview_(fi)
+
+            # File name
+            name_x = 36
+            name_color = NSColor.labelColor() if status != STATUS_LIVE else None
+            nl = _label(f["name"], size=11, color=name_color)
+            nl.setFrameSize_(NSMakeSize(cw - name_x, 14))
+            nl.setFrameOrigin_((name_x, 5))
             nl.cell().setLineBreakMode_(5)
             row.addSubview_(nl)
 
-            # Sub-row for processing status
-            if is_processing:
+            # Status text for non-live states (below name)
+            if status == STATUS_PROCESSING:
                 trigger = status_info.get("trigger", "")
                 user = status_info.get("user", "")
                 sub_text = f"{trigger} \u00B7 {user}" if user else trigger
-                sub = _label(sub_text, size=10, color=NSColor.secondaryLabelColor())
-                sub.setFrameOrigin_((name_x, 26))
+                sub = _label(sub_text, size=9, color=NSColor.secondaryLabelColor())
+                sub.setFrameOrigin_((name_x, 22))
                 row.addSubview_(sub)
-
-            # Error tap target
-            if status == STATUS_ERROR:
+            elif status == STATUS_DETECTED:
+                trigger = status_info.get("trigger", "")
+                sub = _label(f"{trigger} detected", size=9, color=NSColor.systemOrangeColor())
+                sub.setFrameOrigin_((name_x, 22))
+                row.addSubview_(sub)
+            elif status == STATUS_REPLIED:
+                sub = _label("replied", size=9, color=NSColor.secondaryLabelColor())
+                sub.setFrameOrigin_((cw - 40, 6))
+                row.addSubview_(sub)
+            elif status == STATUS_ERROR:
+                sub = _label("error \u2014 tap for details", size=9, color=NSColor.systemRedColor())
+                sub.setFrameOrigin_((name_x, 22))
+                row.addSubview_(sub)
                 err_btn = HoverRow.alloc().initWithFrame_(NSMakeRect(0, 0, cw + 4, row_h))
                 err_btn.setTag_(i)
                 err_btn.setTarget_(app); err_btn.setAction_(b"doShowError:")
                 row.addSubview_(err_btn)
 
-            root.addSubview_(row)
-            y += row_h
+            list_container.addSubview_(row)
+            list_y += row_h
 
-    # ── Separator ──────────────────────────────────────────────
-    y += 2
+        list_container.setFrameSize_(NSMakeSize(cw + 4, list_y))
+
+        # Wrap in scroll view if too many rows
+        max_list_h = MAX_FILE_ROWS * ROW_H
+        visible_h = min(list_y, max_list_h)
+
+        if list_y > max_list_h:
+            scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(PAD - 2, y, cw + 4, visible_h))
+            scroll.setDocumentView_(list_container)
+            scroll.setHasVerticalScroller_(True)
+            scroll.setDrawsBackground_(False)
+            scroll.setBorderType_(0)
+            root.addSubview_(scroll)
+        else:
+            list_container.setFrameOrigin_(NSMakePoint(PAD - 2, y))
+            root.addSubview_(list_container)
+
+        y += visible_h
+
+    # ── Footer ─────────────────────────────────────────────────
+    y += 4
     sep = NSBox.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 1))
     sep.setBoxType_(2)
     root.addSubview_(sep)
-    y += 8
+    y += 6
 
-    # ── Footer ─────────────────────────────────────────────────
-    footer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 28))
+    footer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 22))
 
-    # Left: locale popup
-    lp = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 2, 72, 22), False)
-    lp.setFont_(NSFont.systemFontOfSize_(11)); lp.setBordered_(False)
-    lp.setControlSize_(1)
+    # Locale popup (compact)
+    lp = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 68, 20), False)
+    lp.setFont_(NSFont.systemFontOfSize_(10)); lp.setBordered_(False)
+    lp.setControlSize_(2)  # mini
     for l in ["\U0001F1EC\U0001F1E7 UK", "\U0001F1E9\U0001F1EA DE", "\U0001F1EB\U0001F1F7 FR",
               "\U0001F1F3\U0001F1F1 NL", "\U0001F1EA\U0001F1FA BNX"]:
         lp.addItemWithTitle_(l)
@@ -615,18 +669,8 @@ def build_popover_view(app):
     lp.setTarget_(app); lp.setAction_(b"doLocale:")
     footer.addSubview_(lp)
 
-    # Right: Quit pill
-    qb = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 52, 2, 52, 24))
-    qb.setBordered_(False); qb.setTitle_("Quit")
-    qb.setWantsLayer_(True)
-    qb.layer().setBackgroundColor_(pill_bg.CGColor())
-    qb.layer().setCornerRadius_(12)
-    qb.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-    qb.setTarget_(app); qb.setAction_(b"doQuit:")
-    footer.addSubview_(qb)
-
     root.addSubview_(footer)
-    y += 28 + PAD
+    y += 22 + PAD - 4
 
     root.setFrameSize_(NSMakeSize(W, y))
     return root, y
