@@ -2,11 +2,11 @@
 # FigWatch installer — downloads the latest release and installs it to /Applications.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/livisliving/FigWatch/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/OJBoon/figwatch/main/install.sh | bash
 
 set -euo pipefail
 
-REPO="livisliving/FigWatch"
+REPO="OJBoon/figwatch"
 APP_NAME="FigWatch.app"
 INSTALL_DIR="/Applications"
 TMP_DIR="$(mktemp -d -t figwatch-install)"

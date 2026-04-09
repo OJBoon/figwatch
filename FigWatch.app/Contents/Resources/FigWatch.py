@@ -11,8 +11,8 @@ from watcher import STATUS_LIVE, STATUS_DETECTED, STATUS_PROCESSING, STATUS_REPL
 # ── Config ──────────────────────────────────────────────────────────
 
 VERSION = "1.2.0"
-RELEASES_API = "https://api.github.com/repos/livisliving/FigWatch/releases/latest"
-RELEASES_URL = "https://github.com/livisliving/FigWatch/releases/latest"
+RELEASES_API = "https://api.github.com/repos/OJBoon/figwatch/releases/latest"
+RELEASES_URL = "https://github.com/OJBoon/figwatch/releases/latest"
 
 HOME = os.path.expanduser("~")
 CONFIG_DIR = os.path.join(HOME, ".figwatch")
