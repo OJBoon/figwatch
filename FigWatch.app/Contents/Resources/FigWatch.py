@@ -1085,8 +1085,8 @@ class FigWatch(NSObject):
             NSLeftMouseDownMask | NSRightMouseDownMask,
             lambda event: self._close_popover()
         )
-        # Start 1-second auto-refresh loop (powers live updates + countdown)
-        self._start_popover_refresh()
+        # Schedule the first refresh tick on the main run loop
+        self._schedule_next_tick()
 
     def _rebuild_popover(self, show=False):
         """Build (and optionally show) the popover with latest data."""
@@ -1104,43 +1104,29 @@ class FigWatch(NSObject):
                 except Exception:
                     pass
 
-    def _start_popover_refresh(self):
-        """Rebuild the popover every second while open. Uses waitUntilDone:True
-        because False doesn't deliver while a popover is showing in py2app."""
-        def _loop():
-            while self._state.get("popover_open"):
-                time.sleep(1)
-                if self._state.get("popover_open"):
-                    try:
-                        self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                            b"_refreshTick:", None, True)
-                    except Exception:
-                        pass
-        threading.Thread(target=_loop, daemon=True).start()
-
-    _last_popover_snapshot = None
-
-    def _popover_snapshot(self):
-        """Build a hashable snapshot of the data that drives the popover view."""
-        statuses = tuple(
-            (k, s.get("status"), s.get("trigger"), s.get("user"))
-            for k, s in sorted(self._state.get("file_statuses", {}).items())
+    def _schedule_next_tick(self):
+        """Schedule the next refresh tick on the main run loop in ALL modes.
+        This avoids the run loop mode issue that blocks performSelectorOnMainThread
+        and NSTimer while a popover is in event-tracking mode."""
+        if not self._state.get("popover_open"):
+            return
+        NSRunLoop.mainRunLoop().performSelector_target_argument_order_modes_(
+            b"_refreshTick:", self, None, 0,
+            [NSDefaultRunLoopMode, NSEventTrackingRunLoopMode, NSModalPanelRunLoopMode],
         )
-        watched_keys = tuple(f["key"] for f in self._state.get("watched", []))
-        # Include the countdown second so it ticks
-        last_polls = [s.get("last_poll") for s in self._state.get("file_statuses", {}).values() if s.get("last_poll")]
-        countdown_sec = int(30 - (time.time() - max(last_polls))) if last_polls else -1
-        return (watched_keys, statuses, countdown_sec)
 
     @objc.typedSelector(b"v@:@")
     def _refreshTick_(self, _):
-        """Called every second on the main thread while popover is open."""
-        if not (self._state.get("popover_open") and self.popover.isShown()):
+        """Called ~every second on the main thread while popover is open."""
+        if not self._state.get("popover_open"):
             return
-        snap = self._popover_snapshot()
-        if snap != self._last_popover_snapshot:
-            self._last_popover_snapshot = snap
-            self._rebuild_popover()
+        self._rebuild_popover()
+        # Chain: schedule the next tick after a 1-second delay
+        if self._state.get("popover_open"):
+            self.performSelector_withObject_afterDelay_inModes_(
+                b"_refreshTick:", None, 1.0,
+                [NSDefaultRunLoopMode, NSEventTrackingRunLoopMode, NSModalPanelRunLoopMode],
+            )
 
     def _close_popover(self):
         self._state["popover_open"] = False
