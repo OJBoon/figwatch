@@ -10,15 +10,9 @@ import urllib.parse
 import urllib.request
 from collections import namedtuple
 
+from handlers import STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR
+
 FIGMA_API = 'https://api.figma.com/v1'
-
-# ── Status constants ───────────────────────────────────────────────
-
-STATUS_LIVE = 'live'
-STATUS_DETECTED = 'detected'
-STATUS_PROCESSING = 'processing'
-STATUS_REPLIED = 'replied'
-STATUS_ERROR = 'error'
 
 # ── WorkItem ───────────────────────────────────────────────────────
 

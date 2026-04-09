@@ -1,12 +1,19 @@
 #!/usr/bin/env python3
 """FigWatch — macOS menu bar app for watching Figma comments."""
 
-import json, os, queue, re, subprocess, threading, time, urllib.request
+import os, sys
+# Ensure Resources dir is on sys.path so watcher.py and handlers/ are importable
+# (py2app's __boot__.py removes it, but we need it for loose .py modules)
+_resources_dir = os.path.dirname(os.path.abspath(__file__))
+if _resources_dir not in sys.path:
+    sys.path.insert(0, _resources_dir)
+
+import json, queue, re, subprocess, threading, time, urllib.request
 import objc
 from AppKit import *
 from Foundation import *
 from PyObjCTools import AppHelper
-from watcher import STATUS_LIVE, STATUS_DETECTED, STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR
+from handlers import STATUS_LIVE, STATUS_DETECTED, STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR
 
 # ── Config ──────────────────────────────────────────────────────────
 
@@ -691,14 +698,14 @@ class FigWatch(NSObject):
 
     # ── Logging ─────────────────────────────────────────────────
 
-    _log_file = None
+    _watcher_log_file = None
 
-    def _log(self, msg):
+    def _write_log(self, msg):
         """Write to the watcher log with a persistent file handle."""
-        if self._log_file is None:
-            self._log_file = open("/tmp/fw-watcher.log", "a", encoding="utf-8")
-        self._log_file.write(msg + "\n")
-        self._log_file.flush()
+        if self._watcher_log_file is None:
+            self._watcher_log_file = open("/tmp/fw-watcher.log", "a", encoding="utf-8")
+        self._watcher_log_file.write(msg + "\n")
+        self._watcher_log_file.flush()
 
     def _register_login_item(self):
         """Register FigWatch as a login item via SMAppService (macOS 13+)."""
@@ -819,7 +826,7 @@ class FigWatch(NSObject):
             model=self._state.get("model", "sonnet"),
             reply_lang=self._state.get("reply_lang", "en"),
             claude_path=_resolve_claude_path(),
-            log=self._log,
+            log=self._write_log,
             trigger_config=self._state["trigger_config"],
             dispatch=dispatch,
             on_poll=on_poll,

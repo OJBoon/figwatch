@@ -8,6 +8,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+# ── Status constants (shared by watcher.py and FigWatch.py) ────────
+
+STATUS_LIVE = 'live'
+STATUS_DETECTED = 'detected'
+STATUS_PROCESSING = 'processing'
+STATUS_REPLIED = 'replied'
+STATUS_ERROR = 'error'
+
 
 def strip_markdown(text):
     """Remove markdown formatting for Figma plain-text comments."""
