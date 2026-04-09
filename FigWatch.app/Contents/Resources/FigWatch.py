@@ -27,6 +27,7 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 RECENTS_PATH = os.path.join(CONFIG_DIR, "recent-watches.json")
 WATCHED_PATH = os.path.join(CONFIG_DIR, "watched-files.json")
 SKILL_CACHE_PATH = os.path.join(CONFIG_DIR, "skill-cache.json")
+FIGMA_SETTINGS_PATH = os.path.join(HOME, "Library", "Application Support", "Figma", "settings.json")
 
 # Resolve paths — bundled .app or dev mode
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -125,6 +126,38 @@ def _load_recents():
     try:
         with open(RECENTS_PATH) as f: return json.load(f)
     except Exception: return []
+
+
+# ── Figma file detection ──────────────────────────────────────────
+
+def _scan_figma_files():
+    """Read Figma Desktop's settings.json to find open files.
+
+    Returns list of {"key": str, "name": str, "figjam": bool}.
+    """
+    try:
+        with open(FIGMA_SETTINGS_PATH, encoding='utf-8') as f:
+            settings = json.load(f)
+    except Exception:
+        return []
+
+    files = []
+    seen = set()
+    for window in settings.get("windows", []):
+        for tab in window.get("tabs", []):
+            path = tab.get("path", "")
+            title = tab.get("title", "")
+            editor = tab.get("editorType", "")
+            m = re.search(r"/(?:file|design|board)/([a-zA-Z0-9]+)", path)
+            if m and m.group(1) not in seen:
+                key = m.group(1)
+                seen.add(key)
+                files.append({
+                    "key": key,
+                    "name": title or key,
+                    "figjam": editor == "figjam" or "/board/" in path,
+                })
+    return files
 
 
 # ── Helpers ────────────────────────────────────────────────────────
@@ -495,34 +528,19 @@ def build_popover_view(app):
 
     # ── File list or empty state ───────────────────────────────
     watched = app._state.get("watched", [])
+    manual_keys = {f["key"] for f in _load_watched()}
 
     if not watched:
         # Empty state
-        no_files = _label("No files being watched.", size=12, color=NSColor.secondaryLabelColor())
+        no_files = _label("No Figma files detected.", size=12, color=NSColor.secondaryLabelColor())
         no_files.setFrameOrigin_((PAD + 4, y + 2))
         root.addSubview_(no_files)
         y += 20
 
-        hint = _label("Paste a Figma URL to get started.", size=11, color=NSColor.tertiaryLabelColor())
+        hint = _label("Open a file in Figma Desktop, or add one manually.", size=11, color=NSColor.tertiaryLabelColor())
         hint.setFrameOrigin_((PAD + 4, y))
         root.addSubview_(hint)
         y += 24
-
-        # Inline URL input + Watch button
-        url_field = NSTextField.alloc().initWithFrame_(NSMakeRect(PAD + 4, y, cw - 74, 24))
-        url_field.setPlaceholderString_("figma.com/design/\u2026")
-        url_field.setFont_(NSFont.systemFontOfSize_(11))
-        url_field.setTag_(9000)
-        root.addSubview_(url_field)
-
-        watch_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 64, y, 60, 24))
-        watch_btn.setTitle_("Watch")
-        watch_btn.setBezelStyle_(NSBezelStyleRecessed)
-        watch_btn.setControlSize_(1)
-        watch_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-        watch_btn.setTarget_(app); watch_btn.setAction_(b"doAddFileInline:")
-        root.addSubview_(watch_btn)
-        y += 30
 
     else:
         # File rows with status
@@ -662,8 +680,10 @@ class FigWatch(NSObject):
             "installing_claude": False,
             "force_onboarding": False,
             "deps": None,
+            "excluded_keys": [],
         }
         config = _load_config()
+        self._state["excluded_keys"] = config.get("excludedFiles", [])
         self._state["pat"] = config.get("figmaPat")
         self._state["locale"] = config.get("watchLocale", "uk")
         self._state["model"] = config.get("aiModel", "sonnet")
@@ -736,16 +756,68 @@ class FigWatch(NSObject):
         # Start worker threads
         self._start_workers()
 
-        # Load watched files into memory
-        watched = _load_watched()
-        self._state["watched"] = watched
-        n = len(watched)
-        for i, f in enumerate(watched):
-            delay = (30.0 / n) * i if n > 1 else 0
-            self._start_watcher(f, initial_delay=delay)
+        # Initial sync: detect open Figma files + any manually watched files
+        self._sync_watchers()
 
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             b"doRefreshPopover:", None, False)
+
+        # Start polling timer for Figma file detection (every 10s)
+        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+            b"_startSyncTimer:", None, False)
+
+    @objc.typedSelector(b"v@:@")
+    def _startSyncTimer_(self, _):
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            10.0, self, b"_syncTick:", None, True)
+
+    @objc.typedSelector(b"v@:@")
+    def _syncTick_(self, _):
+        threading.Thread(target=self._sync_watchers, daemon=True).start()
+
+    def _sync_watchers(self):
+        """Sync running watchers with currently open Figma files + manual watches."""
+        detected = _scan_figma_files()
+        manual = _load_watched()
+        excluded = set(self._state.get("excluded_keys", []))
+
+        # Merge: manual files take priority, then detected (excluding dismissed ones)
+        merged = {}
+        for f in manual:
+            merged[f["key"]] = f
+        for f in detected:
+            if f["key"] not in merged and f["key"] not in excluded:
+                merged[f["key"]] = f
+
+        desired_keys = set(merged.keys())
+        current_keys = set(self._state.get("watchers", {}).keys())
+
+        # Start new watchers
+        new_keys = desired_keys - current_keys
+        if new_keys:
+            n = len(new_keys)
+            for i, key in enumerate(new_keys):
+                delay = (30.0 / n) * i if n > 1 else 0
+                self._start_watcher(merged[key], initial_delay=delay)
+
+        # Stop watchers for files no longer open (unless manually watched)
+        manual_keys = {f["key"] for f in manual}
+        stale_keys = current_keys - desired_keys
+        for key in stale_keys:
+            if key not in manual_keys:
+                self._stop_watcher(key)
+
+        # Update in-memory watched list (ordered: manual first, then detected)
+        ordered = list(manual)
+        seen = {f["key"] for f in manual}
+        for f in detected:
+            if f["key"] not in seen and f["key"] not in excluded:
+                ordered.append(f)
+                seen.add(f["key"])
+        self._state["watched"] = ordered
+
+        if new_keys or stale_keys:
+            self._schedule_refresh()
 
     def _start_workers(self):
         """Launch daemon threads to process work queues."""
@@ -1023,22 +1095,38 @@ class FigWatch(NSObject):
             name = d.get("name", key) if d else key
             figjam = False
             _add_watched(key, name, figjam)
-            self._state["watched"] = _load_watched()
-            self._start_watcher({"key": key, "name": name, "figjam": figjam})
-            self._schedule_refresh()
+            # Un-exclude if previously dismissed
+            excluded = self._state.get("excluded_keys", [])
+            if key in excluded:
+                excluded.remove(key)
+                self._save_excluded()
+            self._sync_watchers()
         threading.Thread(target=resolve, daemon=True).start()
 
     @objc.typedSelector(b"v@:@")
     def doRemoveFile_(self, sender):
-        """Remove a watched file."""
+        """Remove a watched file. Manual files are deleted; auto-detected files are excluded."""
         idx = sender.tag()
         watched = self._state.get("watched", [])
         if idx < len(watched):
             key = watched[idx]["key"]
             self._stop_watcher(key)
+            # If it's a manually added file, remove from persistence
             _remove_watched(key)
-            self._state["watched"] = _load_watched()
+            # Add to exclusion list so auto-detect doesn't re-add it
+            excluded = self._state.setdefault("excluded_keys", [])
+            if key not in excluded:
+                excluded.append(key)
+                self._save_excluded()
+            # Update in-memory list
+            self._state["watched"] = [f for f in watched if f["key"] != key]
             self._refresh_popover()
+
+    def _save_excluded(self):
+        """Persist excluded file keys to config."""
+        c = _load_config()
+        c["excludedFiles"] = self._state.get("excluded_keys", [])
+        _save_config(c)
 
     @objc.typedSelector(b"v@:@")
     def doShowError_(self, sender):
