@@ -552,12 +552,10 @@ def build_popover_view(app):
             key = f["key"]
             status_info = file_statuses.get(key, {})
             status = status_info.get("status", STATUS_LIVE)
-            is_active = status in (STATUS_PROCESSING, STATUS_DETECTED)
-            row_h = ROW_H_ACTIVE if is_active else ROW_H
 
-            row = NSView.alloc().initWithFrame_(NSMakeRect(0, list_y, cw + 4, row_h))
+            row = NSView.alloc().initWithFrame_(NSMakeRect(0, list_y, cw + 4, ROW_H))
 
-            # Status dot / icon (left edge)
+            # Status dot / icon (left edge, fixed position)
             if status == STATUS_LIVE:
                 dot = _label("\u25CF", size=7, color=NSColor.systemGreenColor())
                 dot.setFrameOrigin_((6, 6))
@@ -565,22 +563,30 @@ def build_popover_view(app):
             elif status == STATUS_REPLIED:
                 icon = _sf_symbol("checkmark.circle.fill", size=10, color=NSColor.systemGreenColor())
                 if icon:
-                    icon.setFrameOrigin_((3, 3))
+                    icon.setFrameOrigin_((3, 4))
                     row.addSubview_(icon)
             elif status == STATUS_PROCESSING:
                 icon = _sf_symbol("arrow.triangle.2.circlepath", size=10, color=NSColor.systemOrangeColor())
                 if icon:
-                    icon.setFrameOrigin_((3, 3))
+                    icon.setFrameOrigin_((3, 4))
+                    icon.setWantsLayer_(True)
+                    # Spin animation
+                    spin = __import__('Quartz').CABasicAnimation.animationWithKeyPath_("transform.rotation.z")
+                    spin.setFromValue_(0)
+                    spin.setToValue_(-6.28318)
+                    spin.setDuration_(1.5)
+                    spin.setRepeatCount_(1e9)
+                    icon.layer().addAnimation_forKey_(spin, "spin")
                     row.addSubview_(icon)
             elif status == STATUS_DETECTED:
                 icon = _sf_symbol("bolt.fill", size=10, color=NSColor.systemOrangeColor())
                 if icon:
-                    icon.setFrameOrigin_((3, 3))
+                    icon.setFrameOrigin_((3, 4))
                     row.addSubview_(icon)
             elif status == STATUS_ERROR:
                 icon = _sf_symbol("exclamationmark.triangle.fill", size=10, color=NSColor.systemRedColor())
                 if icon:
-                    icon.setFrameOrigin_((3, 3))
+                    icon.setFrameOrigin_((3, 4))
                     row.addSubview_(icon)
 
             # File type icon
@@ -591,43 +597,45 @@ def build_popover_view(app):
                 fi.setFrameOrigin_((18, 4))
                 row.addSubview_(fi)
 
-            # File name
+            # File name — truncated shorter when there's a right-side status badge
             name_x = 36
-            name_color = NSColor.labelColor() if status != STATUS_LIVE else None
-            nl = _label(f["name"], size=11, color=name_color)
-            nl.setFrameSize_(NSMakeSize(cw - name_x, 14))
+            has_badge = status in (STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR)
+            badge_w = 90 if has_badge else 0
+            nl = _label(f["name"], size=11)
+            nl.setFrameSize_(NSMakeSize(cw - name_x - badge_w, 14))
             nl.setFrameOrigin_((name_x, 5))
             nl.cell().setLineBreakMode_(5)
             row.addSubview_(nl)
 
-            # Status text for non-live states (below name)
+            # Right-aligned inline status badge for non-live states
             if status == STATUS_PROCESSING:
                 trigger = status_info.get("trigger", "")
                 user = status_info.get("user", "")
-                sub_text = f"{trigger} \u00B7 {user}" if user else trigger
-                sub = _label(sub_text, size=9, color=NSColor.secondaryLabelColor())
-                sub.setFrameOrigin_((name_x, 22))
-                row.addSubview_(sub)
-            elif status == STATUS_DETECTED:
-                trigger = status_info.get("trigger", "")
-                sub = _label(f"{trigger} detected", size=9, color=NSColor.systemOrangeColor())
-                sub.setFrameOrigin_((name_x, 22))
-                row.addSubview_(sub)
+                badge_text = f"{trigger} \u00B7 {user}" if user else trigger
+                badge = _label(badge_text, size=9, color=NSColor.systemOrangeColor())
+                badge.sizeToFit()
+                bw = min(badge.frame().size.width, 86)
+                badge.setFrameSize_(NSMakeSize(bw, 12))
+                badge.setFrameOrigin_((cw - bw, 6))
+                badge.cell().setLineBreakMode_(5)
+                row.addSubview_(badge)
             elif status == STATUS_REPLIED:
-                sub = _label("replied", size=9, color=NSColor.secondaryLabelColor())
-                sub.setFrameOrigin_((cw - 40, 6))
-                row.addSubview_(sub)
+                badge = _label("\u2713 replied", size=9, color=NSColor.secondaryLabelColor())
+                badge.sizeToFit()
+                badge.setFrameOrigin_((cw - badge.frame().size.width, 6))
+                row.addSubview_(badge)
             elif status == STATUS_ERROR:
-                sub = _label("error \u2014 tap for details", size=9, color=NSColor.systemRedColor())
-                sub.setFrameOrigin_((name_x, 22))
-                row.addSubview_(sub)
-                err_btn = HoverRow.alloc().initWithFrame_(NSMakeRect(0, 0, cw + 4, row_h))
+                badge = _label("\u26A0 error", size=9, color=NSColor.systemRedColor())
+                badge.sizeToFit()
+                badge.setFrameOrigin_((cw - badge.frame().size.width, 6))
+                row.addSubview_(badge)
+                err_btn = HoverRow.alloc().initWithFrame_(NSMakeRect(0, 0, cw + 4, ROW_H))
                 err_btn.setTag_(i)
                 err_btn.setTarget_(app); err_btn.setAction_(b"doShowError:")
                 row.addSubview_(err_btn)
 
             list_container.addSubview_(row)
-            list_y += row_h
+            list_y += ROW_H
 
         list_container.setFrameSize_(NSMakeSize(cw + 4, list_y))
 
