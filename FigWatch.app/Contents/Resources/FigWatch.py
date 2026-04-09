@@ -13,6 +13,7 @@ import objc
 from AppKit import *
 from Foundation import *
 from PyObjCTools import AppHelper
+import handlers
 from handlers import STATUS_LIVE, STATUS_DETECTED, STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR
 
 # ── Config ──────────────────────────────────────────────────────────
@@ -26,7 +27,6 @@ CONFIG_DIR = os.path.join(HOME, ".figwatch")
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
 RECENTS_PATH = os.path.join(CONFIG_DIR, "recent-watches.json")
 WATCHED_PATH = os.path.join(CONFIG_DIR, "watched-files.json")
-SKILL_CACHE_PATH = os.path.join(CONFIG_DIR, "skill-cache.json")
 FIGMA_SETTINGS_PATH = os.path.join(HOME, "Library", "Application Support", "Figma", "settings.json")
 
 # Resolve paths — bundled .app or dev mode
@@ -237,7 +237,7 @@ def check_deps():
             result = subprocess.run(
                 [claude_path, 'auth', 'status', '--json'],
                 capture_output=True, timeout=5,
-                env={**os.environ, "PATH": f"/opt/homebrew/bin:/usr/local/bin:{os.environ.get('PATH', '')}"}
+                env=handlers.subprocess_env()
             )
             stdout = result.stdout.decode('utf-8', errors='replace').strip()
             logged_in = False
@@ -835,7 +835,8 @@ class FigWatch(NSObject):
     def _sync_watchers(self):
         """Sync running watchers with currently open Figma files + manual watches."""
         detected = _scan_figma_files()
-        manual = _load_watched()
+        manual = self._state.get("_manual_watched", _load_watched())
+        self._state["_manual_watched"] = manual
         excluded = set(self._state.get("excluded_keys", []))
 
         # Merge: manual files take priority, then detected (excluding dismissed ones)
@@ -1019,9 +1020,13 @@ class FigWatch(NSObject):
     def setIconActive_(self, active):
         self._set_icon(bool(active))
 
+    _cached_menu_icon = None
+
     def _set_icon(self, active):
         btn = self.statusItem.button()
-        base = _load_menu_icon()
+        if self._cached_menu_icon is None:
+            self._cached_menu_icon = _load_menu_icon()
+        base = self._cached_menu_icon
         if not base:
             name = "bubble.left.fill" if active else "bubble.left"
             base = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, "FigWatch")
@@ -1111,10 +1116,28 @@ class FigWatch(NSObject):
                         b"_refreshTick:", None, False)
         threading.Thread(target=_loop, daemon=True).start()
 
+    _last_popover_snapshot = None
+
+    def _popover_snapshot(self):
+        """Build a hashable snapshot of the data that drives the popover view."""
+        statuses = tuple(
+            (k, s.get("status"), s.get("trigger"), s.get("user"))
+            for k, s in sorted(self._state.get("file_statuses", {}).items())
+        )
+        watched_keys = tuple(f["key"] for f in self._state.get("watched", []))
+        # Include the countdown second so it ticks
+        last_polls = [s.get("last_poll") for s in self._state.get("file_statuses", {}).values() if s.get("last_poll")]
+        countdown_sec = int(30 - (time.time() - max(last_polls))) if last_polls else -1
+        return (watched_keys, statuses, countdown_sec)
+
     @objc.typedSelector(b"v@:@")
     def _refreshTick_(self, _):
         """Called every second on the main thread while popover is open."""
-        if self._state.get("popover_open") and self.popover.isShown():
+        if not (self._state.get("popover_open") and self.popover.isShown()):
+            return
+        snap = self._popover_snapshot()
+        if snap != self._last_popover_snapshot:
+            self._last_popover_snapshot = snap
             self._rebuild_popover()
 
     def _close_popover(self):

@@ -152,10 +152,16 @@ def detect_locale(extra, default):
 
 # ── Processed comment tracking ──────────────────────────────────────
 
+_processed_path_cache = None
+
 def _processed_path():
+    global _processed_path_cache
+    if _processed_path_cache:
+        return _processed_path_cache
     config_dir = os.path.join(os.path.expanduser('~'), '.figwatch')
     os.makedirs(config_dir, exist_ok=True)
-    return os.path.join(config_dir, '.processed-comments.json')
+    _processed_path_cache = os.path.join(config_dir, '.processed-comments.json')
+    return _processed_path_cache
 
 
 def load_processed():

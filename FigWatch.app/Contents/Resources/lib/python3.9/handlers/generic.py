@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import tempfile
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from handlers import (
@@ -30,8 +31,13 @@ def _load_skill_cache():
         return {}
 
 
+_figwatch_dir_created = False
+
 def _save_skill_cache(cache):
-    os.makedirs(os.path.join(_HOME, '.figwatch'), exist_ok=True)
+    global _figwatch_dir_created
+    if not _figwatch_dir_created:
+        os.makedirs(os.path.join(_HOME, '.figwatch'), exist_ok=True)
+        _figwatch_dir_created = True
     with open(_skill_cache_path(), 'w', encoding='utf-8') as f:
         json.dump(cache, f, indent=2)
 
@@ -186,7 +192,6 @@ def fetch_screenshot(file_key, node_id, pat):
             url = (data.get('images') or {}).get(node_id)
             if not url:
                 continue
-            import urllib.request
             with urllib.request.urlopen(url, timeout=30) as r:
                 with open(out_path, 'wb') as f:
                     f.write(r.read())
