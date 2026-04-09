@@ -200,6 +200,7 @@ def _fetch_latest_release():
             "url": d.get("html_url", RELEASES_URL),
             "body": d.get("body", ""),
             "zip_url": zip_url,
+            "published_at": d.get("published_at", ""),
         }
     except Exception:
         return None
@@ -724,6 +725,14 @@ class FigWatch(NSObject):
             recents = _load_recents()
             if recents:
                 _save_watched(recents)
+
+        # Stamp release timestamp on first launch (for update detection)
+        config = _load_config()
+        if not config.get("installedReleaseTimestamp"):
+            rel = _fetch_latest_release()
+            if rel and rel.get("published_at"):
+                config["installedReleaseTimestamp"] = rel["published_at"]
+                _save_config(config)
 
         # Start worker threads
         self._start_workers()
@@ -1524,7 +1533,11 @@ class FigWatch(NSObject):
 
         cur = _parse_version(VERSION)
         new = _parse_version(latest.get("tag", ""))
-        if new <= cur:
+        # Compare both version AND release timestamp — catches re-releases at same version
+        installed_ts = _load_config().get("installedReleaseTimestamp", "")
+        release_ts = latest.get("published_at", "")
+        is_newer = new > cur or (new == cur and release_ts and release_ts != installed_ts)
+        if not is_newer:
             alert.setMessageText_("You\u2019re up to date")
             alert.setInformativeText_(f"FigWatch v{VERSION} is the latest version.")
             alert.addButtonWithTitle_("OK")
@@ -1547,7 +1560,7 @@ class FigWatch(NSObject):
             if resp == NSAlertFirstButtonReturn:
                 _post_notification("FigWatch", "Downloading update\u2026")
                 threading.Thread(
-                    target=self._install_update, args=(zip_url,), daemon=True
+                    target=self._install_update, args=(zip_url, release_ts), daemon=True
                 ).start()
             elif resp == NSAlertSecondButtonReturn:
                 NSWorkspace.sharedWorkspace().openURL_(
@@ -1559,7 +1572,7 @@ class FigWatch(NSObject):
                 NSWorkspace.sharedWorkspace().openURL_(
                     NSURL.URLWithString_(latest.get("url", RELEASES_URL)))
 
-    def _install_update(self, zip_url):
+    def _install_update(self, zip_url, release_ts=""):
         import shutil
         try:
             cache = os.path.join(HOME, "Library", "Caches", "FigWatch")
@@ -1610,6 +1623,12 @@ class FigWatch(NSObject):
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
+
+            # Stamp the installed release timestamp so we don't re-offer this release
+            if release_ts:
+                c = _load_config()
+                c["installedReleaseTimestamp"] = release_ts
+                _save_config(c)
 
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 b"_quitForUpdate:", None, False)
