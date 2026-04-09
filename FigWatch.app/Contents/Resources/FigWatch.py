@@ -773,7 +773,13 @@ class FigWatch(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def _syncTick_(self, _):
-        threading.Thread(target=self._sync_watchers, daemon=True).start()
+        threading.Thread(target=self._safe_sync, daemon=True).start()
+
+    def _safe_sync(self):
+        try:
+            self._sync_watchers()
+        except Exception as e:
+            self._write_log(f'\u26a0\ufe0f Sync error: {e}')
 
     def _sync_watchers(self):
         """Sync running watchers with currently open Figma files + manual watches."""
