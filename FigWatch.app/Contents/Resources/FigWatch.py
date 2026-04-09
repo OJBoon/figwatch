@@ -801,9 +801,13 @@ class FigWatch(NSObject):
                 fs["user"] = item.user_handle
             elif event == STATUS_REPLIED:
                 fs["status"] = STATUS_REPLIED
-                # Revert to live after 4s
-                self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    b"_scheduleRevertToLive:", key, False)
+                # Revert to live after 4s using a threading.Timer
+                # (avoids NSTimer userInfo round-trip issues with Python strings)
+                def _revert(k=key):
+                    if k in self._state.get("file_statuses", {}):
+                        self._state["file_statuses"][k]["status"] = STATUS_LIVE
+                        self._schedule_refresh()
+                threading.Timer(4.0, _revert).start()
             elif event == STATUS_ERROR:
                 fs["status"] = STATUS_ERROR
                 fs["error"] = kwargs.get("error", "Unknown error")
@@ -881,18 +885,6 @@ class FigWatch(NSObject):
     def _debouncedRefresh_(self, _):
         NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
             0.1, self, b"doRefreshPopover:", None, False)
-
-    @objc.typedSelector(b"v@:@")
-    def _scheduleRevertToLive_(self, file_key):
-        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-            4.0, self, b"_revertStatusToLive:", file_key, False)
-
-    @objc.typedSelector(b"v@:@")
-    def _revertStatusToLive_(self, timer):
-        key = timer.userInfo()
-        if key and key in self._state.get("file_statuses", {}):
-            self._state["file_statuses"][key]["status"] = STATUS_LIVE
-            self._schedule_refresh()
 
     # ── Icon ───────────────────────────────────────────────────
 
