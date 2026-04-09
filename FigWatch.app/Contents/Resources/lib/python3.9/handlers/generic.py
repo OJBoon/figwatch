@@ -148,6 +148,7 @@ def introspect_skill(skill_path, claude_path):
         result = subprocess.run(
             [claude_path, '--print', '-p', prompt, '--model', 'haiku'],
             capture_output=True, timeout=30, env=subprocess_env(),
+            cwd=os.path.expanduser('~'),
         )
         stdout = result.stdout.decode('utf-8', errors='replace').strip()
         if stdout:
@@ -442,7 +443,8 @@ CRITICAL RULES:
     cmd.extend(['--add-dir', skill_dir])
 
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=120, env=subprocess_env())
+        result = subprocess.run(cmd, capture_output=True, timeout=120, env=subprocess_env(),
+                                    cwd=os.path.expanduser('~'))
         reply = parse_claude_output(result)
         header = f'\U0001f5e3\ufe0f Claude {item.trigger} Audit \u2014 {frame_name}'
         return f'{header}\n\n{reply}\n\n\u2014 Claude'
