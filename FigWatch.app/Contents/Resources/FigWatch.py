@@ -558,7 +558,14 @@ def build_popover_view(app):
                 sub.setFrameOrigin_((name_x, 26))
                 row.addSubview_(sub)
 
-            # Remove button
+            # Error tap target (added before remove button so x_btn stays on top)
+            if status == STATUS_ERROR:
+                err_btn = HoverRow.alloc().initWithFrame_(NSMakeRect(0, 0, cw - 30, row_h))
+                err_btn.setTag_(i)
+                err_btn.setTarget_(app); err_btn.setAction_(b"doShowError:")
+                row.addSubview_(err_btn)
+
+            # Remove button (last = highest z-order, always clickable)
             x_btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 20, (row_h - 20) // 2, 20, 20))
             x_btn.setBordered_(False)
             x_btn.setTitle_("\u00D7")
@@ -567,13 +574,6 @@ def build_popover_view(app):
             x_btn.setTag_(i)
             x_btn.setTarget_(app); x_btn.setAction_(b"doRemoveFile:")
             row.addSubview_(x_btn)
-
-            # Error tap target
-            if status == STATUS_ERROR:
-                err_btn = HoverRow.alloc().initWithFrame_(NSMakeRect(0, 0, cw - 30, row_h))
-                err_btn.setTag_(i)
-                err_btn.setTarget_(app); err_btn.setAction_(b"doShowError:")
-                row.addSubview_(err_btn)
 
             root.addSubview_(row)
             y += row_h
@@ -683,6 +683,9 @@ class FigWatch(NSObject):
         self.popover.setBehavior_(1)  # transient
         self.popover.setAnimates_(True)
 
+        # Register as login item (macOS 13+ / Ventura)
+        self._register_login_item()
+
         if self._state["pat"]:
             threading.Thread(target=self._app_init, daemon=True).start()
 
@@ -696,6 +699,16 @@ class FigWatch(NSObject):
             self._log_file = open("/tmp/fw-watcher.log", "a", encoding="utf-8")
         self._log_file.write(msg + "\n")
         self._log_file.flush()
+
+    def _register_login_item(self):
+        """Register FigWatch as a login item via SMAppService (macOS 13+)."""
+        try:
+            from ServiceManagement import SMAppService
+            service = SMAppService.mainAppService()
+            if service.status() != 1:  # 1 = SMAppServiceStatusEnabled
+                service.registerAndReturnError_(None)
+        except Exception:
+            pass  # Pre-Ventura or framework unavailable — silently skip
 
     # ── Init ───────────────────────────────────────────────────
 
@@ -1154,6 +1167,7 @@ class FigWatch(NSObject):
         trig_y += 6
 
         trigger_config = self._state.get("trigger_config", [])
+        intro_results = self._state.get("introspection_results", {})
         for i, tc in enumerate(trigger_config):
             trigger_word = tc.get("trigger", "")
             skill_name = tc.get("skill", "")
@@ -1167,6 +1181,22 @@ class FigWatch(NSObject):
             sn = _label(display, size=11, color=NSColor.secondaryLabelColor())
             sn.setFrameOrigin_((60, trig_y + 1))
             acc.addSubview_(sn)
+
+            # Compatibility badge
+            intro = intro_results.get(skill_name)
+            if builtin:
+                badge = _label("\u2705", size=10)
+                badge.setFrameOrigin_((280, trig_y + 1))
+                acc.addSubview_(badge)
+            elif intro is not None:
+                if intro.get("comment_compatible"):
+                    badge = _label("\u2705", size=10)
+                else:
+                    reason = intro.get("incompatible_reason", "Not compatible")
+                    badge = _label("\u26A0\uFE0F", size=10)
+                    badge.setToolTip_(reason)
+                badge.setFrameOrigin_((280, trig_y + 1))
+                acc.addSubview_(badge)
 
             if not builtin:
                 rm = NSButton.alloc().initWithFrame_(NSMakeRect(310, trig_y - 2, 24, 20))
@@ -1298,15 +1328,18 @@ class FigWatch(NSObject):
             NSApp.abortModal()
             win.orderOut_(None)
 
+        # Discover available skills for the dropdown
+        from handlers.generic import _find_skills
+        available = _find_skills()
+
         NSApp.activateIgnoringOtherApps_(True)
         alert = NSAlert.alloc().init()
         alert.setMessageText_("Add Trigger")
-        alert.setInformativeText_("Enter the trigger keyword and skill file path.")
+        alert.setInformativeText_("Enter the trigger keyword and select a skill.")
         alert.addButtonWithTitle_("Add")
-        alert.addButtonWithTitle_("Browse\u2026")
         alert.addButtonWithTitle_("Cancel")
 
-        acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 340, 70))
+        acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 340, 120))
 
         kw_label = _label("Trigger keyword (e.g. @a11y)", size=11)
         kw_label.setFrameOrigin_((0, 0))
@@ -1315,27 +1348,46 @@ class FigWatch(NSObject):
         kw_input.setPlaceholderString_("@keyword")
         acc.addSubview_(kw_input)
 
-        sk_label = _label("Skill file path (.md)", size=11)
-        sk_label.setFrameOrigin_((0, 48))
+        sk_label = _label("Skill", size=11)
+        sk_label.setFrameOrigin_((0, 50))
         acc.addSubview_(sk_label)
-        sk_input = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 66, 340, 24))
-        sk_input.setPlaceholderString_("/path/to/skill.md")
-        acc.addSubview_(sk_input)
 
-        acc.setFrameSize_(NSMakeSize(340, 94))
+        # Skill picker dropdown
+        sk_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 68, 260, 24), False)
+        sk_popup.setFont_(NSFont.systemFontOfSize_(11))
+        skill_paths = []
+        for s in available:
+            label = s["name"] + (" (built-in)" if s["builtin"] else "")
+            sk_popup.addItemWithTitle_(label)
+            skill_paths.append(s["path"])
+        sk_popup.addItemWithTitle_("Browse for file\u2026")
+        acc.addSubview_(sk_popup)
+
+        # Path display for the currently selected skill
+        sk_path_label = _label("", size=9, color=NSColor.tertiaryLabelColor())
+        sk_path_label.setFrameOrigin_((0, 96))
+        sk_path_label.setFrameSize_(NSMakeSize(340, 14))
+        if skill_paths:
+            sk_path_label.setStringValue_(skill_paths[0])
+        acc.addSubview_(sk_path_label)
+
+        acc.setFrameSize_(NSMakeSize(340, 114))
         alert.setAccessoryView_(acc)
         alert.window().setInitialFirstResponder_(kw_input)
 
-        r = alert.runModal()
-        if r == NSAlertFirstButtonReturn:
-            self._commit_trigger(kw_input.stringValue().strip(), sk_input.stringValue().strip())
-        elif r == NSAlertSecondButtonReturn:
-            panel = NSOpenPanel.alloc().init()
-            panel.setCanChooseFiles_(True)
-            panel.setCanChooseDirectories_(False)
-            panel.setAllowedFileTypes_(["md"])
-            if panel.runModal() == NSModalResponseOK:
-                self._commit_trigger(kw_input.stringValue().strip(), panel.URLs()[0].path())
+        if alert.runModal() == NSAlertFirstButtonReturn:
+            keyword = kw_input.stringValue().strip()
+            sel = sk_popup.indexOfSelectedItem()
+            if sel < len(skill_paths):
+                self._commit_trigger(keyword, skill_paths[sel])
+            else:
+                # "Browse for file…" selected
+                panel = NSOpenPanel.alloc().init()
+                panel.setCanChooseFiles_(True)
+                panel.setCanChooseDirectories_(False)
+                panel.setAllowedFileTypes_(["md"])
+                if panel.runModal() == NSModalResponseOK:
+                    self._commit_trigger(keyword, panel.URLs()[0].path())
 
     def _commit_trigger(self, keyword, skill_path):
         """Add a trigger and hot-reload all watchers."""
@@ -1349,14 +1401,17 @@ class FigWatch(NSObject):
         self._save_trigger_config(tc)
         for w in self._state.get("watchers", {}).values():
             w.reload_trigger_config(tc)
+        # Introspect in background and store result
         threading.Thread(
             target=self._introspect_new_trigger, args=(skill_path,), daemon=True
         ).start()
 
     def _introspect_new_trigger(self, skill_path):
-        """Background introspection of a newly added skill."""
+        """Background introspection of a newly added skill. Stores result for UI."""
         from handlers.generic import introspect_skill
-        introspect_skill(skill_path, _resolve_claude_path())
+        result = introspect_skill(skill_path, _resolve_claude_path())
+        intro = self._state.setdefault("introspection_results", {})
+        intro[skill_path] = result
 
     @objc.typedSelector(b"v@:@")
     def doRemoveTrigger_(self, sender):
