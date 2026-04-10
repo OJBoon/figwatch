@@ -272,6 +272,7 @@ class KeyPanel(NSPanel):
 
 class FlippedView(NSView):
     def isFlipped(self): return True
+    def drawRect_(self, rect): pass  # don't fill background
 
 
 # ── Hover Row ───────────────────────────────────────────────────────
@@ -1107,6 +1108,9 @@ class FigWatch(NSObject):
         for sub in list(content.subviews()):
             sub.removeFromSuperview()
         view.setFrame_(NSMakeRect(0, 0, W, h))
+        view.setDrawsBackground_(False) if hasattr(view, 'setDrawsBackground_') else None
+        view.setWantsLayer_(True)
+        view.layer().setBackgroundColor_(None)
         content.addSubview_(view)
         # Resize panel, keeping top-left fixed
         old_frame = self._panel.frame()
