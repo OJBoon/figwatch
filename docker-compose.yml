@@ -1,0 +1,16 @@
+services:
+  figwatch:
+    build: .
+    environment:
+      # Required
+      - FIGMA_PAT=${FIGMA_PAT}
+      - FIGWATCH_FILES=${FIGWATCH_FILES}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # Optional (shown with defaults)
+      - FIGWATCH_LOCALE=${FIGWATCH_LOCALE:-uk}
+      - FIGWATCH_MODEL=${FIGWATCH_MODEL:-sonnet}
+      - FIGWATCH_INTERVAL=${FIGWATCH_INTERVAL:-30}
+    volumes:
+      # Optional: mount custom skill files
+      - ./custom-skills:/app/custom-skills
+    restart: unless-stopped

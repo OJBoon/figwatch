@@ -157,6 +157,29 @@ skills/              Bundled skill definitions (.md) + reference files
 
 </details>
 
+## Development
+
+### Prerequisites
+
+- Python 3.11
+- Docker (for server deployment)
+
+### macOS app
+
+```bash
+make install   # install build dependencies (once)
+make build     # build macos/dist/FigWatch.app
+make clean     # remove build artefacts
+```
+
+### Docker / server
+
+Copy `.env.example` to `.env`, fill in your values, then run:
+
+```bash
+docker compose up -d --build
+```
+
 ## License
 
 MIT
