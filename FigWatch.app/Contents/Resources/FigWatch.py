@@ -1530,6 +1530,10 @@ class FigWatch(NSObject):
         sp.setHasShadow_(True)
         sp.setOpaque_(False)
         sp.setBackgroundColor_(NSColor.clearColor())
+        # Hide traffic light buttons
+        sp.standardWindowButton_(0).setHidden_(True)  # close
+        sp.standardWindowButton_(1).setHidden_(True)  # minimize
+        sp.standardWindowButton_(2).setHidden_(True)  # zoom
 
         # Frosted glass content view
         glass = NSVisualEffectView.alloc().initWithFrame_(sp.contentView().bounds())
@@ -1556,17 +1560,15 @@ class FigWatch(NSObject):
             "ux_popup": ux_popup,
         }
 
+        NSApp.activateIgnoringOtherApps_(True)
         sp.makeKeyAndOrderFront_(None)
-        NSApp.runModalForWindow_(sp)
 
     @objc.typedSelector(b"v@:@")
     def _dismissSettings_(self, sender):
-        NSApp.stopModal()
         self._settings_panel.orderOut_(None)
 
     @objc.typedSelector(b"v@:@")
     def _saveSettings_(self, sender):
-        NSApp.stopModal()
         self._settings_panel.orderOut_(None)
 
         ctrls = self._settings_controls
@@ -1613,7 +1615,6 @@ class FigWatch(NSObject):
     @objc.typedSelector(b"v@:@")
     def doAddTrigger_(self, sender):
         try:
-            NSApp.stopModal()
             self._settings_panel.orderOut_(None)
         except Exception:
             pass
@@ -1730,7 +1731,6 @@ class FigWatch(NSObject):
     @objc.typedSelector(b"v@:@")
     def doCheckUpdate_(self, sender):
         try:
-            NSApp.stopModal()
             self._settings_panel.orderOut_(None)
         except Exception:
             pass
