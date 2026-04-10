@@ -1373,9 +1373,7 @@ class FigWatch(NSObject):
             y += 30
 
         # ── Triggers ──────────────────────────────────────────
-        add_trig = _pill("Add Trigger\u2026", b"doAddTrigger:", width=110, height=22)
-        add_trig.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-        _section("Triggers", "bolt.fill", trailing_btn=add_trig)
+        _section("Triggers", "bolt.fill")
 
         trigger_config = self._state.get("trigger_config", [])
         intro_results = self._state.get("introspection_results", {})
@@ -1386,7 +1384,7 @@ class FigWatch(NSObject):
             builtin = skill_name.startswith("builtin:")
             display = f"{skill_name.replace('builtin:', '')} (built-in)" if builtin else os.path.basename(skill_name)
 
-            rh = 28  # row height
+            rh = 28
             row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, rh))
 
             intro = intro_results.get(skill_name)
@@ -1420,6 +1418,48 @@ class FigWatch(NSObject):
 
             acc.addSubview_(row)
             y += 28
+
+        # Inline add trigger fields
+        y += 4
+        add_lbl = _label("Add new trigger", size=11, color=NSColor.secondaryLabelColor())
+        add_lbl.setFrameOrigin_((0, y))
+        acc.addSubview_(add_lbl)
+        y += 16
+
+        # Keyword field + Skill dropdown on one row
+        kw_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, y, 80, 24))
+        kw_field.setPlaceholderString_("@keyword")
+        kw_field.setFont_(NSFont.monospacedSystemFontOfSize_weight_(12, NSFontWeightRegular))
+        acc.addSubview_(kw_field)
+
+        # Skill picker
+        from handlers.generic import _find_skills
+        available = _find_skills()
+        sk_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(88, y, SW - 88, 24), False)
+        sk_popup.setFont_(NSFont.systemFontOfSize_(11))
+        skill_paths = []
+        for s in available:
+            label = s["name"] + (" (built-in)" if s["builtin"] else "")
+            sk_popup.addItemWithTitle_(label)
+            skill_paths.append(s["path"])
+        sk_popup.addItemWithTitle_("Browse for file\u2026")
+        acc.addSubview_(sk_popup)
+        y += 28
+
+        # Add button
+        add_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, y, SW, 24))
+        add_btn.setTitle_("Add Trigger")
+        add_btn.setBezelStyle_(NSBezelStyleRecessed)
+        add_btn.setControlSize_(1)
+        add_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+        add_btn.setTarget_(self); add_btn.setAction_(b"doAddTriggerInline:")
+        acc.addSubview_(add_btn)
+        y += 28
+
+        # Store refs for the inline add handler
+        self._add_trigger_kw = kw_field
+        self._add_trigger_sk = sk_popup
+        self._add_trigger_paths = skill_paths
 
         # ── Connection ────────────────────────────────────────
         tok_hdr_btn = _pill("Change Token\u2026", b"doToken:", width=120, height=22)
@@ -1548,6 +1588,31 @@ class FigWatch(NSObject):
                     self._start_watcher(f, initial_delay=delay)
 
     # ── Trigger management ─────────────────────────────────────
+
+    @objc.typedSelector(b"v@:@")
+    def doAddTriggerInline_(self, sender):
+        """Add trigger from the inline fields in settings."""
+        keyword = self._add_trigger_kw.stringValue().strip()
+        sel = self._add_trigger_sk.indexOfSelectedItem()
+        paths = self._add_trigger_paths
+
+        if sel < len(paths):
+            skill_path = paths[sel]
+        else:
+            # "Browse for file..." selected
+            panel = NSOpenPanel.alloc().init()
+            panel.setCanChooseFiles_(True)
+            panel.setCanChooseDirectories_(False)
+            panel.setAllowedFileTypes_(["md"])
+            if panel.runModal() == NSModalResponseOK:
+                skill_path = panel.URLs()[0].path()
+            else:
+                return
+
+        if keyword:
+            self._commit_trigger(keyword, skill_path)
+            self._add_trigger_kw.setStringValue_("")
+            _post_notification("FigWatch", f"Trigger {keyword} added")
 
     @objc.typedSelector(b"v@:@")
     def doAddTrigger_(self, sender):
