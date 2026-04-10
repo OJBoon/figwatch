@@ -1307,8 +1307,14 @@ class FigWatch(NSObject):
     def doSettings_(self, sender):
         self._close_popover()
         NSApp.activateIgnoringOtherApps_(True)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Settings")
+        alert.setInformativeText_("")
+        alert.setIcon_(NSImage.alloc().initWithSize_(NSMakeSize(1, 1)))
+        alert.addButtonWithTitle_("Save")
+        alert.addButtonWithTitle_("Cancel")
 
-        SW = 300  # compact like Wi-Fi panel
+        SW = 340
         acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, SW, 700))
         y = 0
         config = _load_config()
@@ -1479,124 +1485,50 @@ class FigWatch(NSObject):
         acc.addSubview_(upd_btn)
         y += 34
 
-        # ── Save / Cancel ─────────────────────────────────────
-        y += 4
-        sep_btm = NSBox.alloc().initWithFrame_(NSMakeRect(0, y, SW, 1))
-        sep_btm.setBoxType_(2)
-        acc.addSubview_(sep_btm)
-        y += 10
-
-        btn_w = (SW - 8) // 2
-        cancel_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, y, btn_w, 28))
-        cancel_btn.setTitle_("Cancel")
-        cancel_btn.setBordered_(False)
-        cancel_btn.setWantsLayer_(True)
-        cancel_btn.layer().setBackgroundColor_(
-            NSColor.labelColor().colorWithAlphaComponent_(0.06).CGColor())
-        cancel_btn.layer().setCornerRadius_(6)
-        cancel_btn.setFont_(NSFont.systemFontOfSize_weight_(12, NSFontWeightMedium))
-        cancel_btn.setTarget_(self); cancel_btn.setAction_(b"_dismissSettings:")
-        acc.addSubview_(cancel_btn)
-
-        save_btn = NSButton.alloc().initWithFrame_(NSMakeRect(btn_w + 8, y, btn_w, 28))
-        save_btn.setTitle_("Save")
-        save_btn.setBordered_(False)
-        save_btn.setWantsLayer_(True)
-        save_btn.layer().setBackgroundColor_(NSColor.controlAccentColor().CGColor())
-        save_btn.layer().setCornerRadius_(6)
-        save_btn.setFont_(NSFont.systemFontOfSize_weight_(12, NSFontWeightMedium))
-        save_btn.setContentTintColor_(NSColor.whiteColor())
-        save_btn.setTarget_(self); save_btn.setAction_(b"_saveSettings:")
-        acc.addSubview_(save_btn)
-        y += 36
-
         acc.setFrameSize_(NSMakeSize(SW, y))
+        alert.setAccessoryView_(acc)
 
-        # Build settings panel (standalone window, no NSAlert)
-        pad = 16
-        panel_w = SW + pad * 2
-        panel_h = y + pad * 2
-        settings_panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, panel_w, panel_h),
-            NSWindowStyleMaskTitled | NSWindowStyleMaskClosable,
-            NSBackingStoreBuffered, False)
-        settings_panel.setTitle_("Settings")
-        settings_panel.setLevel_(NSFloatingWindowLevel)
+        if alert.runModal() == NSAlertFirstButtonReturn:
+            rmap = {0: "sonnet", 1: "opus", 2: "haiku"}
+            new_model = rmap.get(model_popup.indexOfSelectedItem(), "sonnet")
+            lrmap = {0: "en", 1: "cn"}
+            new_lang = lrmap.get(lang_popup.indexOfSelectedItem(), "en")
+            new_tone_workers = tone_popup.indexOfSelectedItem() + 1
+            new_ux_workers = ux_popup.indexOfSelectedItem() + 1
 
-        container = FlippedView.alloc().initWithFrame_(NSMakeRect(pad, 0, SW, y))
-        container.addSubview_(acc)
-        settings_panel.contentView().setFlipped_(False)
-        # Position content from top
-        cv = settings_panel.contentView()
-        cv_h = cv.frame().size.height
-        container.setFrameOrigin_(NSMakePoint(pad, cv_h - y - pad))
-        cv.addSubview_(container)
+            needs_restart = False
+            c = _load_config()
+            if new_model != self._state.get("model"):
+                self._state["model"] = new_model
+                c["aiModel"] = new_model
+                needs_restart = True
+            if new_lang != self._state.get("reply_lang"):
+                self._state["reply_lang"] = new_lang
+                c["replyLang"] = new_lang
+                needs_restart = True
+            if new_tone_workers != c.get("workersTone", 2) or new_ux_workers != c.get("workersUx", 1):
+                c["workersTone"] = new_tone_workers
+                c["workersUx"] = new_ux_workers
+                needs_restart = True
+            _save_config(c)
 
-        settings_panel.center()
-        self._settings_panel = settings_panel
-        self._settings_controls = {
-            "model_popup": model_popup,
-            "lang_popup": lang_popup,
-            "tone_popup": tone_popup,
-            "ux_popup": ux_popup,
-        }
-
-        settings_panel.makeKeyAndOrderFront_(None)
-        NSApp.runModalForWindow_(settings_panel)
-
-    @objc.typedSelector(b"v@:@")
-    def _dismissSettings_(self, sender):
-        NSApp.stopModal()
-        self._settings_panel.orderOut_(None)
-
-    @objc.typedSelector(b"v@:@")
-    def _saveSettings_(self, sender):
-        NSApp.stopModal()
-        self._settings_panel.orderOut_(None)
-
-        ctrls = self._settings_controls
-        rmap = {0: "sonnet", 1: "opus", 2: "haiku"}
-        new_model = rmap.get(ctrls["model_popup"].indexOfSelectedItem(), "sonnet")
-        lrmap = {0: "en", 1: "cn"}
-        new_lang = lrmap.get(ctrls["lang_popup"].indexOfSelectedItem(), "en")
-        new_tone_workers = ctrls["tone_popup"].indexOfSelectedItem() + 1
-        new_ux_workers = ctrls["ux_popup"].indexOfSelectedItem() + 1
-
-        needs_restart = False
-        c = _load_config()
-        if new_model != self._state.get("model"):
-            self._state["model"] = new_model
-            c["aiModel"] = new_model
-            needs_restart = True
-        if new_lang != self._state.get("reply_lang"):
-            self._state["reply_lang"] = new_lang
-            c["replyLang"] = new_lang
-            needs_restart = True
-        if new_tone_workers != c.get("workersTone", 2) or new_ux_workers != c.get("workersUx", 1):
-            c["workersTone"] = new_tone_workers
-            c["workersUx"] = new_ux_workers
-            needs_restart = True
-        _save_config(c)
-
-        if needs_restart and self._state.get("watchers"):
-            self._stop_all_watchers()
-            self._start_workers()
-            watched = self._state.get("watched", [])
-            n = len(watched)
-            for i, f in enumerate(watched):
-                delay = (30.0 / n) * i if n > 1 else 0
-                self._start_watcher(f, initial_delay=delay)
+            if needs_restart and self._state.get("watchers"):
+                self._stop_all_watchers()
+                self._start_workers()
+                watched = self._state.get("watched", [])
+                n = len(watched)
+                for i, f in enumerate(watched):
+                    delay = (30.0 / n) * i if n > 1 else 0
+                    self._start_watcher(f, initial_delay=delay)
 
     # ── Trigger management ─────────────────────────────────────
 
     @objc.typedSelector(b"v@:@")
     def doAddTrigger_(self, sender):
-        # Dismiss the settings panel first
-        try:
-            NSApp.stopModal()
-            self._settings_panel.orderOut_(None)
-        except Exception:
-            pass
+        win = sender.window()
+        if win:
+            NSApp.abortModal()
+            win.orderOut_(None)
 
         # Discover available skills for the dropdown
         from handlers.generic import _find_skills
@@ -1693,12 +1625,10 @@ class FigWatch(NSObject):
             self._save_trigger_config(tc)
             for w in self._state.get("watchers", {}).values():
                 w.reload_trigger_config(tc)
-            # Dismiss settings to reflect change
-            try:
-                NSApp.stopModal()
-                self._settings_panel.orderOut_(None)
-            except Exception:
-                pass
+            win = sender.window()
+            if win:
+                NSApp.abortModal()
+                win.orderOut_(None)
 
     def _save_trigger_config(self, trigger_config):
         """Write triggers key to config."""
@@ -1710,11 +1640,10 @@ class FigWatch(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def doCheckUpdate_(self, sender):
-        try:
-            NSApp.stopModal()
-            self._settings_panel.orderOut_(None)
-        except Exception:
-            pass
+        win = sender.window()
+        if win:
+            NSApp.abortModal()
+            win.orderOut_(None)
         threading.Thread(target=self._run_update_check, daemon=True).start()
 
     def _run_update_check(self):
