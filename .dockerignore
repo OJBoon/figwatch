@@ -1,0 +1,10 @@
+FigWatch.app/
+macos/
+*.egg-info/
+__pycache__/
+*.pyc
+.git/
+.env
+.env.*
+.DS_Store
+*.log
