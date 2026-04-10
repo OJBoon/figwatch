@@ -489,47 +489,46 @@ def build_onboarding_view(app, deps):
 
 
 def build_popover_view(app):
-    """Build the main popover — compact file list with SF symbol icons."""
+    """Build the main panel content — glass effect, file list, countdown."""
     cw = W - PAD * 2
-    y = PAD + 2
+    y = PAD + 4
 
     root = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 800))
     file_statuses = app._state.get("file_statuses", {})
     watched = app._state.get("watched", [])
 
     # ── Header ─────────────────────────────────────────────────
-    title = _label("FigWatch", size=14, weight=NSFontWeightBold)
+    title = _label("FigWatch", size=15, weight=NSFontWeightBold)
     title.setFrameOrigin_((PAD + 4, y))
     root.addSubview_(title)
 
     # Power button (top right)
-    quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 22, y, 20, 20))
+    quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 22, y + 1, 20, 20))
     quit_btn.setBordered_(False); quit_btn.setTitle_("")
     qi = _sf_symbol("power", size=12, color=NSColor.tertiaryLabelColor())
     if qi: quit_btn.setImage_(qi.image())
     quit_btn.setTarget_(app); quit_btn.setAction_(b"doPowerMenu:")
     root.addSubview_(quit_btn)
-    y += 20
+    y += 22
 
-    # Triggers subline
+    # Triggers explanation
     trigger_config = app._state.get("trigger_config", [])
-    triggers_str = " \u00B7 ".join(t.get("trigger", "") for t in trigger_config) if trigger_config else "@tone \u00B7 @ux"
-    subline = _label(triggers_str, size=11, color=NSColor.secondaryLabelColor())
+    triggers_str = ", ".join(t.get("trigger", "") for t in trigger_config) if trigger_config else "@tone, @ux"
+    subline = _label(f"Listening for {triggers_str} triggers", size=11, color=NSColor.secondaryLabelColor())
     subline.setFrameOrigin_((PAD + 4, y))
     root.addSubview_(subline)
-    y += 18
+    y += 20
 
     # ── Separator ──────────────────────────────────────────────
-    y += 4
     sep0 = NSBox.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 1))
     sep0.setBoxType_(2)
     root.addSubview_(sep0)
-    y += 8
+    y += 10
 
     # ── File list or empty state ───────────────────────────────
     if not watched:
-        no_files = _label("No Figma files detected.", size=12, color=NSColor.secondaryLabelColor())
-        no_files.setFrameOrigin_((PAD + 4, y + 2))
+        no_files = _label("No Figma files detected", size=12, color=NSColor.secondaryLabelColor())
+        no_files.setFrameOrigin_((PAD + 4, y))
         root.addSubview_(no_files)
         y += 20
 
@@ -539,7 +538,15 @@ def build_popover_view(app):
         y += 22
 
     else:
-        # Build file rows into a container (for optional scrolling)
+        # Section header
+        n = len(watched)
+        section_title = f"Watching {n} file{'s' if n != 1 else ''}"
+        sh = _label(section_title, size=11, weight=NSFontWeightMedium, color=NSColor.secondaryLabelColor())
+        sh.setFrameOrigin_((PAD + 4, y))
+        root.addSubview_(sh)
+        y += 20
+
+        # File rows
         list_y = 0
         list_container = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, cw + 4, 2000))
 
@@ -549,22 +556,22 @@ def build_popover_view(app):
             status = status_info.get("status", STATUS_LIVE)
 
             row = NSView.alloc().initWithFrame_(NSMakeRect(0, list_y, cw + 4, ROW_H))
+            vc = (ROW_H - 14) // 2  # vertical center offset
 
-            # Status dot / icon (left edge)
-            icon_y = (ROW_H - 14) // 2
+            # Status dot / icon
             if status == STATUS_LIVE:
                 dot = _label("\u25CF", size=8, color=NSColor.systemGreenColor())
-                dot.setFrameOrigin_((6, icon_y + 1))
+                dot.setFrameOrigin_((8, vc + 2))
                 row.addSubview_(dot)
             elif status == STATUS_REPLIED:
                 icon = _sf_symbol("checkmark.circle.fill", size=11, color=NSColor.systemGreenColor())
                 if icon:
-                    icon.setFrameOrigin_((3, icon_y))
+                    icon.setFrameOrigin_((4, vc))
                     row.addSubview_(icon)
             elif status == STATUS_PROCESSING:
                 icon = _sf_symbol("arrow.triangle.2.circlepath", size=11, color=NSColor.systemOrangeColor())
                 if icon:
-                    icon.setFrameOrigin_((3, icon_y))
+                    icon.setFrameOrigin_((4, vc))
                     icon.setWantsLayer_(True)
                     spin = __import__('Quartz').CABasicAnimation.animationWithKeyPath_("transform.rotation.z")
                     spin.setFromValue_(0)
@@ -576,24 +583,16 @@ def build_popover_view(app):
             elif status == STATUS_DETECTED:
                 icon = _sf_symbol("bolt.fill", size=11, color=NSColor.systemOrangeColor())
                 if icon:
-                    icon.setFrameOrigin_((3, icon_y))
+                    icon.setFrameOrigin_((4, vc))
                     row.addSubview_(icon)
             elif status == STATUS_ERROR:
                 icon = _sf_symbol("exclamationmark.triangle.fill", size=11, color=NSColor.systemRedColor())
                 if icon:
-                    icon.setFrameOrigin_((3, icon_y))
+                    icon.setFrameOrigin_((4, vc))
                     row.addSubview_(icon)
 
-            # File type icon
-            file_icon_name = "scribble.variable" if not f.get("figjam") else "doc.plaintext"
-            file_icon_color = NSColor.secondaryLabelColor() if status == STATUS_LIVE else NSColor.labelColor()
-            fi = _sf_symbol(file_icon_name, size=11, color=file_icon_color)
-            if fi:
-                fi.setFrameOrigin_((20, icon_y))
-                row.addSubview_(fi)
-
             # File name
-            name_x = 38
+            name_x = 24
             has_badge = status in (STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR)
             badge_w = 96 if has_badge else 0
             name_y = (ROW_H - 16) // 2
@@ -656,7 +655,7 @@ def build_popover_view(app):
     sep = NSBox.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 1))
     sep.setBoxType_(2)
     root.addSubview_(sep)
-    y += 10
+    y += 8
 
     # Poll countdown
     poll_interval = 30
@@ -671,7 +670,6 @@ def build_popover_view(app):
     else:
         countdown_text = ""
 
-    # Footer row: countdown left, gear right — vertically centered in a 24px row
     footer_h = 24
     footer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, footer_h))
 
@@ -689,7 +687,7 @@ def build_popover_view(app):
     footer.addSubview_(gear)
 
     root.addSubview_(footer)
-    y += footer_h + PAD
+    y += footer_h + PAD - 2
 
     root.setFrameSize_(NSMakeSize(W, y))
     return root, y
@@ -744,7 +742,7 @@ class FigWatch(NSObject):
         self._set_icon(False)
         btn.setTarget_(self); btn.setAction_(b"toggle:")
 
-        # Floating panel instead of NSPopover (no arrow, full control)
+        # Floating panel with frosted glass effect
         self._panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, W, 400),
             NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
@@ -754,13 +752,17 @@ class FigWatch(NSObject):
         self._panel.setHasShadow_(True)
         self._panel.setOpaque_(False)
         self._panel.setBackgroundColor_(NSColor.clearColor())
-        # Rounded corners via layer
+        # Frosted glass background via NSVisualEffectView
         content = self._panel.contentView()
         content.setWantsLayer_(True)
-        content.layer().setCornerRadius_(10)
+        content.layer().setCornerRadius_(12)
         content.layer().setMasksToBounds_(True)
-        content.layer().setBackgroundColor_(
-            NSColor.windowBackgroundColor().CGColor())
+        glass = NSVisualEffectView.alloc().initWithFrame_(content.bounds())
+        glass.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+        glass.setMaterial_(6)  # NSVisualEffectMaterialMenu
+        glass.setState_(1)    # NSVisualEffectStateActive (always vibrant)
+        glass.setBlendingMode_(0)  # behindWindow
+        content.addSubview_positioned_relativeTo_(glass, -1, None)  # NSWindowBelow
 
         # Register as login item (macOS 13+ / Ventura)
         self._register_login_item()
