@@ -77,8 +77,7 @@ def _resolve_claude_path():
 
 W = 320
 PAD = 12
-ROW_H = 24
-ROW_H_ACTIVE = 40  # expanded row for processing/error states
+ROW_H = 26
 MAX_FILE_ROWS = 12  # scroll if more than this
 
 
@@ -492,65 +491,46 @@ def build_onboarding_view(app, deps):
 def build_popover_view(app):
     """Build the main popover — compact file list with SF symbol icons."""
     cw = W - PAD * 2
-    y = PAD
+    y = PAD + 2
 
     root = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 800))
     file_statuses = app._state.get("file_statuses", {})
     watched = app._state.get("watched", [])
 
     # ── Header ─────────────────────────────────────────────────
-    title = _label("FigWatch", size=13, weight=NSFontWeightSemibold)
+    title = _label("FigWatch", size=14, weight=NSFontWeightBold)
     title.setFrameOrigin_((PAD + 4, y))
     root.addSubview_(title)
+    y += 20
 
-    # Quit button (power icon)
-    quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 52, y - 1, 22, 22))
-    quit_btn.setBordered_(False); quit_btn.setTitle_("")
-    qi = _sf_symbol("power", size=11, color=NSColor.tertiaryLabelColor())
-    if qi: quit_btn.setImage_(qi.image())
-    quit_btn.setTarget_(app); quit_btn.setAction_(b"doQuit:")
-    root.addSubview_(quit_btn)
-
-    # Gear button
-    gear = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 26, y - 1, 22, 22))
-    gear.setBordered_(False); gear.setTitle_("")
-    gi = _sf_symbol("gearshape.fill", size=11, color=NSColor.tertiaryLabelColor())
-    if gi: gear.setImage_(gi.image())
-    gear.setTarget_(app); gear.setAction_(b"doSettings:")
-    root.addSubview_(gear)
-    y += 18
-
-    # Subline: triggers + locale
+    # Triggers subline
     trigger_config = app._state.get("trigger_config", [])
     triggers_str = " \u00B7 ".join(t.get("trigger", "") for t in trigger_config) if trigger_config else "@tone \u00B7 @ux"
-    subline = _label(triggers_str, size=10, color=NSColor.tertiaryLabelColor())
+    subline = _label(triggers_str, size=11, color=NSColor.secondaryLabelColor())
     subline.setFrameOrigin_((PAD + 4, y))
     root.addSubview_(subline)
-    y += 16
+    y += 18
 
     # ── Separator ──────────────────────────────────────────────
-    y += 2
+    y += 4
     sep0 = NSBox.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 1))
     sep0.setBoxType_(2)
     root.addSubview_(sep0)
-    y += 6
+    y += 8
 
     # ── File list or empty state ───────────────────────────────
     if not watched:
-        no_files = _label("No Figma files detected.", size=11, color=NSColor.secondaryLabelColor())
+        no_files = _label("No Figma files detected.", size=12, color=NSColor.secondaryLabelColor())
         no_files.setFrameOrigin_((PAD + 4, y + 2))
         root.addSubview_(no_files)
-        y += 18
-
-        hint = _label("Open a file in Figma Desktop to start watching.", size=10, color=NSColor.tertiaryLabelColor())
-        hint.setFrameOrigin_((PAD + 4, y))
-        root.addSubview_(hint)
         y += 20
 
-    else:
-        # Count non-live statuses for the summary
-        active_count = sum(1 for s in file_statuses.values() if s.get("status") not in (STATUS_LIVE, None))
+        hint = _label("Open a file in Figma Desktop to start watching.", size=11, color=NSColor.tertiaryLabelColor())
+        hint.setFrameOrigin_((PAD + 4, y))
+        root.addSubview_(hint)
+        y += 22
 
+    else:
         # Build file rows into a container (for optional scrolling)
         list_y = 0
         list_container = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, cw + 4, 2000))
@@ -562,22 +542,22 @@ def build_popover_view(app):
 
             row = NSView.alloc().initWithFrame_(NSMakeRect(0, list_y, cw + 4, ROW_H))
 
-            # Status dot / icon (left edge, fixed position)
+            # Status dot / icon (left edge)
+            icon_y = (ROW_H - 14) // 2
             if status == STATUS_LIVE:
-                dot = _label("\u25CF", size=7, color=NSColor.systemGreenColor())
-                dot.setFrameOrigin_((6, 6))
+                dot = _label("\u25CF", size=8, color=NSColor.systemGreenColor())
+                dot.setFrameOrigin_((6, icon_y + 1))
                 row.addSubview_(dot)
             elif status == STATUS_REPLIED:
-                icon = _sf_symbol("checkmark.circle.fill", size=10, color=NSColor.systemGreenColor())
+                icon = _sf_symbol("checkmark.circle.fill", size=11, color=NSColor.systemGreenColor())
                 if icon:
-                    icon.setFrameOrigin_((3, 4))
+                    icon.setFrameOrigin_((3, icon_y))
                     row.addSubview_(icon)
             elif status == STATUS_PROCESSING:
-                icon = _sf_symbol("arrow.triangle.2.circlepath", size=10, color=NSColor.systemOrangeColor())
+                icon = _sf_symbol("arrow.triangle.2.circlepath", size=11, color=NSColor.systemOrangeColor())
                 if icon:
-                    icon.setFrameOrigin_((3, 4))
+                    icon.setFrameOrigin_((3, icon_y))
                     icon.setWantsLayer_(True)
-                    # Spin animation
                     spin = __import__('Quartz').CABasicAnimation.animationWithKeyPath_("transform.rotation.z")
                     spin.setFromValue_(0)
                     spin.setToValue_(-6.28318)
@@ -586,55 +566,56 @@ def build_popover_view(app):
                     icon.layer().addAnimation_forKey_(spin, "spin")
                     row.addSubview_(icon)
             elif status == STATUS_DETECTED:
-                icon = _sf_symbol("bolt.fill", size=10, color=NSColor.systemOrangeColor())
+                icon = _sf_symbol("bolt.fill", size=11, color=NSColor.systemOrangeColor())
                 if icon:
-                    icon.setFrameOrigin_((3, 4))
+                    icon.setFrameOrigin_((3, icon_y))
                     row.addSubview_(icon)
             elif status == STATUS_ERROR:
-                icon = _sf_symbol("exclamationmark.triangle.fill", size=10, color=NSColor.systemRedColor())
+                icon = _sf_symbol("exclamationmark.triangle.fill", size=11, color=NSColor.systemRedColor())
                 if icon:
-                    icon.setFrameOrigin_((3, 4))
+                    icon.setFrameOrigin_((3, icon_y))
                     row.addSubview_(icon)
 
             # File type icon
             file_icon_name = "scribble.variable" if not f.get("figjam") else "doc.plaintext"
             file_icon_color = NSColor.secondaryLabelColor() if status == STATUS_LIVE else NSColor.labelColor()
-            fi = _sf_symbol(file_icon_name, size=10, color=file_icon_color)
+            fi = _sf_symbol(file_icon_name, size=11, color=file_icon_color)
             if fi:
-                fi.setFrameOrigin_((18, 4))
+                fi.setFrameOrigin_((20, icon_y))
                 row.addSubview_(fi)
 
-            # File name — truncated shorter when there's a right-side status badge
-            name_x = 36
+            # File name
+            name_x = 38
             has_badge = status in (STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR)
-            badge_w = 90 if has_badge else 0
-            nl = _label(f["name"], size=11)
-            nl.setFrameSize_(NSMakeSize(cw - name_x - badge_w, 14))
-            nl.setFrameOrigin_((name_x, 5))
+            badge_w = 96 if has_badge else 0
+            name_y = (ROW_H - 16) // 2
+            nl = _label(f["name"], size=12)
+            nl.setFrameSize_(NSMakeSize(cw - name_x - badge_w, 16))
+            nl.setFrameOrigin_((name_x, name_y))
             nl.cell().setLineBreakMode_(5)
             row.addSubview_(nl)
 
-            # Right-aligned inline status badge for non-live states
+            # Right-aligned inline status badge
             if status == STATUS_PROCESSING:
                 trigger = status_info.get("trigger", "")
                 user = status_info.get("user", "")
                 badge_text = f"{trigger} \u00B7 {user}" if user else trigger
-                badge = _label(badge_text, size=9, color=NSColor.systemOrangeColor())
+                badge = _label(badge_text, size=10, color=NSColor.systemOrangeColor())
                 badge.sizeToFit()
-                bw = min(badge.frame().size.width, 86)
-                badge.setFrameSize_(NSMakeSize(bw, 12))
-                badge.setFrameOrigin_((cw - bw, 6))
+                bw = min(badge.frame().size.width, 92)
+                badge.setFrameSize_(NSMakeSize(bw, 14))
+                badge.setFrameOrigin_((cw - bw, name_y + 1))
                 badge.cell().setLineBreakMode_(5)
                 row.addSubview_(badge)
             elif status == STATUS_REPLIED:
-                badge = _label("\u2713 replied", size=9, color=NSColor.secondaryLabelColor())
+                badge = _label("\u2713 replied", size=10, color=NSColor.secondaryLabelColor())
                 badge.sizeToFit()
-                badge.setFrameOrigin_((cw - badge.frame().size.width, 6))
+                badge.setFrameOrigin_((cw - badge.frame().size.width, name_y + 1))
                 row.addSubview_(badge)
             elif status == STATUS_ERROR:
-                badge = _label("\u26A0 error", size=9, color=NSColor.systemRedColor())
+                badge = _label("\u26A0 error", size=10, color=NSColor.systemRedColor())
                 badge.sizeToFit()
-                badge.setFrameOrigin_((cw - badge.frame().size.width, 6))
+                badge.setFrameOrigin_((cw - badge.frame().size.width, name_y + 1))
                 row.addSubview_(badge)
                 err_btn = HoverRow.alloc().initWithFrame_(NSMakeRect(0, 0, cw + 4, ROW_H))
                 err_btn.setTag_(i)
@@ -646,7 +627,6 @@ def build_popover_view(app):
 
         list_container.setFrameSize_(NSMakeSize(cw + 4, list_y))
 
-        # Wrap in scroll view if too many rows
         max_list_h = MAX_FILE_ROWS * ROW_H
         visible_h = min(list_y, max_list_h)
 
@@ -664,11 +644,11 @@ def build_popover_view(app):
         y += visible_h
 
     # ── Footer ─────────────────────────────────────────────────
-    y += 4
+    y += 6
     sep = NSBox.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 1))
     sep.setBoxType_(2)
     root.addSubview_(sep)
-    y += 6
+    y += 8
 
     # Poll countdown
     poll_interval = 30
@@ -683,16 +663,28 @@ def build_popover_view(app):
     else:
         countdown_text = ""
 
-    # Always create the countdown label (so it can be updated in-place)
-    ct = _label(countdown_text or " ", size=9, color=NSColor.tertiaryLabelColor())
+    ct = _label(countdown_text or " ", size=11, color=NSColor.tertiaryLabelColor())
     ct.setFrameOrigin_((PAD + 4, y))
-    ct.setFrameSize_(NSMakeSize(cw, 12))
+    ct.setFrameSize_(NSMakeSize(cw - 60, 14))
     root.addSubview_(ct)
     app._state["_countdown_label"] = ct
-    if countdown_text:
-        y += 14
 
-    y += PAD - 4
+    # Settings + Quit in footer (right-aligned)
+    gear = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 46, y - 2, 20, 20))
+    gear.setBordered_(False); gear.setTitle_("")
+    gi = _sf_symbol("gearshape.fill", size=12, color=NSColor.tertiaryLabelColor())
+    if gi: gear.setImage_(gi.image())
+    gear.setTarget_(app); gear.setAction_(b"doSettings:")
+    root.addSubview_(gear)
+
+    quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 22, y - 2, 20, 20))
+    quit_btn.setBordered_(False); quit_btn.setTitle_("")
+    qi = _sf_symbol("power", size=12, color=NSColor.tertiaryLabelColor())
+    if qi: quit_btn.setImage_(qi.image())
+    quit_btn.setTarget_(app); quit_btn.setAction_(b"doQuit:")
+    root.addSubview_(quit_btn)
+
+    y += 18 + PAD
 
     root.setFrameSize_(NSMakeSize(W, y))
     return root, y
