@@ -1313,183 +1313,206 @@ class FigWatch(NSObject):
         alert.addButtonWithTitle_("Save")
         alert.addButtonWithTitle_("Cancel")
 
-        acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 340, 380))
+        SW = 380  # settings width
+        acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, SW, 600))
+        y = 0
+        config = _load_config()
 
-        # ── Figma Token ──
-        tok_label = _label("Figma Personal Access Token", size=12, weight=NSFontWeightMedium)
-        tok_label.setFrameOrigin_((0, 0))
-        acc.addSubview_(tok_label)
+        def _section_header(title, icon_name=None):
+            nonlocal y
+            if y > 0:
+                y += 6
+                sep = NSBox.alloc().initWithFrame_(NSMakeRect(0, y, SW, 1))
+                sep.setBoxType_(2)
+                acc.addSubview_(sep)
+                y += 12
+            h = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 16))
+            if icon_name:
+                icon = _sf_symbol(icon_name, size=11, color=NSColor.secondaryLabelColor())
+                if icon:
+                    icon.setFrameOrigin_((0, 0))
+                    h.addSubview_(icon)
+            lbl = _label(title.upper(), size=10, weight=NSFontWeightSemibold,
+                         color=NSColor.secondaryLabelColor())
+            lbl.setFrameOrigin_((18 if icon_name else 0, 1))
+            h.addSubview_(lbl)
+            acc.addSubview_(h)
+            y += 22
 
-        tok_input = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 22, 340, 24))
-        tok_input.setPlaceholderString_("figd_...")
-        if self._state["pat"]:
-            tok_input.setStringValue_(self._state["pat"])
-        acc.addSubview_(tok_input)
+        def _setting_row(label_text, control, hint_text=None):
+            nonlocal y
+            lbl = _label(label_text, size=12)
+            lbl.setFrameOrigin_((0, y + 2))
+            acc.addSubview_(lbl)
+            control.setFrameOrigin_((SW - control.frame().size.width, y))
+            acc.addSubview_(control)
+            y += 28
+            if hint_text:
+                ht = _label(hint_text, size=10, color=NSColor.tertiaryLabelColor())
+                ht.setFrameOrigin_((0, y - 6))
+                acc.addSubview_(ht)
+                y += 12
 
-        tok_hint = _label("Figma \u2192 Settings \u2192 Security \u2192 Personal Access Tokens",
-                          size=10, color=NSColor.tertiaryLabelColor())
-        tok_hint.setFrameOrigin_((0, 50))
-        acc.addSubview_(tok_hint)
-
-        # ── AI Model ──
-        model_label = _label("AI Model", size=12, weight=NSFontWeightMedium)
-        model_label.setFrameOrigin_((0, 74))
-        acc.addSubview_(model_label)
-
-        model_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 96, 200, 24), False)
-        model_popup.addItemWithTitle_("Sonnet (fast, cost-effective)")
-        model_popup.addItemWithTitle_("Opus (most capable)")
-        model_popup.addItemWithTitle_("Haiku (fastest, cheapest)")
-        model_map = {"sonnet": 0, "opus": 1, "haiku": 2}
-        model_popup.selectItemAtIndex_(model_map.get(self._state.get("model", "sonnet"), 0))
-        acc.addSubview_(model_popup)
-
-        # ── Reply Language ──
-        lang_label = _label("Reply Language", size=12, weight=NSFontWeightMedium)
-        lang_label.setFrameOrigin_((0, 128))
-        acc.addSubview_(lang_label)
-
-        lang_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 150, 200, 24), False)
-        lang_popup.addItemWithTitle_("English")
-        lang_popup.addItemWithTitle_("\u4e2d\u6587 (Chinese)")
-        lang_map = {"en": 0, "cn": 1}
-        lang_popup.selectItemAtIndex_(lang_map.get(self._state.get("reply_lang", "en"), 0))
-        acc.addSubview_(lang_popup)
-
-        # ── Triggers ──
-        trig_y = 184
-        trig_label = _label("Triggers", size=12, weight=NSFontWeightMedium)
-        trig_label.setFrameOrigin_((0, trig_y))
-        acc.addSubview_(trig_label)
-
-        add_trig_btn = NSButton.alloc().initWithFrame_(NSMakeRect(280, trig_y - 2, 60, 20))
-        add_trig_btn.setTitle_("+ Add")
-        add_trig_btn.setBordered_(False)
-        add_trig_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-        add_trig_btn.setContentTintColor_(NSColor.controlAccentColor())
-        add_trig_btn.setTarget_(self); add_trig_btn.setAction_(b"doAddTrigger:")
-        acc.addSubview_(add_trig_btn)
-
-        trig_y += 22
-        sep = NSBox.alloc().initWithFrame_(NSMakeRect(0, trig_y, 340, 1))
-        sep.setBoxType_(2)
-        acc.addSubview_(sep)
-        trig_y += 6
+        # ═══════════════════════════════════════════════════════════
+        # TRIGGERS (top priority)
+        # ═══════════════════════════════════════════════════════════
+        _section_header("Triggers", "bolt.fill")
 
         trigger_config = self._state.get("trigger_config", [])
         intro_results = self._state.get("introspection_results", {})
+
         for i, tc in enumerate(trigger_config):
             trigger_word = tc.get("trigger", "")
             skill_name = tc.get("skill", "")
             builtin = skill_name.startswith("builtin:")
             display = f"{skill_name.replace('builtin:', '')} (built-in)" if builtin else os.path.basename(skill_name)
 
-            tw = _label(trigger_word, size=12, weight=NSFontWeightMedium, mono=True)
-            tw.setFrameOrigin_((0, trig_y))
-            acc.addSubview_(tw)
+            row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 26))
+
+            # Compatibility icon (SF symbol)
+            intro = intro_results.get(skill_name)
+            is_ok = builtin or (intro and intro.get("comment_compatible"))
+            badge_icon = _sf_symbol("checkmark.circle.fill", size=12,
+                                    color=NSColor.systemGreenColor() if is_ok else NSColor.systemOrangeColor())
+            if badge_icon:
+                badge_icon.setFrameOrigin_((0, 4))
+                row.addSubview_(badge_icon)
+
+            tw = _label(trigger_word, size=13, weight=NSFontWeightMedium, mono=True)
+            tw.setFrameOrigin_((20, 4))
+            row.addSubview_(tw)
 
             sn = _label(display, size=11, color=NSColor.secondaryLabelColor())
-            sn.setFrameOrigin_((60, trig_y + 1))
-            acc.addSubview_(sn)
-
-            # Compatibility badge
-            intro = intro_results.get(skill_name)
-            if builtin:
-                badge = _label("\u2705", size=10)
-                badge.setFrameOrigin_((280, trig_y + 1))
-                acc.addSubview_(badge)
-            elif intro is not None:
-                if intro.get("comment_compatible"):
-                    badge = _label("\u2705", size=10)
-                else:
-                    reason = intro.get("incompatible_reason", "Not compatible")
-                    badge = _label("\u26A0\uFE0F", size=10)
-                    badge.setToolTip_(reason)
-                badge.setFrameOrigin_((280, trig_y + 1))
-                acc.addSubview_(badge)
+            sn.setFrameOrigin_((90, 6))
+            sn.setFrameSize_(NSMakeSize(SW - 120, 14))
+            sn.cell().setLineBreakMode_(5)
+            row.addSubview_(sn)
 
             if not builtin:
-                rm = NSButton.alloc().initWithFrame_(NSMakeRect(310, trig_y - 2, 24, 20))
-                rm.setBordered_(False); rm.setTitle_("\u2715")
-                rm.setFont_(NSFont.systemFontOfSize_(11))
-                rm.setContentTintColor_(NSColor.tertiaryLabelColor())
+                rm_icon = _sf_symbol("xmark.circle.fill", size=12, color=NSColor.tertiaryLabelColor())
+                rm = NSButton.alloc().initWithFrame_(NSMakeRect(SW - 24, 3, 20, 20))
+                rm.setBordered_(False); rm.setTitle_("")
+                if rm_icon: rm.setImage_(rm_icon.image())
                 rm.setTag_(i)
                 rm.setTarget_(self); rm.setAction_(b"doRemoveTrigger:")
-                acc.addSubview_(rm)
+                row.addSubview_(rm)
 
-            trig_y += 22
+            acc.addSubview_(row)
+            y += 28
 
-        # ── Worker count ──
-        trig_y += 8
-        workers_label = _label("Max concurrent workers", size=12, weight=NSFontWeightMedium)
-        workers_label.setFrameOrigin_((0, trig_y))
-        acc.addSubview_(workers_label)
-        trig_y += 22
+        # Add trigger button
+        add_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, y, SW, 26))
+        add_btn.setBordered_(False)
+        add_btn.setTitle_("")
+        add_icon = _sf_symbol("plus.circle.fill", size=12, color=NSColor.controlAccentColor())
+        add_row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 26))
+        if add_icon:
+            add_icon.setFrameOrigin_((0, 4))
+            add_row.addSubview_(add_icon)
+        add_lbl = _label("Add trigger", size=12, color=NSColor.controlAccentColor())
+        add_lbl.setFrameOrigin_((20, 5))
+        add_row.addSubview_(add_lbl)
+        # Make the whole row clickable
+        add_hit = HoverRow.alloc().initWithFrame_(NSMakeRect(0, 0, SW, 26))
+        add_hit.setTarget_(self); add_hit.setAction_(b"doAddTrigger:")
+        add_row.addSubview_(add_hit)
+        acc.addSubview_(add_row)
+        y += 30
 
-        tone_wl = _label("Tone:", size=11)
-        tone_wl.setFrameOrigin_((0, trig_y + 2))
-        acc.addSubview_(tone_wl)
+        # ═══════════════════════════════════════════════════════════
+        # FIGMA CONNECTION
+        # ═══════════════════════════════════════════════════════════
+        _section_header("Figma Connection", "link")
 
-        tone_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(40, trig_y, 50, 22), False)
-        tone_popup.setFont_(NSFont.systemFontOfSize_(11))
+        # Show connection status instead of raw token
+        user = self._state.get("user")
+        if user and self._state.get("pat"):
+            status_icon = _sf_symbol("checkmark.circle.fill", size=12, color=NSColor.systemGreenColor())
+            status_text = _label(f"Connected as {user}", size=12)
+        else:
+            status_icon = _sf_symbol("xmark.circle.fill", size=12, color=NSColor.systemRedColor())
+            status_text = _label("Not connected", size=12)
+
+        if status_icon:
+            status_icon.setFrameOrigin_((0, y + 3))
+            acc.addSubview_(status_icon)
+        status_text.setFrameOrigin_((20, y + 2))
+        acc.addSubview_(status_text)
+
+        # Change token button (right-aligned)
+        tok_btn = NSButton.alloc().initWithFrame_(NSMakeRect(SW - 100, y, 100, 22))
+        tok_btn.setTitle_("Change Token")
+        tok_btn.setBezelStyle_(NSBezelStyleRecessed)
+        tok_btn.setControlSize_(1)
+        tok_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+        tok_btn.setTarget_(self); tok_btn.setAction_(b"doToken:")
+        acc.addSubview_(tok_btn)
+        y += 28
+
+        # Hidden token field — stored for save logic but not shown
+        tok_input = NSTextField.alloc().initWithFrame_(NSMakeRect(0, -100, 0, 0))
+        if self._state.get("pat"):
+            tok_input.setStringValue_(self._state["pat"])
+        acc.addSubview_(tok_input)
+
+        # ═══════════════════════════════════════════════════════════
+        # AI MODEL
+        # ═══════════════════════════════════════════════════════════
+        _section_header("AI Model", "cpu")
+
+        model_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 180, 24), False)
+        model_popup.addItemWithTitle_("Sonnet (fast, recommended)")
+        model_popup.addItemWithTitle_("Opus (most capable)")
+        model_popup.addItemWithTitle_("Haiku (fastest, cheapest)")
+        model_map = {"sonnet": 0, "opus": 1, "haiku": 2}
+        model_popup.selectItemAtIndex_(model_map.get(self._state.get("model", "sonnet"), 0))
+        _setting_row("Model", model_popup)
+
+        lang_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 120, 24), False)
+        lang_popup.addItemWithTitle_("English")
+        lang_popup.addItemWithTitle_("\u4e2d\u6587 (Chinese)")
+        lang_map = {"en": 0, "cn": 1}
+        lang_popup.selectItemAtIndex_(lang_map.get(self._state.get("reply_lang", "en"), 0))
+        _setting_row("Reply language", lang_popup)
+
+        # ═══════════════════════════════════════════════════════════
+        # ADVANCED
+        # ═══════════════════════════════════════════════════════════
+        _section_header("Advanced", "slider.horizontal.3")
+
+        tone_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 60, 24), False)
         for n in range(1, 6): tone_popup.addItemWithTitle_(str(n))
-        config = _load_config()
         tone_popup.selectItemAtIndex_(config.get("workersTone", 2) - 1)
-        acc.addSubview_(tone_popup)
+        _setting_row("Tone workers", tone_popup, "Concurrent @tone audits")
 
-        ux_wl = _label("UX:", size=11)
-        ux_wl.setFrameOrigin_((110, trig_y + 2))
-        acc.addSubview_(ux_wl)
-
-        ux_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(140, trig_y, 50, 22), False)
-        ux_popup.setFont_(NSFont.systemFontOfSize_(11))
+        ux_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 60, 24), False)
         for n in range(1, 6): ux_popup.addItemWithTitle_(str(n))
         ux_popup.selectItemAtIndex_(config.get("workersUx", 1) - 1)
-        acc.addSubview_(ux_popup)
+        _setting_row("UX workers", ux_popup, "Concurrent @ux audits")
 
-        trig_y += 30
+        # ═══════════════════════════════════════════════════════════
+        # ABOUT
+        # ═══════════════════════════════════════════════════════════
+        _section_header("About", "info.circle")
 
-        # ── Version / Updates ──
-        ver_label = _label(f"FigWatch v{VERSION}", size=11,
-                           color=NSColor.tertiaryLabelColor())
-        ver_label.setFrameOrigin_((0, trig_y))
-        acc.addSubview_(ver_label)
+        ver = _label(f"FigWatch v{VERSION}", size=12, color=NSColor.secondaryLabelColor())
+        ver.setFrameOrigin_((0, y + 2))
+        acc.addSubview_(ver)
 
-        upd_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, trig_y - 4, 140, 24))
+        upd_btn = NSButton.alloc().initWithFrame_(NSMakeRect(SW - 130, y, 130, 22))
         upd_btn.setTitle_("Check for Updates")
-        upd_btn.setBordered_(False)
-        upd_btn.setWantsLayer_(True)
-        upd_btn.layer().setBackgroundColor_(
-            NSColor.labelColor().colorWithAlphaComponent_(0.08).CGColor())
-        upd_btn.layer().setCornerRadius_(12)
+        upd_btn.setBezelStyle_(NSBezelStyleRecessed)
+        upd_btn.setControlSize_(1)
         upd_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
         upd_btn.setTarget_(self); upd_btn.setAction_(b"doCheckUpdate:")
-        upd_btn.sizeToFit()
-        ubf = upd_btn.frame()
-        upd_btn.setFrameSize_(NSMakeSize(ubf.size.width + 20, 24))
-        upd_btn.setFrameOrigin_((340 - upd_btn.frame().size.width, trig_y - 4))
         acc.addSubview_(upd_btn)
-        trig_y += 28
+        y += 28
 
-        acc.setFrameSize_(NSMakeSize(340, trig_y))
+        # Finalize
+        acc.setFrameSize_(NSMakeSize(SW, y))
         alert.setAccessoryView_(acc)
-        alert.window().setInitialFirstResponder_(tok_input)
 
         if alert.runModal() == NSAlertFirstButtonReturn:
-            # Save token
-            tok = tok_input.stringValue().strip()
-            if tok and tok != self._state.get("pat"):
-                def validate():
-                    name = _validate_token(tok)
-                    if name:
-                        self._state["pat"] = tok
-                        self._state["user"] = name
-                        c = _load_config(); c["figmaPat"] = tok; _save_config(c)
-                        _post_notification("FigWatch", f"Connected as {name}")
-                    else:
-                        _post_notification("FigWatch", "Invalid token \u2014 please check and try again.")
-                threading.Thread(target=validate, daemon=True).start()
-
             # Save model
             rmap = {0: "sonnet", 1: "opus", 2: "haiku"}
             new_model = rmap.get(model_popup.indexOfSelectedItem(), "sonnet")
@@ -1502,7 +1525,6 @@ class FigWatch(NSObject):
             new_tone_workers = tone_popup.indexOfSelectedItem() + 1
             new_ux_workers = ux_popup.indexOfSelectedItem() + 1
 
-            # Single config read, batch all changes, single write
             needs_restart = False
             c = _load_config()
             if new_model != self._state.get("model"):
