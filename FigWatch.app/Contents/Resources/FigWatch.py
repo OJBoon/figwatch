@@ -1372,6 +1372,12 @@ class FigWatch(NSObject):
             acc.addSubview_(control)
             y += 30
 
+        # ── Title ─────────────────────────────────────────────
+        stitle = _label("FigWatch Settings", size=16, weight=NSFontWeightBold)
+        stitle.setFrameOrigin_((0, y))
+        acc.addSubview_(stitle)
+        y += 30
+
         # ── Triggers ──────────────────────────────────────────
         add_trig = _pill("Add Trigger\u2026", b"doAddTrigger:", width=110, height=22)
         add_trig.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
@@ -1494,7 +1500,7 @@ class FigWatch(NSObject):
 
         # Use NSAlert for reliable button handling
         alert = NSAlert.alloc().init()
-        alert.setMessageText_("FigWatch Settings")
+        alert.setMessageText_("")
         alert.setInformativeText_("")
         alert.setIcon_(NSImage.alloc().initWithSize_(NSMakeSize(1, 1)))
         alert.addButtonWithTitle_("Save")
