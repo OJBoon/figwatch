@@ -1309,59 +1309,61 @@ class FigWatch(NSObject):
         NSApp.activateIgnoringOtherApps_(True)
 
         SW = 300
-        PAD_S = 16
-        acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, SW, 700))
+        PAD_S = 20
+        acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, SW, 800))
         y = 0
         config = _load_config()
 
-        def _pill_button(title, action, width=SW):
-            """Create a pill-shaped button matching Cancel/Save style."""
-            btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, width, 28))
+        def _pill(title, action, width=SW, height=28):
+            btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
             btn.setTitle_(title)
             btn.setBordered_(False)
             btn.setWantsLayer_(True)
             btn.layer().setBackgroundColor_(
                 NSColor.labelColor().colorWithAlphaComponent_(0.06).CGColor())
-            btn.layer().setCornerRadius_(6)
+            btn.layer().setCornerRadius_(height // 2)
             btn.setFont_(NSFont.systemFontOfSize_weight_(12, NSFontWeightMedium))
             btn.setTarget_(self); btn.setAction_(action)
             return btn
 
+        def _sep():
+            nonlocal y
+            y += 10
+            s = NSBox.alloc().initWithFrame_(NSMakeRect(0, y, SW, 1))
+            s.setBoxType_(2)
+            acc.addSubview_(s)
+            y += 14
+
         def _section(title, icon_name):
             nonlocal y
             if y > 0:
-                y += 6
-                sep = NSBox.alloc().initWithFrame_(NSMakeRect(0, y, SW, 1))
-                sep.setBoxType_(2)
-                acc.addSubview_(sep)
-                y += 10
+                _sep()
             h = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 18))
             icon = _sf_symbol(icon_name, size=12, color=NSColor.secondaryLabelColor())
             if icon:
                 icon.setFrameOrigin_((0, 1))
                 h.addSubview_(icon)
-            lbl = _label(title, size=13, weight=NSFontWeightSemibold)
+            lbl = _label(title, size=12, weight=NSFontWeightSemibold)
             lbl.setFrameOrigin_((20, 0))
             h.addSubview_(lbl)
             acc.addSubview_(h)
-            y += 22
+            y += 24
 
-        def _row_inline(label_text, control):
-            """Label on the left, control on the right, same line."""
+        def _row(label_text, control):
             nonlocal y
-            lbl = _label(label_text, size=12)
+            lbl = _label(label_text, size=13)
             lbl.setFrameOrigin_((0, y + 3))
             acc.addSubview_(lbl)
             cf = control.frame()
             control.setFrameOrigin_((SW - cf.size.width, y))
             acc.addSubview_(control)
-            y += 28
+            y += 30
 
-        # ── Title ──────────────────────────────────────────────
-        stitle = _label("Settings", size=16, weight=NSFontWeightBold)
+        # ── Title ─────────────────────────────────────────────
+        stitle = _label("FigWatch Settings", size=15, weight=NSFontWeightBold)
         stitle.setFrameOrigin_((0, y))
         acc.addSubview_(stitle)
-        y += 26
+        y += 28
 
         # ── Triggers ──────────────────────────────────────────
         _section("Triggers", "bolt.fill")
@@ -1377,7 +1379,6 @@ class FigWatch(NSObject):
 
             row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 28))
 
-            # Checkmark SF symbol
             intro = intro_results.get(skill_name)
             is_ok = builtin or (intro and intro.get("comment_compatible"))
             ck = _sf_symbol("checkmark.circle.fill" if is_ok else "exclamationmark.circle.fill",
@@ -1390,9 +1391,9 @@ class FigWatch(NSObject):
             tw.setFrameOrigin_((20, 5))
             row.addSubview_(tw)
 
-            sn = _label(display, size=12, color=NSColor.secondaryLabelColor())
-            sn.setFrameOrigin_((100, 5))
-            sn.setFrameSize_(NSMakeSize(SW - 130, 16))
+            sn = _label(display, size=11, color=NSColor.secondaryLabelColor())
+            sn.setFrameOrigin_((100, 7))
+            sn.setFrameSize_(NSMakeSize(SW - 130, 14))
             sn.cell().setLineBreakMode_(5)
             row.addSubview_(sn)
 
@@ -1406,12 +1407,12 @@ class FigWatch(NSObject):
                 row.addSubview_(rm)
 
             acc.addSubview_(row)
-            y += 26
+            y += 28
 
-        add_btn = _pill_button("Add Trigger\u2026", b"doAddTrigger:")
+        add_btn = _pill("Add Trigger\u2026", b"doAddTrigger:")
         add_btn.setFrameOrigin_((0, y))
         acc.addSubview_(add_btn)
-        y += 30
+        y += 32
 
         # ── Connection ────────────────────────────────────────
         _section("Connection", "link")
@@ -1424,22 +1425,22 @@ class FigWatch(NSObject):
             conn_icon = _sf_symbol("xmark.circle", size=12, color=NSColor.secondaryLabelColor())
             conn_text = "Not connected"
 
-        conn_row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 16))
+        conn_row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 18))
         if conn_icon:
-            conn_icon.setFrameOrigin_((0, 0))
+            conn_icon.setFrameOrigin_((0, 1))
             conn_row.addSubview_(conn_icon)
-        conn_lbl = _label(conn_text, size=12)
-        conn_lbl.setFrameOrigin_((20, -1))
+        conn_lbl = _label(conn_text, size=13)
+        conn_lbl.setFrameOrigin_((20, 0))
         conn_row.addSubview_(conn_lbl)
         acc.addSubview_(conn_row)
-        y += 22
+        y += 24
 
-        tok_btn = _pill_button("Change Token\u2026", b"doToken:")
+        tok_btn = _pill("Change Token\u2026", b"doToken:")
         tok_btn.setFrameOrigin_((0, y))
         acc.addSubview_(tok_btn)
-        y += 30
+        y += 32
 
-        # Hidden token field for save logic
+        # Hidden token field
         tok_input = NSTextField.alloc().initWithFrame_(NSMakeRect(0, -100, 0, 0))
         if self._state.get("pat"):
             tok_input.setStringValue_(self._state["pat"])
@@ -1454,68 +1455,69 @@ class FigWatch(NSObject):
         model_popup.addItemWithTitle_("Haiku (cheapest)")
         model_map = {"sonnet": 0, "opus": 1, "haiku": 2}
         model_popup.selectItemAtIndex_(model_map.get(self._state.get("model", "sonnet"), 0))
-        _row_inline("Model", model_popup)
+        _row("Model", model_popup)
 
         lang_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 180, 24), False)
         lang_popup.addItemWithTitle_("English")
         lang_popup.addItemWithTitle_("\u4e2d\u6587 (Chinese)")
         lang_map = {"en": 0, "cn": 1}
         lang_popup.selectItemAtIndex_(lang_map.get(self._state.get("reply_lang", "en"), 0))
-        _row_inline("Reply language", lang_popup)
+        _row("Reply language", lang_popup)
 
         tone_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 80, 24), False)
         for n in range(1, 6): tone_popup.addItemWithTitle_(str(n))
         tone_popup.selectItemAtIndex_(config.get("workersTone", 2) - 1)
-        _row_inline("Tone workers", tone_popup)
+        _row("Tone workers", tone_popup)
 
         ux_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 80, 24), False)
         for n in range(1, 6): ux_popup.addItemWithTitle_(str(n))
         ux_popup.selectItemAtIndex_(config.get("workersUx", 1) - 1)
-        _row_inline("UX workers", ux_popup)
+        _row("UX workers", ux_popup)
 
         # ── About ─────────────────────────────────────────────
         _section("About", "info.circle")
 
-        ver = _label(f"FigWatch v{VERSION}", size=12, color=NSColor.secondaryLabelColor())
-        ver.setFrameOrigin_((0, y))
-        acc.addSubview_(ver)
-        y += 20
+        about_row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 22))
+        ver = _label(f"v{VERSION}", size=12, color=NSColor.secondaryLabelColor())
+        ver.setFrameOrigin_((0, 3))
+        about_row.addSubview_(ver)
 
-        upd_btn = _pill_button("Check for Updates\u2026", b"doCheckUpdate:")
-        upd_btn.setFrameOrigin_((0, y))
-        acc.addSubview_(upd_btn)
-        y += 30
+        upd_btn = _pill("Check for Updates", b"doCheckUpdate:", width=140, height=22)
+        upd_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+        upd_btn.setFrameOrigin_((SW - 140, 0))
+        about_row.addSubview_(upd_btn)
+        acc.addSubview_(about_row)
+        y += 28
 
         # ── Save / Cancel ─────────────────────────────────────
-        y += 4
-        sep_btm = NSBox.alloc().initWithFrame_(NSMakeRect(0, y, SW, 1))
-        sep_btm.setBoxType_(2)
-        acc.addSubview_(sep_btm)
-        y += 10
+        _sep()
 
-        btn_w = (SW - 8) // 2
-        cancel_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, y, btn_w, 30))
+        btn_w = (SW - 10) // 2
+        btn_h = 32
+        btn_r = btn_h // 2
+
+        cancel_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, y, btn_w, btn_h))
         cancel_btn.setTitle_("Cancel")
         cancel_btn.setBordered_(False)
         cancel_btn.setWantsLayer_(True)
         cancel_btn.layer().setBackgroundColor_(
             NSColor.labelColor().colorWithAlphaComponent_(0.06).CGColor())
-        cancel_btn.layer().setCornerRadius_(8)
+        cancel_btn.layer().setCornerRadius_(btn_r)
         cancel_btn.setFont_(NSFont.systemFontOfSize_weight_(13, NSFontWeightMedium))
         cancel_btn.setTarget_(self); cancel_btn.setAction_(b"_dismissSettings:")
         acc.addSubview_(cancel_btn)
 
-        save_btn = NSButton.alloc().initWithFrame_(NSMakeRect(btn_w + 8, y, btn_w, 30))
+        save_btn = NSButton.alloc().initWithFrame_(NSMakeRect(btn_w + 10, y, btn_w, btn_h))
         save_btn.setTitle_("Save")
         save_btn.setBordered_(False)
         save_btn.setWantsLayer_(True)
         save_btn.layer().setBackgroundColor_(NSColor.controlAccentColor().CGColor())
-        save_btn.layer().setCornerRadius_(8)
+        save_btn.layer().setCornerRadius_(btn_r)
         save_btn.setFont_(NSFont.systemFontOfSize_weight_(13, NSFontWeightMedium))
         save_btn.setContentTintColor_(NSColor.whiteColor())
         save_btn.setTarget_(self); save_btn.setAction_(b"_saveSettings:")
         acc.addSubview_(save_btn)
-        y += 32
+        y += btn_h + 2
 
         acc.setFrameSize_(NSMakeSize(SW, y))
 
