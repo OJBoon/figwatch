@@ -719,6 +719,9 @@ class FigWatch(NSObject):
     _state = {}
 
     def applicationDidFinishLaunching_(self, notif):
+        self._watcher_log_file = None
+        self._cached_menu_icon = None
+        self._tick_count = 0
         self._state = {
             "pat": None, "user": None, "locale": "uk",
             "model": "sonnet", "reply_lang": "en",
@@ -769,8 +772,6 @@ class FigWatch(NSObject):
             threading.Thread(target=self._app_init, daemon=True).start()
 
     # ── Logging ─────────────────────────────────────────────────
-
-    _watcher_log_file = None
 
     def _write_log(self, msg):
         """Write to the watcher log with a persistent file handle."""
@@ -1020,8 +1021,6 @@ class FigWatch(NSObject):
     def setIconActive_(self, active):
         self._set_icon(bool(active))
 
-    _cached_menu_icon = None
-
     def _set_icon(self, active):
         btn = self.statusItem.button()
         if self._cached_menu_icon is None:
@@ -1073,22 +1072,21 @@ class FigWatch(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def toggle_(self, sender):
-        if self._state.get("popover_open"):
-            self._close_popover()
-            return
-        self._state["popover_anchor"] = sender
-        self._state["popover_open"] = True
-        self._rebuild_popover(show=True)
-        # Remove any stale monitor before adding a new one
-        self._remove_event_monitor()
-        self._state["event_monitor"] = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
-            NSLeftMouseDownMask | NSRightMouseDownMask,
-            lambda event: self._close_popover()
-        )
-        # Start a repeating timer added to ALL run loop modes
-        # (NSTimer.scheduledTimer only uses defaultMode, which doesn't fire
-        # while a popover is in event-tracking mode)
-        self._start_refresh_timer()
+        try:
+            if self._state.get("popover_open"):
+                self._close_popover()
+                return
+            self._state["popover_anchor"] = sender
+            self._state["popover_open"] = True
+            self._rebuild_popover(show=True)
+            self._remove_event_monitor()
+            self._state["event_monitor"] = NSEvent.addGlobalMonitorForEventsMatchingMask_handler_(
+                NSLeftMouseDownMask | NSRightMouseDownMask,
+                lambda event: self._close_popover()
+            )
+            self._start_refresh_timer()
+        except Exception:
+            pass
 
     def _rebuild_popover(self, show=False):
         """Build (and optionally show) the popover with latest data."""
@@ -1107,27 +1105,21 @@ class FigWatch(NSObject):
                     pass
 
     def _start_refresh_timer(self):
-        """Create a timer and add it to the run loop in CommonModes
-        so it fires even while the popover is in event-tracking mode."""
-        self._stop_refresh_timer()
-        timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
-            1.0, self, b"_refreshTick:", None, True)
-        NSRunLoop.mainRunLoop().addTimer_forMode_(timer, NSRunLoopCommonModes)
-        self._state["refresh_timer"] = timer
+        """Start a background thread that rebuilds the popover every second.
+        Calls _rebuild_popover from the background thread — safe enough for
+        a menu bar utility under CPython's GIL."""
+        def _loop():
+            while self._state.get("popover_open"):
+                time.sleep(1)
+                if self._state.get("popover_open"):
+                    try:
+                        self._rebuild_popover()
+                    except Exception:
+                        pass
+        threading.Thread(target=_loop, daemon=True).start()
 
     def _stop_refresh_timer(self):
-        timer = self._state.get("refresh_timer")
-        if timer:
-            timer.invalidate()
-            self._state["refresh_timer"] = None
-
-    @objc.typedSelector(b"v@:@")
-    def _refreshTick_(self, timer):
-        """Called every second on the main thread while popover is open."""
-        if not self._state.get("popover_open"):
-            self._stop_refresh_timer()
-            return
-        self._rebuild_popover()
+        pass  # Loop stops when popover_open is set to False
 
     def _close_popover(self):
         self._state["popover_open"] = False
