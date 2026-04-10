@@ -1338,13 +1338,17 @@ class FigWatch(NSObject):
             nonlocal y
             if y > 0:
                 _sep()
-            h = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 22))
+            h = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 20))
+            lbl = _label(title, size=12, weight=NSFontWeightSemibold)
+            lbl.sizeToFit()
+            lbl_h = lbl.frame().size.height
+            lbl.setFrameOrigin_((20, (20 - lbl_h) / 2))
+            h.addSubview_(lbl)
             icon = _sf_symbol(icon_name, size=12, color=NSColor.secondaryLabelColor())
             if icon:
-                icon.setFrameOrigin_((0, 4))
+                icon_h = icon.frame().size.height
+                icon.setFrameOrigin_((0, (20 - icon_h) / 2))
                 h.addSubview_(icon)
-            lbl = _label(title, size=12, weight=NSFontWeightSemibold)
-            lbl.setFrameOrigin_((20, 3))
             h.addSubview_(lbl)
             if trailing_btn:
                 tf = trailing_btn.frame()
@@ -1383,28 +1387,31 @@ class FigWatch(NSObject):
             builtin = skill_name.startswith("builtin:")
             display = f"{skill_name.replace('builtin:', '')} (built-in)" if builtin else os.path.basename(skill_name)
 
-            row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 28))
+            rh = 28  # row height
+            row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, rh))
 
             intro = intro_results.get(skill_name)
             is_ok = builtin or (intro and intro.get("comment_compatible"))
             ck = _sf_symbol("checkmark.circle.fill" if is_ok else "exclamationmark.circle.fill",
                             size=12, color=NSColor.secondaryLabelColor())
             if ck:
-                ck.setFrameOrigin_((0, 6))
+                ck.setFrameOrigin_((0, (rh - ck.frame().size.height) / 2))
                 row.addSubview_(ck)
 
             tw = _label(trigger_word, size=13, weight=NSFontWeightMedium, mono=True)
-            tw.setFrameOrigin_((20, 6))
+            tw.sizeToFit()
+            tw.setFrameOrigin_((20, (rh - tw.frame().size.height) / 2))
             row.addSubview_(tw)
 
             sn = _label(display, size=11, color=NSColor.secondaryLabelColor())
-            sn.setFrameOrigin_((100, 8))
-            sn.setFrameSize_(NSMakeSize(SW - 130, 14))
+            sn.sizeToFit()
+            sn.setFrameOrigin_((100, (rh - sn.frame().size.height) / 2))
+            sn.setFrameSize_(NSMakeSize(SW - 130, sn.frame().size.height))
             sn.cell().setLineBreakMode_(5)
             row.addSubview_(sn)
 
             if not builtin:
-                rm = NSButton.alloc().initWithFrame_(NSMakeRect(SW - 20, 6, 18, 18))
+                rm = NSButton.alloc().initWithFrame_(NSMakeRect(SW - 20, (rh - 18) // 2, 18, 18))
                 rm.setBordered_(False); rm.setTitle_("")
                 rm_icon = _sf_symbol("xmark.circle", size=12, color=NSColor.tertiaryLabelColor())
                 if rm_icon: rm.setImage_(rm_icon.image())
@@ -1428,12 +1435,14 @@ class FigWatch(NSObject):
             conn_icon = _sf_symbol("xmark.circle", size=12, color=NSColor.secondaryLabelColor())
             conn_text = "Not connected"
 
-        conn_row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, 20))
+        crh = 20
+        conn_row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, crh))
         if conn_icon:
-            conn_icon.setFrameOrigin_((0, 2))
+            conn_icon.setFrameOrigin_((0, (crh - conn_icon.frame().size.height) / 2))
             conn_row.addSubview_(conn_icon)
         conn_lbl = _label(conn_text, size=13)
-        conn_lbl.setFrameOrigin_((20, 2))
+        conn_lbl.sizeToFit()
+        conn_lbl.setFrameOrigin_((20, (crh - conn_lbl.frame().size.height) / 2))
         conn_row.addSubview_(conn_lbl)
         acc.addSubview_(conn_row)
         y += 22
@@ -1491,23 +1500,16 @@ class FigWatch(NSObject):
 
         cancel_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, y, btn_w, btn_h))
         cancel_btn.setTitle_("Cancel")
-        cancel_btn.setBordered_(False)
-        cancel_btn.setWantsLayer_(True)
-        cancel_btn.layer().setBackgroundColor_(
-            NSColor.labelColor().colorWithAlphaComponent_(0.06).CGColor())
-        cancel_btn.layer().setCornerRadius_(btn_r)
+        cancel_btn.setBezelStyle_(NSBezelStyleRecessed)
         cancel_btn.setFont_(NSFont.systemFontOfSize_weight_(13, NSFontWeightMedium))
         cancel_btn.setTarget_(self); cancel_btn.setAction_(b"_dismissSettings:")
         acc.addSubview_(cancel_btn)
 
         save_btn = NSButton.alloc().initWithFrame_(NSMakeRect(btn_w + 10, y, btn_w, btn_h))
         save_btn.setTitle_("Save")
-        save_btn.setBordered_(False)
-        save_btn.setWantsLayer_(True)
-        save_btn.layer().setBackgroundColor_(NSColor.controlAccentColor().CGColor())
-        save_btn.layer().setCornerRadius_(btn_r)
+        save_btn.setBezelStyle_(NSBezelStyleRecessed)
         save_btn.setFont_(NSFont.systemFontOfSize_weight_(13, NSFontWeightMedium))
-        save_btn.setContentTintColor_(NSColor.whiteColor())
+        save_btn.setKeyEquivalent_("\r")  # Enter key
         save_btn.setTarget_(self); save_btn.setAction_(b"_saveSettings:")
         acc.addSubview_(save_btn)
         y += btn_h + 2
