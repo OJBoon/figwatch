@@ -770,6 +770,10 @@ class FigWatch(NSObject):
         glass.layer().setCornerRadius_(12)
         glass.layer().setMasksToBounds_(True)
         self._panel.setContentView_(glass)
+        # Also clip the window's backing layer to prevent background bleed
+        self._panel.contentView().superview().setWantsLayer_(True)
+        self._panel.contentView().superview().layer().setCornerRadius_(12)
+        self._panel.contentView().superview().layer().setMasksToBounds_(True)
 
         # Register as login item (macOS 13+ / Ventura)
         self._register_login_item()
