@@ -501,6 +501,14 @@ def build_popover_view(app):
     title = _label("FigWatch", size=14, weight=NSFontWeightBold)
     title.setFrameOrigin_((PAD + 4, y))
     root.addSubview_(title)
+
+    # Power button (top right)
+    quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 22, y, 20, 20))
+    quit_btn.setBordered_(False); quit_btn.setTitle_("")
+    qi = _sf_symbol("power", size=12, color=NSColor.tertiaryLabelColor())
+    if qi: quit_btn.setImage_(qi.image())
+    quit_btn.setTarget_(app); quit_btn.setAction_(b"doPowerMenu:")
+    root.addSubview_(quit_btn)
     y += 20
 
     # Triggers subline
@@ -663,28 +671,25 @@ def build_popover_view(app):
     else:
         countdown_text = ""
 
+    # Footer row: countdown left, gear right — vertically centered in a 24px row
+    footer_h = 24
+    footer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, footer_h))
+
     ct = _label(countdown_text or " ", size=11, color=NSColor.tertiaryLabelColor())
-    ct.setFrameOrigin_((PAD + 4, y))
-    ct.setFrameSize_(NSMakeSize(cw - 60, 14))
-    root.addSubview_(ct)
+    ct.setFrameOrigin_((4, (footer_h - 14) // 2))
+    ct.setFrameSize_(NSMakeSize(cw - 30, 14))
+    footer.addSubview_(ct)
     app._state["_countdown_label"] = ct
 
-    # Settings + Quit in footer (right-aligned)
-    gear = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 46, y - 2, 20, 20))
+    gear = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 22, (footer_h - 20) // 2, 20, 20))
     gear.setBordered_(False); gear.setTitle_("")
     gi = _sf_symbol("gearshape.fill", size=12, color=NSColor.tertiaryLabelColor())
     if gi: gear.setImage_(gi.image())
     gear.setTarget_(app); gear.setAction_(b"doSettings:")
-    root.addSubview_(gear)
+    footer.addSubview_(gear)
 
-    quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 22, y - 2, 20, 20))
-    quit_btn.setBordered_(False); quit_btn.setTitle_("")
-    qi = _sf_symbol("power", size=12, color=NSColor.tertiaryLabelColor())
-    if qi: quit_btn.setImage_(qi.image())
-    quit_btn.setTarget_(app); quit_btn.setAction_(b"doQuit:")
-    root.addSubview_(quit_btn)
-
-    y += 18 + PAD
+    root.addSubview_(footer)
+    y += footer_h + PAD - 2
 
     root.setFrameSize_(NSMakeSize(W, y))
     return root, y
@@ -1080,6 +1085,17 @@ class FigWatch(NSObject):
                 try:
                     self.popover.showRelativeToRect_ofView_preferredEdge_(
                         sender.bounds(), sender, NSMinYEdge)
+                    # Hide the arrow triangle by making it transparent
+                    try:
+                        pop_window = self.popover.contentViewController().view().window()
+                        if pop_window:
+                            frame = pop_window.frame()
+                            # Shift window up by the arrow height and resize
+                            pop_window.setFrame_display_(
+                                NSMakeRect(frame.origin.x, frame.origin.y + 12,
+                                           frame.size.width, frame.size.height - 12), True)
+                    except Exception:
+                        pass
                 except Exception:
                     pass
 
@@ -1781,8 +1797,30 @@ class FigWatch(NSObject):
     # ── Locale ─────────────────────────────────────────────────
 
     @objc.typedSelector(b"v@:@")
+    def doPowerMenu_(self, sender):
+        """Show quit/restart dialog."""
+        self._close_popover()
+        NSApp.activateIgnoringOtherApps_(True)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("FigWatch")
+        alert.setInformativeText_("What would you like to do?")
+        alert.addButtonWithTitle_("Restart")
+        alert.addButtonWithTitle_("Quit")
+        alert.addButtonWithTitle_("Cancel")
+        r = alert.runModal()
+        if r == NSAlertFirstButtonReturn:
+            # Restart: relaunch the app
+            self._stop_all_watchers()
+            bundle = NSBundle.mainBundle().bundlePath()
+            subprocess.Popen(["open", bundle])
+            NSApp.terminate_(None)
+        elif r == NSAlertSecondButtonReturn:
+            self._stop_all_watchers()
+            NSApp.terminate_(None)
+
+    @objc.typedSelector(b"v@:@")
     def doQuit_(self, sender):
-        self.popover.close()
+        self._close_popover()
         self._stop_all_watchers()
         NSApp.terminate_(None)
 
