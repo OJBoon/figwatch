@@ -1372,12 +1372,6 @@ class FigWatch(NSObject):
             acc.addSubview_(control)
             y += 30
 
-        # ── Title ─────────────────────────────────────────────
-        stitle = _label("FigWatch Settings", size=16, weight=NSFontWeightBold)
-        stitle.setFrameOrigin_((0, y))
-        acc.addSubview_(stitle)
-        y += 30
-
         # ── Triggers ──────────────────────────────────────────
         add_trig = _pill("Add Trigger\u2026", b"doAddTrigger:", width=110, height=22)
         add_trig.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
@@ -1500,20 +1494,25 @@ class FigWatch(NSObject):
 
         # Use NSAlert for reliable button handling
         alert = NSAlert.alloc().init()
-        alert.setMessageText_(" ")
+        alert.setMessageText_("FigWatch Settings")
         alert.setInformativeText_("")
-        alert.setIcon_(NSImage.alloc().initWithSize_(NSMakeSize(1, 1)))
-        # Shrink the icon/message area to reduce top padding
-        alert.layout()
-        for subview in alert.window().contentView().subviews():
-            frame = subview.frame()
-            # The icon image view is small and near the top-left
-            if frame.size.width < 80 and frame.size.height < 80 and frame.origin.y > 100:
-                subview.setHidden_(True)
-                subview.setFrameSize_(NSMakeSize(0, 0))
         alert.addButtonWithTitle_("Save")
         alert.addButtonWithTitle_("Cancel")
         alert.setAccessoryView_(acc)
+
+        # Right-align the footer buttons
+        alert.layout()
+        buttons = alert.buttons()
+        if len(buttons) >= 2:
+            win_w = alert.window().frame().size.width
+            # Position Save (first button) at the right edge
+            save_b = buttons[0]
+            sf = save_b.frame()
+            save_b.setFrameOrigin_(NSMakePoint(win_w - sf.size.width - 20, sf.origin.y))
+            # Position Cancel to the left of Save
+            cancel_b = buttons[1]
+            cf = cancel_b.frame()
+            cancel_b.setFrameOrigin_(NSMakePoint(win_w - sf.size.width - cf.size.width - 28, cf.origin.y))
 
         if alert.runModal() == NSAlertFirstButtonReturn:
             rmap = {0: "sonnet", 1: "opus", 2: "haiku"}
