@@ -523,8 +523,7 @@ def build_popover_view(app):
     # Subline: triggers + locale
     trigger_config = app._state.get("trigger_config", [])
     triggers_str = " \u00B7 ".join(t.get("trigger", "") for t in trigger_config) if trigger_config else "@tone \u00B7 @ux"
-    locale_str = app._state.get("locale", "uk").upper()
-    subline = _label(f"{triggers_str}  \u00B7  {locale_str}", size=10, color=NSColor.tertiaryLabelColor())
+    subline = _label(triggers_str, size=10, color=NSColor.tertiaryLabelColor())
     subline.setFrameOrigin_((PAD + 4, y))
     root.addSubview_(subline)
     y += 16
@@ -693,22 +692,7 @@ def build_popover_view(app):
     if countdown_text:
         y += 14
 
-    # Locale popup
-    footer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 20))
-
-    lp = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 68, 20), False)
-    lp.setFont_(NSFont.systemFontOfSize_(10)); lp.setBordered_(False)
-    lp.setControlSize_(2)  # mini
-    for l in ["\U0001F1EC\U0001F1E7 UK", "\U0001F1E9\U0001F1EA DE", "\U0001F1EB\U0001F1F7 FR",
-              "\U0001F1F3\U0001F1F1 NL", "\U0001F1EA\U0001F1FA BNX"]:
-        lp.addItemWithTitle_(l)
-    lmap = {"uk": 0, "de": 1, "fr": 2, "nl": 3, "benelux": 4}
-    lp.selectItemAtIndex_(lmap.get(app._state.get("locale", "uk"), 0))
-    lp.setTarget_(app); lp.setAction_(b"doLocale:")
-    footer.addSubview_(lp)
-
-    root.addSubview_(footer)
-    y += 20 + PAD - 4
+    y += PAD - 4
 
     root.setFrameSize_(NSMakeSize(W, y))
     return root, y
@@ -1803,15 +1787,6 @@ class FigWatch(NSObject):
                 NSURL.URLWithString_(RELEASES_URL))
 
     # ── Locale ─────────────────────────────────────────────────
-
-    @objc.typedSelector(b"v@:@")
-    def doLocale_(self, sender):
-        rmap = {0: "uk", 1: "de", 2: "fr", 3: "nl", 4: "benelux"}
-        self._state["locale"] = rmap.get(sender.indexOfSelectedItem(), "uk")
-        c = _load_config(); c["watchLocale"] = self._state["locale"]; _save_config(c)
-        # Update locale on all running watchers
-        for w in self._state.get("watchers", {}).values():
-            w.locale = self._state["locale"]
 
     @objc.typedSelector(b"v@:@")
     def doQuit_(self, sender):

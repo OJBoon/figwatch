@@ -412,7 +412,6 @@ def execute_skill(item):
     data_section = '\n\n'.join(data_desc) if data_desc else 'No data available.'
 
     extra_ctx = f'\nAdditional context from reviewer: "{item.extra}"' if item.extra else ''
-    locale_ctx = f'\n- Locale: {item.locale}' if item.locale else ''
 
     lang_instruction = ''
     if item.reply_lang == 'cn':
@@ -425,7 +424,7 @@ Use Mode 3 (Comment Reply) if the skill defines it.
 
 Now evaluate this screen:
 - Frame name: {frame_name}
-- Trigger: {item.trigger}{locale_ctx}{extra_ctx}
+- Trigger: {item.trigger}{extra_ctx}
 
 Available data:
 {data_section}
