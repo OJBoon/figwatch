@@ -1712,15 +1712,15 @@ class FigWatch(NSObject):
             script_path = os.path.join(cache, "install.sh")
             script = (
                 "#!/bin/bash\n"
-                "set -e\n"
+                "# Wait for FigWatch to fully exit\n"
                 "for i in $(seq 1 40); do\n"
-                "  if ! pgrep -x FigWatch > /dev/null; then break; fi\n"
+                "  pgrep -x FigWatch > /dev/null 2>&1 || break\n"
                 "  sleep 0.25\n"
                 "done\n"
-                "sleep 0.5\n"
-                f'rm -rf "{current_app}"\n'
+                "sleep 1\n"
+                f'rm -rf "{current_app}" 2>/dev/null\n'
                 f'/usr/bin/ditto "{new_app}" "{current_app}"\n'
-                f'/usr/bin/xattr -dr com.apple.quarantine "{current_app}" 2>/dev/null || true\n'
+                f'/usr/bin/xattr -dr com.apple.quarantine "{current_app}" 2>/dev/null\n'
                 f'open "{current_app}"\n'
             )
             with open(script_path, "w") as f:
