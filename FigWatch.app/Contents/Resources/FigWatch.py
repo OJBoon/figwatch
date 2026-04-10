@@ -1500,9 +1500,17 @@ class FigWatch(NSObject):
 
         # Use NSAlert for reliable button handling
         alert = NSAlert.alloc().init()
-        alert.setMessageText_("")
+        alert.setMessageText_(" ")
         alert.setInformativeText_("")
         alert.setIcon_(NSImage.alloc().initWithSize_(NSMakeSize(1, 1)))
+        # Shrink the icon/message area to reduce top padding
+        alert.layout()
+        for subview in alert.window().contentView().subviews():
+            frame = subview.frame()
+            # The icon image view is small and near the top-left
+            if frame.size.width < 80 and frame.size.height < 80 and frame.origin.y > 100:
+                subview.setHidden_(True)
+                subview.setFrameSize_(NSMakeSize(0, 0))
         alert.addButtonWithTitle_("Save")
         alert.addButtonWithTitle_("Cancel")
         alert.setAccessoryView_(acc)
