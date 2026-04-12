@@ -1,10 +1,12 @@
 """Generic skill execution handler."""
 
+import base64
 import json
 import os
 import re
 import subprocess
 import tempfile
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -16,6 +18,114 @@ from figwatch.handlers import (
 
 _HOME = Path.home()
 _BUNDLED_SKILLS = Path(__file__).parent.parent / 'skills'
+
+# ── Provider / model helpers ───────────────────────────────────────
+
+# Friendly aliases → full Anthropic API model IDs
+_CLAUDE_API_MODELS = {
+    'sonnet': 'claude-sonnet-4-6',
+    'opus':   'claude-opus-4-6',
+    'haiku':  'claude-haiku-4-5-20251001',
+}
+# Friendly aliases → full Google AI model IDs
+# For models not listed here, the value passed to FIGWATCH_MODEL is used as-is.
+_GEMINI_MODELS = {
+    'gemini':            'gemini-3.1-flash-lite-preview',
+    'gemini-flash':      'gemini-3.1-flash-lite-preview',
+    'gemini-flash-lite': 'gemini-3.1-flash-lite-preview',
+}
+
+# Node tree is embedded inline for API providers — cap to avoid token limit blowout
+_NODE_TREE_CHAR_LIMIT = 40_000
+
+
+def _detect_provider(model, claude_path):
+    """Return 'gemini', 'anthropic-api', or 'claude-cli'."""
+    if (model or '').startswith('gemini'):
+        return 'gemini'
+    if claude_path == 'api':
+        return 'anthropic-api'
+    return 'claude-cli'
+
+
+def _parse_retry_seconds(err, default=60):
+    """Extract suggested retry delay in seconds from a 429 error message."""
+    m = re.search(r'retry[_\s]delay\D*?(\d+)|retry after (\d+)', str(err), re.IGNORECASE)
+    if m:
+        return int(m.group(1) or m.group(2))
+    return default
+
+
+def _with_retry(call_fn, is_rate_limit_fn, label):
+    """Call call_fn(), retrying once on a rate-limit error after the suggested delay."""
+    for attempt in range(2):
+        try:
+            return call_fn()
+        except Exception as e:
+            if is_rate_limit_fn(e) and attempt == 0:
+                wait = _parse_retry_seconds(e)
+                print(f'   {label} 429 — retrying in {wait}s…', flush=True)
+                time.sleep(wait)
+            else:
+                raise
+
+
+def _call_anthropic_api(prompt_text, image_path, model_name, api_key):
+    """Call the Anthropic Messages API directly. Returns reply text."""
+    try:
+        import anthropic
+    except ImportError:
+        raise RuntimeError('anthropic package not installed — run: pip install anthropic')
+
+    client = anthropic.Anthropic(api_key=api_key)
+    content = []
+
+    if image_path:
+        media_type = 'image/jpeg' if image_path.endswith('.jpg') else 'image/png'
+        with open(image_path, 'rb') as f:
+            img_b64 = base64.standard_b64encode(f.read()).decode()
+        content.append({
+            'type': 'image',
+            'source': {'type': 'base64', 'media_type': media_type, 'data': img_b64},
+        })
+    content.append({'type': 'text', 'text': prompt_text})
+
+    def _call():
+        response = client.messages.create(
+            model=model_name,
+            max_tokens=4096,
+            messages=[{'role': 'user', 'content': content}],
+        )
+        return response.content[0].text.strip()
+
+    def _is_rate_limit(e):
+        return '429' in str(e) or 'rate' in str(e).lower() or 'RateLimitError' in type(e).__name__
+
+    return _with_retry(_call, _is_rate_limit, 'anthropic')
+
+
+def _call_gemini(prompt_text, image_path, model_name, api_key):
+    """Call the Google Generative AI API. Returns reply text."""
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        raise RuntimeError('google-generativeai not installed — run: pip install google-generativeai')
+
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name)
+
+    parts = []
+    if image_path:
+        mime_type = 'image/jpeg' if image_path.endswith('.jpg') else 'image/png'
+        with open(image_path, 'rb') as f:
+            parts.append({'mime_type': mime_type, 'data': f.read()})
+    parts.append(prompt_text)
+
+    return _with_retry(
+        lambda: model.generate_content(parts).text.strip(),
+        lambda e: '429' in str(e) or 'quota' in str(e).lower(),
+        'gemini',
+    )
 
 # ── Skill cache ────────────────────────────────────────────────────
 
@@ -112,10 +222,11 @@ Skill definition:
 """
 
 
-def introspect_skill(skill_path, claude_path):
+def introspect_skill(skill_path, claude_path, model=None):
     """Analyse a skill file to determine compatibility and required data.
 
-    Uses a fast Haiku call. Returns dict with comment_compatible, incompatible_reason, required_data.
+    Uses the cheapest available model (Haiku / Gemini Flash). Returns dict with
+    comment_compatible, incompatible_reason, required_data.
     """
     cache = _load_skill_cache()
     try:
@@ -140,14 +251,27 @@ def introspect_skill(skill_path, claude_path):
         return safe_default
 
     prompt = _INTROSPECTION_PROMPT + skill_content
+    provider = _detect_provider(model, claude_path)
 
     try:
-        result = subprocess.run(
-            [claude_path, '--print', '-p', prompt, '--model', 'haiku'],
-            capture_output=True, timeout=30, env=subprocess_env(),
-            cwd=str(_HOME),
-        )
-        stdout = result.stdout.decode('utf-8', errors='replace').strip()
+        if provider == 'gemini':
+            stdout = _call_gemini(
+                prompt, None, _GEMINI_MODELS['gemini-flash'],
+                os.environ.get('GOOGLE_API_KEY', ''),
+            )
+        elif provider == 'anthropic-api':
+            stdout = _call_anthropic_api(
+                prompt, None, _CLAUDE_API_MODELS['haiku'],
+                os.environ.get('ANTHROPIC_API_KEY', ''),
+            )
+        else:
+            result = subprocess.run(
+                [claude_path, '--print', '-p', prompt, '--model', 'haiku'],
+                capture_output=True, timeout=30, env=subprocess_env(),
+                cwd=str(_HOME),
+            )
+            stdout = result.stdout.decode('utf-8', errors='replace').strip()
+
         if stdout:
             json_match = re.search(r'\{[^{}]*\}', stdout, re.DOTALL)
             if json_match:
@@ -168,15 +292,35 @@ def introspect_skill(skill_path, claude_path):
 
 # ── Figma data fetching ────────────────────────────────────────────
 
-def fetch_screenshot(file_key, node_id, pat):
-    """Download a screenshot of a Figma node. Returns file path or None."""
-    enc_id = urllib_quote(node_id)
-    out_path = os.path.join(tempfile.gettempdir(), f'figwatch-screenshot-{node_id.replace(":", "-")}.png')
+# Base64 adds ~33% overhead, so cap raw bytes at 3.75 MB to stay under the 5 MB API limit.
+_MAX_IMAGE_BYTES = int(3.75 * 1024 * 1024)
 
-    for scale in [2, 1]:
+
+def fetch_screenshot(file_key, node_id, pat):
+    """Download a screenshot of a Figma node. Returns file path or None.
+
+    Tries progressively smaller PNG scales, then falls back to JPEG (much better
+    compression for large frames). Returns None if nothing fits within 3.75 MB
+    (the safe ceiling before base64 encoding hits the 5 MB API limit).
+    """
+    enc_id = urllib_quote(node_id)
+
+    attempts = [
+        ('png', 1),
+        ('png', 0.5),
+        ('jpg', 1),
+        ('jpg', 0.5),
+        ('jpg', 0.25),
+    ]
+
+    for fmt, scale in attempts:
+        out_path = os.path.join(
+            tempfile.gettempdir(),
+            f'figwatch-screenshot-{node_id.replace(":", "-")}.{fmt}',
+        )
         try:
             data = figma_get_retry(
-                f'/images/{file_key}?ids={enc_id}&scale={scale}&format=png', pat
+                f'/images/{file_key}?ids={enc_id}&scale={scale}&format={fmt}', pat
             )
             if not data or data.get('err') or data.get('status') == 400:
                 continue
@@ -184,8 +328,11 @@ def fetch_screenshot(file_key, node_id, pat):
             if not url:
                 continue
             with urllib.request.urlopen(url, timeout=30) as r:
-                with open(out_path, 'wb') as f:
-                    f.write(r.read())
+                img_bytes = r.read()
+            if len(img_bytes) > _MAX_IMAGE_BYTES:
+                continue  # still too large — try next attempt
+            with open(out_path, 'wb') as f:
+                f.write(img_bytes)
             return out_path
         except Exception:
             continue
@@ -255,13 +402,11 @@ def fetch_figma_data(required_data, file_key, node_id, pat):
             except Exception:
                 result[key] = None
 
-    # Unpack tree result
     tree_result = result.pop('_tree', None)
     if tree_result:
         tree_path, tree_data = tree_result
         result['node_tree'] = tree_path
 
-    # Derived data from node_tree
     if tree_data:
         if 'text_nodes' in required_data:
             from figwatch.watcher import extract_text_from_node
@@ -328,10 +473,113 @@ _BUILTIN_INTROSPECTION = {
 }
 
 
-def _get_introspection(skill_ref, skill_path, claude_path):
+def _get_introspection(skill_ref, skill_path, claude_path, model):
     if skill_ref in _BUILTIN_INTROSPECTION:
         return _BUILTIN_INTROSPECTION[skill_ref]
-    return introspect_skill(skill_path, claude_path)
+    return introspect_skill(skill_path, claude_path, model)
+
+
+# ── Prompt builder ─────────────────────────────────────────────────
+
+def _build_prompt(item, skill_content, refs_section, data, tree_data, frame_name, *, inline_files=False):
+    """Build the skill execution prompt.
+
+    inline_files=True: node tree JSON is embedded directly (for API providers).
+    inline_files=False: file paths are passed and the model reads them (Claude CLI).
+    """
+    data_desc = []
+
+    if data.get('screenshot'):
+        if inline_files:
+            data_desc.append('Screenshot: [attached as image]')
+        else:
+            data_desc.append(f'Screenshot image at: {data["screenshot"]}')
+
+    if data.get('node_tree'):
+        if inline_files:
+            if tree_data:
+                tree_json = json.dumps(tree_data, indent=2)
+                if len(tree_json) > _NODE_TREE_CHAR_LIMIT:
+                    tree_json = tree_json[:_NODE_TREE_CHAR_LIMIT] + '\n... (truncated)'
+                data_desc.append(f'Node tree:\n{tree_json}')
+        else:
+            data_desc.append(f'Node tree JSON at: {data["node_tree"]}')
+
+    if data.get('text_nodes'):
+        text_list = '\n'.join(
+            f'  {i+1}. [{t["name"]}]: "{t["text"]}"'
+            for i, t in enumerate(data['text_nodes'][:50])
+        )
+        data_desc.append(f'Text nodes:\n{text_list}')
+
+    for key in ['dev_resources', 'variables_local', 'variables_published',
+                'styles', 'components', 'file_structure', 'prototype_flows', 'annotations']:
+        if data.get(key):
+            data_desc.append(f'{key}: {json.dumps(data[key], indent=2)[:5000]}')
+
+    data_section = '\n\n'.join(data_desc) if data_desc else 'No data available.'
+    extra_ctx = f'\nAdditional context from reviewer: "{item.extra}"' if item.extra else ''
+    lang_instruction = (
+        '\nIMPORTANT: Write your entire reply in Simplified Chinese.'
+        if item.reply_lang == 'cn' else ''
+    )
+    eval_instruction = (
+        'Evaluate according to the skill using the data provided, then respond with ONLY a'
+        if inline_files else
+        'Read any file paths provided, evaluate according to the skill, then respond with ONLY a'
+    )
+
+    return f"""You have a skill to evaluate a Figma design. Follow the skill instructions exactly.
+Use Mode 3 (Comment Reply) if the skill defines it.
+
+{skill_content}{refs_section}
+
+Now evaluate this screen:
+- Frame name: {frame_name}
+- Trigger: {item.trigger}{extra_ctx}
+
+Available data:
+{data_section}
+
+{eval_instruction}
+plain-text comment reply suitable for posting as a Figma comment.
+
+CRITICAL RULES:
+- Do NOT create any files. Your entire output IS the comment reply.
+- Figma comments are PLAIN TEXT ONLY: no markdown, no asterisks, no hashes, no backticks.
+- Keep it CONCISE. The entire reply MUST be under 4000 characters.
+- Do NOT add sign-offs — the sign-off is added automatically.
+{lang_instruction}"""
+
+
+# ── Provider-specific runners ──────────────────────────────────────
+
+def _run_via_claude_cli(item, skill_content, refs_section, data, tree_data, frame_name, skill_dir):
+    prompt = _build_prompt(item, skill_content, refs_section, data, tree_data, frame_name, inline_files=False)
+    cmd = [item.claude_path, '-p', prompt, '--print', '--allowedTools', 'Read', '--model', item.model]
+    cmd.extend(['--add-dir', tempfile.gettempdir()])
+    cmd.extend(['--add-dir', skill_dir])
+    result = subprocess.run(cmd, capture_output=True, timeout=120,
+                            env=subprocess_env(), cwd=str(_HOME))
+    return parse_claude_output(result)
+
+
+def _run_via_anthropic_api(item, skill_content, refs_section, data, tree_data, frame_name):
+    model_name = _CLAUDE_API_MODELS.get(item.model, item.model)
+    prompt = _build_prompt(item, skill_content, refs_section, data, tree_data, frame_name, inline_files=True)
+    return _call_anthropic_api(
+        prompt, data.get('screenshot'), model_name,
+        os.environ.get('ANTHROPIC_API_KEY', ''),
+    )
+
+
+def _run_via_gemini(item, skill_content, refs_section, data, tree_data, frame_name):
+    model_name = _GEMINI_MODELS.get(item.model, item.model)
+    prompt = _build_prompt(item, skill_content, refs_section, data, tree_data, frame_name, inline_files=True)
+    return _call_gemini(
+        prompt, data.get('screenshot'), model_name,
+        os.environ.get('GOOGLE_API_KEY', ''),
+    )
 
 
 # ── Skill execution ────────────────────────────────────────────────
@@ -340,17 +588,18 @@ def execute_skill(item):
     """Execute any skill (builtin or custom) for a WorkItem. Returns the reply string."""
     skill_ref = item.skill_path
     skill_path = skill_ref
+    sign_off = 'Gemini' if _detect_provider(item.model, item.claude_path) == 'gemini' else 'Claude'
 
     if skill_path.startswith('builtin:'):
         resolved = _resolve_builtin_skill(skill_path)
         if not resolved:
-            return f'\u26a0\ufe0f Could not find skill: {skill_path}\n\n\u2014 Claude'
+            return f'\u26a0\ufe0f Could not find skill: {skill_path}\n\n\u2014 {sign_off}'
         skill_path = resolved
 
     if not os.path.exists(skill_path):
-        return f'\u26a0\ufe0f Skill file not found: {skill_path}\n\n\u2014 Claude'
+        return f'\u26a0\ufe0f Skill file not found: {skill_path}\n\n\u2014 {sign_off}'
 
-    intro = _get_introspection(skill_ref, skill_path, item.claude_path)
+    intro = _get_introspection(skill_ref, skill_path, item.claude_path, item.model)
     required_data = intro.get('required_data', ['screenshot', 'node_tree'])
 
     data, tree_data = fetch_figma_data(required_data, item.file_key, item.node_id, item.pat)
@@ -358,7 +607,6 @@ def execute_skill(item):
     with open(skill_path, encoding='utf-8') as f:
         skill_content = f.read()
 
-    # Load reference files from the skill's references/ directory
     skill_dir = os.path.dirname(skill_path)
     refs_dir = os.path.join(skill_dir, 'references')
     refs_section = ''
@@ -376,68 +624,19 @@ def execute_skill(item):
             refs_section = '\n\nReference files:\n' + '\n\n'.join(ref_parts)
 
     frame_name = tree_data.get('name', 'Unknown frame') if tree_data else 'Unknown frame'
-
-    # Build data description
-    data_desc = []
-    if data.get('screenshot'):
-        data_desc.append(f'Screenshot image at: {data["screenshot"]}')
-    if data.get('node_tree'):
-        data_desc.append(f'Node tree JSON at: {data["node_tree"]}')
-    if data.get('text_nodes'):
-        text_list = '\n'.join(
-            f'  {i+1}. [{t["name"]}]: "{t["text"]}"'
-            for i, t in enumerate(data['text_nodes'][:50])
-        )
-        data_desc.append(f'Text nodes:\n{text_list}')
-    for key in ['dev_resources', 'variables_local', 'variables_published',
-                'styles', 'components', 'file_structure', 'prototype_flows', 'annotations']:
-        if data.get(key):
-            data_desc.append(f'{key}: {json.dumps(data[key], indent=2)[:5000]}')
-
-    data_section = '\n\n'.join(data_desc) if data_desc else 'No data available.'
-
-    extra_ctx = f'\nAdditional context from reviewer: "{item.extra}"' if item.extra else ''
-
-    lang_instruction = ''
-    if item.reply_lang == 'cn':
-        lang_instruction = '\nIMPORTANT: Write your entire reply in Simplified Chinese.'
-
-    prompt = f"""You have a skill to evaluate a Figma design. Follow the skill instructions exactly.
-Use Mode 3 (Comment Reply) if the skill defines it.
-
-{skill_content}{refs_section}
-
-Now evaluate this screen:
-- Frame name: {frame_name}
-- Trigger: {item.trigger}{extra_ctx}
-
-Available data:
-{data_section}
-
-Read any file paths provided, evaluate according to the skill, then respond with ONLY a
-plain-text comment reply suitable for posting as a Figma comment.
-
-CRITICAL RULES:
-- Do NOT create any files. Your entire output IS the comment reply.
-- Figma comments are PLAIN TEXT ONLY: no markdown, no asterisks, no hashes, no backticks.
-- Keep it CONCISE. The entire reply MUST be under 4000 characters.
-- Do NOT add sign-offs — the sign-off is added automatically.
-{lang_instruction}"""
-
-    cmd = [item.claude_path, '-p', prompt, '--print', '--allowedTools', 'Read', '--model', item.model]
-    tmp_dir = tempfile.gettempdir()
-    cmd.extend(['--add-dir', tmp_dir])
-    cmd.extend(['--add-dir', skill_dir])
+    provider = _detect_provider(item.model, item.claude_path)
 
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=120, env=subprocess_env(),
-                                cwd=str(_HOME))
-        reply = parse_claude_output(result)
-        header = f'\U0001f5e3\ufe0f Claude {item.trigger} Audit \u2014 {frame_name}'
-        return f'{header}\n\n{reply}\n\n\u2014 Claude'
+        if provider == 'gemini':
+            reply = _run_via_gemini(item, skill_content, refs_section, data, tree_data, frame_name)
+        elif provider == 'anthropic-api':
+            reply = _run_via_anthropic_api(item, skill_content, refs_section, data, tree_data, frame_name)
+        else:
+            reply = _run_via_claude_cli(item, skill_content, refs_section, data, tree_data, frame_name, skill_dir)
 
-    except Exception as e:
-        return f'\U0001f5e3\ufe0f Claude {item.trigger} Audit\n\n\u26a0\ufe0f Evaluation failed: {e}\n\n\u2014 Claude'
+        header = f'\U0001f5e3\ufe0f {item.trigger} Audit \u2014 {frame_name}'
+        return f'{header}\n\n{reply}\n\n\u2014 {sign_off}'
+
     finally:
         for key in ['screenshot', 'node_tree']:
             p = data.get(key)

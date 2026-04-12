@@ -1,25 +1,21 @@
 FROM python:3.11-slim
 
-# Install Node.js (required for Claude Code CLI)
-RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
+RUN apt-get update && apt-get install -y --no-install-recommends curl && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Install Claude Code CLI
-RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /app
 
-# Install the figwatch package
 COPY pyproject.toml .
 COPY figwatch/ ./figwatch/
-RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir -e ".[server]"
 
 COPY server.py .
 
-# Optional: mount a directory of custom skills at runtime
-# docker run -v ./my-skills:/app/custom-skills figwatch
 VOLUME ["/app/custom-skills"]
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
 
 CMD ["python", "server.py"]

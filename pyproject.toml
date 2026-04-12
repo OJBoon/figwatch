@@ -4,6 +4,13 @@ version = "1.2.0"
 description = "Figma comment watcher powered by Claude Code"
 requires-python = ">=3.9"
 
+[project.optional-dependencies]
+# pip install -e ".[server]"  — installs API clients for server/Docker deployment
+server = [
+    "anthropic",
+    "google-generativeai",
+]
+
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"

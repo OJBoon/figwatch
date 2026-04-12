@@ -39,8 +39,9 @@ This downloads the latest release, installs `FigWatch.app` to `/Applications`, c
 See [docs/docker.md](docs/docker.md) for the full setup guide. Quick start:
 
 ```bash
-cp .env.example .env   # fill in FIGMA_PAT, FIGWATCH_FILES, ANTHROPIC_API_KEY
+cp .env.example .env   # fill in FIGMA_PAT, FIGWATCH_WEBHOOK_PASSCODE, GOOGLE_API_KEY
 docker compose up -d --build
+# then register a webhook with Figma — see docs/docker.md
 ```
 
 ## Requirements
@@ -52,21 +53,22 @@ docker compose up -d --build
 
 ### Docker / server
 - Docker with Docker Compose
-- Figma Personal Access Token
-- Anthropic API key
-
-Claude Code is bundled inside the container — no local install needed.
+- A publicly accessible URL (or ngrok for local testing)
+- Figma Personal Access Token + Figma team ID
+- AI API key — choose one:
+  - [Google AI API key](https://aistudio.google.com/apikey) for Gemini (free tier available)
+  - [Anthropic API key](https://console.anthropic.com/) for Claude
 
 ## How it works
 
-1. FigWatch polls your Figma files for new comments on a configurable interval (default: 30s)
-2. When it spots a trigger keyword, it fetches the relevant data from Figma (screenshot, node tree, etc.)
-3. It posts an acknowledgment reply immediately, then runs Claude against the skill file
-4. The audit is posted as a reply in the same comment thread
+1. Someone pins a comment containing a trigger word (e.g. `@ux`) to a Figma frame
+2. Figma sends a webhook event to FigWatch immediately
+3. FigWatch posts an acknowledgment reply, then fetches the relevant data (screenshot, node tree, etc.)
+4. The AI evaluates the skill and posts the audit as a reply in the same comment thread
 
-**macOS app:** click the menu bar icon, paste a Figma file URL, click **Watch**. Triggers work immediately.
+**macOS app:** polls Figma on a timer — click the menu bar icon, paste a Figma file URL, click **Watch**.
 
-**Server:** configure via environment variables — see [docs/docker.md](docs/docker.md).
+**Server:** event-driven via Figma webhooks — configure via environment variables and register a webhook with Figma. See [docs/docker.md](docs/docker.md) for the full setup guide.
 
 ## Built-in triggers
 

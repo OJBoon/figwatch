@@ -1,15 +1,20 @@
 services:
   figwatch:
     build: .
+    ports:
+      - "${FIGWATCH_PORT:-8080}:${FIGWATCH_PORT:-8080}"
     environment:
       # Required
       - FIGMA_PAT=${FIGMA_PAT}
-      - FIGWATCH_FILES=${FIGWATCH_FILES}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - FIGWATCH_WEBHOOK_PASSCODE=${FIGWATCH_WEBHOOK_PASSCODE}
+      # AI provider — set one (or both if you switch models)
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       # Optional (shown with defaults)
-      - FIGWATCH_LOCALE=${FIGWATCH_LOCALE:-uk}
       - FIGWATCH_MODEL=${FIGWATCH_MODEL:-sonnet}
-      - FIGWATCH_INTERVAL=${FIGWATCH_INTERVAL:-30}
+      - FIGWATCH_FILES=${FIGWATCH_FILES:-}
+      - FIGWATCH_LOCALE=${FIGWATCH_LOCALE:-uk}
+      - FIGWATCH_PORT=${FIGWATCH_PORT:-8080}
     volumes:
       # Optional: mount custom skill files
       - ./custom-skills:/app/custom-skills

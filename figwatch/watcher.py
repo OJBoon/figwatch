@@ -9,6 +9,7 @@ import threading
 import urllib.parse
 import urllib.request
 from collections import namedtuple
+from pathlib import Path
 
 from figwatch.handlers import STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR
 
@@ -30,18 +31,68 @@ DEFAULT_TRIGGERS = [
 ]
 
 
+def _discover_custom_triggers():
+    """Scan ./custom-skills/ for .md files and return trigger entries.
+
+    Supports flat files (a11y.md → @a11y) and subdirectories (a11y/skill.md → @a11y).
+    The directory is resolved relative to the process working directory, which is
+    /app/custom-skills when running in Docker (WORKDIR /app).
+    """
+    custom_dir = Path(os.getcwd()) / 'custom-skills'
+    if not custom_dir.is_dir():
+        return []
+
+    triggers = []
+    seen = set()
+
+    # Flat .md files: custom-skills/a11y.md → @a11y
+    for path in sorted(custom_dir.glob('*.md')):
+        name = path.stem
+        if name not in seen:
+            seen.add(name)
+            triggers.append({'trigger': f'@{name}', 'skill': str(path.resolve())})
+
+    # Subdirectory pattern: custom-skills/a11y/skill.md → @a11y
+    for skill_dir in sorted(p for p in custom_dir.iterdir() if p.is_dir()):
+        name = skill_dir.name
+        if name in seen:
+            continue
+        for fname in ['skill.md', 'SKILL.md']:
+            skill_path = skill_dir / fname
+            if skill_path.exists():
+                seen.add(name)
+                triggers.append({'trigger': f'@{name}', 'skill': str(skill_path.resolve())})
+                break
+
+    return triggers
+
+
 def load_trigger_config():
-    """Read triggers from ~/.figwatch/config.json, fall back to defaults."""
+    """Load trigger config from config file or built-in defaults, plus any custom skills.
+
+    Priority:
+      1. ~/.figwatch/config.json  (written by the macOS app)
+      2. Built-in defaults        (@tone, @ux)
+
+    In both cases, any .md files found in ./custom-skills/ are appended automatically.
+    """
+    custom = _discover_custom_triggers()
+
     try:
         config_path = os.path.join(os.path.expanduser('~'), '.figwatch', 'config.json')
         with open(config_path) as f:
             config = json.load(f)
         triggers = config.get('triggers')
         if triggers and isinstance(triggers, list):
+            existing = {t.get('trigger') for t in triggers}
+            for t in custom:
+                if t['trigger'] not in existing:
+                    triggers.append(t)
             return triggers
     except Exception:
         pass
-    return list(DEFAULT_TRIGGERS)
+
+    return list(DEFAULT_TRIGGERS) + custom
 
 
 def match_trigger(message, trigger_config):
@@ -184,6 +235,7 @@ def save_processed(ids):
 # ── Trigger detection (fast path — 1 API call) ─────────────────────
 
 EM_DASH = '\u2014'
+_OWN_REPLY_MARKERS = (EM_DASH + ' Claude', EM_DASH + ' Gemini')
 
 
 def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log, on_status=None):
@@ -199,7 +251,7 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log, on_sta
     # Find threads we already replied to
     replied_to = set()
     for c in comments:
-        if c.get('parent_id') and EM_DASH + ' Claude' in (c.get('message') or ''):
+        if c.get('parent_id') and any(m in (c.get('message') or '') for m in _OWN_REPLY_MARKERS):
             replied_to.add(c['parent_id'])
             processed_ids.add(c['parent_id'])
 
@@ -212,7 +264,7 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log, on_sta
             if (c.get('client_meta') or {}).get('node_id'):
                 candidates.append(c)
         else:
-            if EM_DASH + ' Claude' not in (c.get('message') or ''):
+            if not any(m in (c.get('message') or '') for m in _OWN_REPLY_MARKERS):
                 candidates.append(c)
 
     initial_count = len(processed_ids)
@@ -269,10 +321,11 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log, on_sta
 
 # ── Work item processing (slow path — calls Claude) ────────────────
 
-def process_work_item(item):
+def process_work_item(item, *, log=print, trigger_config=None):
     """Process a single WorkItem: post ack, run handler, post reply.
 
     This is the slow path — runs on a worker thread.
+    Returns True on success, False on failure (error reply posted to Figma).
     """
     from figwatch.handlers.generic import execute_skill
 
@@ -288,47 +341,75 @@ def process_work_item(item):
     ack_id = None
     try:
         ack = figma_post(f'/files/{file_key}/comments', {
-            'message': f'\u23f3 {trigger} audit received \u2014 Claude is working on it\u2026',
+            'message': f'\u23f3 {trigger.lstrip("@")} audit received \u2014 working on it\u2026',
             'comment_id': reply_to_id,
         }, pat)
         ack_id = ack.get('id')
-    except Exception:
-        pass
+        log(f'   ack posted (comment {ack_id})')
+    except Exception as e:
+        log(f'   ack failed (non-fatal): {e}')
 
     try:
+        log(f'   running skill {item.skill_path}…')
         response = execute_skill(item)
+        log(f'   skill returned {len(response)} chars')
 
         if ack_id:
             try:
                 figma_delete(f'/files/{file_key}/comments/{ack_id}', pat)
-            except Exception:
-                pass
+                log(f'   ack deleted')
+            except Exception as e:
+                log(f'   ack delete failed (non-fatal): {e}')
+
+        # Strip trigger words from the response to prevent feedback loops.
+        for entry in (trigger_config or load_trigger_config()):
+            trigger_word = entry.get('trigger', '')
+            if trigger_word:
+                response = re.sub(
+                    r'(?<!\w)' + re.escape(trigger_word) + r'(?!\w)',
+                    trigger_word.lstrip('@'),
+                    response,
+                    flags=re.IGNORECASE,
+                )
 
         # Figma API comment limit is ~5000 chars
         FIGMA_COMMENT_LIMIT = 4900
         if len(response) > FIGMA_COMMENT_LIMIT:
+            total = len(response)
             truncated = response[:FIGMA_COMMENT_LIMIT - 60]
             last_nl = truncated.rfind('\n')
             if last_nl > FIGMA_COMMENT_LIMIT // 2:
                 truncated = truncated[:last_nl]
-            response = truncated + f'\n\n(truncated \u2014 full audit was {len(response)} chars)\n\n{EM_DASH} Claude'
+            response = truncated + f'\n\n(truncated \u2014 full audit was {total} chars)'
 
         figma_post(f'/files/{file_key}/comments', {
             'message': response,
             'comment_id': reply_to_id,
         }, pat)
+        log(f'   reply posted to comment {reply_to_id}')
 
         if item.on_status:
             item.on_status(STATUS_REPLIED, item)
+        return True
 
     except Exception as err:
+        log(f'   failed: {err}')
         if ack_id:
             try:
                 figma_delete(f'/files/{file_key}/comments/{ack_id}', pat)
             except Exception:
                 pass
+        try:
+            figma_post(f'/files/{file_key}/comments', {
+                'message': f'Audit failed: {err}\n\n{EM_DASH} FigWatch',
+                'comment_id': reply_to_id,
+            }, pat)
+            log(f'   error reply posted')
+        except Exception:
+            pass
         if item.on_status:
             item.on_status(STATUS_ERROR, item, error=str(err))
+        return False
 
 
 # ── Watcher class ───────────────────────────────────────────────────
@@ -400,7 +481,7 @@ class FigmaWatcher:
                     if self.dispatch:
                         self.dispatch(item)
                     else:
-                        process_work_item(item)
+                        process_work_item(item, trigger_config=self.trigger_config)
                         if self._on_reply:
                             self._on_reply(item.trigger, item.user_handle, item.node_id)
 
