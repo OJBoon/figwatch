@@ -25,3 +25,6 @@ include = ["figwatch*"]
 
 [tool.setuptools.package-data]
 figwatch = ["skills/**/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
