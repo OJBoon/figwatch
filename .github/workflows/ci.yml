@@ -63,3 +63,54 @@ jobs:
       - name: Verify app bundle exists
         run: test -d macos/dist/FigWatch.app
 
+  publish:
+    name: Publish image
+    runs-on: ubuntu-latest
+    needs: [test, docker]
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version
+        if: github.event_name == 'push'
+        id: version
+        run: |
+          CURRENT=$(python -c 'from figwatch import __version__; print(__version__)')
+          PREVIOUS=$(git show HEAD~1:figwatch/__init__.py 2>/dev/null | grep -oP '(?<=__version__ = ")[^"]+' || echo "")
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "is_new=$([ "$CURRENT" != "$PREVIOUS" ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
+      - name: Build and push — new version (main)
+        if: github.event_name == 'push' && steps.version.outputs.is_new == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.current }}
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+
+      - name: Build and push — same version (main)
+        if: github.event_name == 'push' && steps.version.outputs.is_new == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.sha }}
+
+      - name: Build and push (PR)
+        if: github.event_name == 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:pr-${{ github.event.number }}
