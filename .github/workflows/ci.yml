@@ -63,6 +63,33 @@ jobs:
       - name: Verify app bundle exists
         run: test -d macos/dist/FigWatch.app
 
+      - name: Upload app bundle
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: FigWatch.app
+          path: macos/dist/FigWatch.app
+          retention-days: 1
+
+  check-version:
+    name: Check version
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      is_new: ${{ steps.check.outputs.is_new }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - id: check
+        run: |
+          CURRENT=$(python -c 'from figwatch import __version__; print(__version__)')
+          PREVIOUS=$(git show HEAD~1:figwatch/__init__.py 2>/dev/null | grep -oP '(?<=__version__ = ")[^"]+' || echo "")
+          echo "version=$CURRENT" >> $GITHUB_OUTPUT
+          echo "is_new=$([ "$CURRENT" != "$PREVIOUS" ] && echo true || echo false)" >> $GITHUB_OUTPUT
+
   publish:
     name: Publish image
     runs-on: ubuntu-latest
@@ -79,28 +106,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version
-        if: github.event_name == 'push'
-        id: version
-        run: |
-          CURRENT=$(python -c 'from figwatch import __version__; print(__version__)')
-          PREVIOUS=$(git show HEAD~1:figwatch/__init__.py 2>/dev/null | grep -oP '(?<=__version__ = ")[^"]+' || echo "")
-          echo "current=$CURRENT" >> $GITHUB_OUTPUT
-          echo "is_new=$([ "$CURRENT" != "$PREVIOUS" ] && echo true || echo false)" >> $GITHUB_OUTPUT
-
       - name: Build and push — new version (main)
-        if: github.event_name == 'push' && steps.version.outputs.is_new == 'true'
+        if: github.event_name == 'push' && needs.check-version.outputs.is_new == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
             ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ steps.version.outputs.current }}
+            ghcr.io/${{ github.repository }}:${{ needs.check-version.outputs.version }}
             ghcr.io/${{ github.repository }}:${{ github.sha }}
 
       - name: Build and push — same version (main)
-        if: github.event_name == 'push' && steps.version.outputs.is_new == 'false'
+        if: github.event_name == 'push' && needs.check-version.outputs.is_new == 'false'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -114,3 +132,27 @@ jobs:
           context: .
           push: true
           tags: ghcr.io/${{ github.repository }}:pr-${{ github.event.number }}
+
+  release:
+    name: Release macOS app
+    runs-on: ubuntu-latest
+    needs: [check-version, macos, test]
+    if: github.event_name == 'push' && needs.check-version.outputs.is_new == 'true'
+    permissions:
+      contents: write
+    steps:
+      - name: Download app bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: FigWatch.app
+          path: FigWatch.app
+
+      - name: Zip app bundle
+        run: zip -r FigWatch.zip FigWatch.app
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.check-version.outputs.version }}
+          name: FigWatch v${{ needs.check-version.outputs.version }}
+          files: FigWatch.zip
