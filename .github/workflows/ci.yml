@@ -63,28 +63,3 @@ jobs:
       - name: Verify app bundle exists
         run: test -d macos/dist/FigWatch.app
 
-  publish:
-    name: Publish image
-    runs-on: ubuntu-latest
-    needs: [test, docker]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    permissions:
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ github.sha }}
