@@ -270,14 +270,19 @@ def main():
         server = HTTPServer(('', port), handler)
 
         def _shutdown(sig, frame):
-            print('\n⏹  Shutting down…', flush=True)
-            server.shutdown()
-            sys.exit(0)
+            print('\n⏹  Shutting down — draining in-flight audits…', flush=True)
+            # Run server.shutdown() in a thread: it blocks until the HTTP server
+            # stops, and signal handlers must return promptly.
+            threading.Thread(target=server.shutdown, daemon=True).start()
 
         signal.signal(signal.SIGINT, _shutdown)
         signal.signal(signal.SIGTERM, _shutdown)
 
         server.serve_forever()
+
+    # ThreadPoolExecutor.__exit__ calls shutdown(wait=True) here,
+    # so all in-flight AI tasks finish before the process exits.
+    print('⏹  All audits complete — exiting.', flush=True)
 
 
 if __name__ == '__main__':
