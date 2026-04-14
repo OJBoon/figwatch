@@ -105,6 +105,13 @@ jobs:
     name: Publish image
     runs-on: ubuntu-latest
     needs: [test, docker, check-version]
+    # check-version is skipped on PRs; allow publish to proceed when its
+    # needed jobs either succeeded or were intentionally skipped.
+    if: |
+      always() &&
+      needs.test.result == 'success' &&
+      needs.docker.result == 'success' &&
+      (needs.check-version.result == 'success' || needs.check-version.result == 'skipped')
     permissions:
       packages: write
     steps:

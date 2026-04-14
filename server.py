@@ -29,15 +29,20 @@ Environment variables:
                               if set, only handle comments from these files
   FIGWATCH_LOCALE             Locale for tone audits: uk, de, fr, nl, benelux (default: uk)
   FIGWATCH_PORT               Port to listen on (default: 8080)
+  FIGWATCH_WORKERS            Number of worker threads (default: 4)
+  FIGWATCH_MAX_ATTEMPTS       Retry attempts per audit before giving up (default: 3)
+  FIGWATCH_GEMINI_RPM         Requests per minute for Gemini (default: 15; 0 disables)
+  FIGWATCH_ANTHROPIC_RPM      Requests per minute for Anthropic (default: 5; 0 disables)
 """
 
 import json
 import os
+import queue
 import re
 import signal
 import sys
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from collections import namedtuple
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Allow running from the repo root without installing the package
@@ -46,9 +51,21 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from figwatch.domain import WorkItem, load_trigger_config, match_trigger
-from figwatch.processor import process_work_item
+from figwatch.processor import (
+    clean_reply, delete_ack, post_ack, post_reply, update_ack,
+)
 from figwatch.providers.figma import figma_get_retry
+from figwatch.skills import execute_skill
 from figwatch.watcher import load_processed, save_processed
+
+# Retry backoff schedule (seconds). Length determines the max backoff —
+# subsequent retries reuse the final value.
+_BACKOFFS = [30, 120, 300]
+
+_EM_DASH = '\u2014'
+
+# Queue entry holds the item and the current ack_id, which changes across retries.
+QueuedItem = namedtuple('QueuedItem', ['item', 'ack_id'])
 
 
 def _parse_file_keys(files_str):
@@ -79,7 +96,7 @@ def _resolve_node_id(comment, file_key, pat, comment_id=None):
         return node_id
 
     parent_id = comment.get('parent_id')
-    lookup_id = parent_id or comment_id  # parent for replies, self for top-level
+    lookup_id = parent_id or comment_id
     if not lookup_id:
         return None
 
@@ -133,8 +150,97 @@ def _build_work_item(payload, comment_id, pat, allowed_file_keys, locale, model,
     return item, None
 
 
+# ── Worker loop ────────────────────────────────────────────────────────
+
+def _run_audit(item, ack_id, trigger_config, log):
+    """Execute the skill and post the reply. Raises on failure.
+
+    Returns the final ack_id (may have been deleted already by this function).
+    """
+    log(f'running skill {item.skill_path}\u2026')
+    response = execute_skill(item)
+    log(f'skill returned {len(response)} chars')
+
+    delete_ack(item, ack_id, log=log)
+    response = clean_reply(response, trigger_config)
+    post_reply(item, response)
+    log(f'reply posted to comment {item.reply_to_id}')
+
+
+def _worker_loop(work_queue, stop_event, trigger_config, max_attempts):
+    while not stop_event.is_set():
+        try:
+            queued = work_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        if queued is None:
+            work_queue.task_done()
+            break
+
+        item = queued.item
+        ack_id = queued.ack_id
+
+        def _log(msg, node_id=item.node_id):
+            print(f'   [{node_id}] {msg}', flush=True)
+
+        try:
+            ack_id = update_ack(
+                item, ack_id,
+                f'\u23f3 Running {item.trigger.lstrip("@")} audit\u2026',
+                log=_log,
+            )
+
+            last_err = None
+            success = False
+            for attempt in range(max_attempts):
+                try:
+                    _run_audit(item, ack_id, trigger_config, _log)
+                    ack_id = None  # _run_audit already deleted it
+                    success = True
+                    break
+                except Exception as err:
+                    last_err = err
+                    _log(f'attempt {attempt + 1}/{max_attempts} failed: {err}')
+                    if attempt >= max_attempts - 1:
+                        break
+                    backoff = _BACKOFFS[min(attempt, len(_BACKOFFS) - 1)]
+                    ack_id = update_ack(
+                        item, ack_id,
+                        (
+                            f'\u23f3 {item.trigger.lstrip("@")} audit hit a snag '
+                            f'({err}). Retrying in {backoff}s (attempt {attempt + 2}/{max_attempts})\u2026'
+                        ),
+                        log=_log,
+                    )
+                    if stop_event.wait(timeout=backoff):
+                        _log('shutdown requested during backoff — aborting')
+                        break
+
+            if success:
+                print(f'✅ {item.trigger} completed for {item.node_id}', flush=True)
+            else:
+                delete_ack(item, ack_id, log=_log)
+                try:
+                    post_reply(
+                        item,
+                        (
+                            f'Audit failed after {max_attempts} attempts.\n'
+                            f'Last error: {last_err}\n\n{_EM_DASH} FigWatch'
+                        ),
+                    )
+                except Exception as post_err:
+                    _log(f'error reply post failed: {post_err}')
+                print(f'❌ {item.trigger} failed for {item.node_id}', flush=True)
+        except Exception as unexpected:
+            _log(f'worker crashed: {unexpected}')
+        finally:
+            work_queue.task_done()
+
+
+# ── HTTP handler ───────────────────────────────────────────────────────
+
 def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
-                  trigger_config, processed_ids, processed_lock, executor):
+                  trigger_config, processed_ids, processed_lock, work_queue):
     class WebhookHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == '/health':
@@ -172,17 +278,15 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
             raw = payload.get('comment')
             payload['comment'] = (raw[0] if isinstance(raw, list) and raw else raw) or {}
 
-            # Figma webhook protocol v2 puts the comment ID at the top level
             comment_id = payload.get('comment_id') or payload['comment'].get('id')
             file_key = payload.get('file_key', '?')
             print(f'📥 FILE_COMMENT {file_key} comment={comment_id}', flush=True)
 
             with processed_lock:
                 if comment_id in processed_ids:
-                    print(f'   skip: already processed', flush=True)
+                    print('   skip: already processed', flush=True)
                     self._respond(200, 'Already processed')
                     return
-                # Reserve immediately to prevent races on concurrent deliveries
                 processed_ids.add(comment_id)
 
             item, reason = _build_work_item(
@@ -200,17 +304,23 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
             save_processed(processed_ids)
             print(f'💬 {item.trigger} by {item.user_handle} on {file_key}/{item.node_id}', flush=True)
 
-            def _run(i):
-                def _log(msg):
-                    print(f'   {msg}', flush=True)
-                ok = process_work_item(i, log=_log, trigger_config=trigger_config)
-                if ok:
-                    print(f'✅ {i.trigger} completed for {i.node_id}', flush=True)
-                else:
-                    print(f'❌ {i.trigger} failed for {i.node_id}', flush=True)
+            # Create the ack with queue position BEFORE enqueuing. Workers
+            # then own the ack lifecycle from here.
+            ahead = work_queue.qsize()
+            if ahead == 0:
+                queue_msg = f'\u23f3 {item.trigger.lstrip("@")} audit queued \u2014 starting shortly\u2026'
+            else:
+                queue_msg = (
+                    f'\u23f3 {item.trigger.lstrip("@")} audit queued '
+                    f'({ahead} ahead of you)\u2026'
+                )
 
-            executor.submit(_run, item)
-            self._respond(200, 'Dispatched')
+            ack_id = post_ack(
+                item, queue_msg,
+                log=lambda msg: print(f'   {msg}', flush=True),
+            )
+            work_queue.put(QueuedItem(item=item, ack_id=ack_id))
+            self._respond(200, 'Queued')
 
         def _respond(self, code, message):
             body = message.encode()
@@ -243,46 +353,63 @@ def main():
     locale = os.environ.get('FIGWATCH_LOCALE', 'uk')
     model = os.environ.get('FIGWATCH_MODEL', 'gemini-flash')
     port = int(os.environ.get('FIGWATCH_PORT', '8080'))
-    claude_path = 'api'  # server always uses REST API, not the Claude CLI
+    worker_count = int(os.environ.get('FIGWATCH_WORKERS', '4'))
+    max_attempts = int(os.environ.get('FIGWATCH_MAX_ATTEMPTS', '3'))
+    claude_path = 'api'
 
     trigger_config = load_trigger_config()
     triggers_str = ', '.join(t.get('trigger', '') for t in trigger_config)
 
-    workers = int(os.environ.get('FIGWATCH_WORKERS', '4'))
     processed_ids = load_processed()
     processed_lock = threading.Lock()
+    work_queue: queue.Queue = queue.Queue()
+    stop_event = threading.Event()
 
     print('🔍 FigWatch webhook server starting', flush=True)
     print(f'   Listening: port {port}  →  POST /webhook', flush=True)
     print(f'   Triggers:  {triggers_str}', flush=True)
-    print(f'   Locale:    {locale}  Model: {model}  Workers: {workers}', flush=True)
+    print(f'   Locale:    {locale}  Model: {model}  Workers: {worker_count}  Max attempts: {max_attempts}', flush=True)
     if allowed_file_keys:
         print(f'   Files:     {", ".join(sorted(allowed_file_keys))}', flush=True)
     else:
         print('   Files:     all (no allowlist — set FIGWATCH_FILES to restrict)', flush=True)
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        handler = _make_handler(
-            pat, passcode, allowed_file_keys,
-            locale, model, claude_path,
-            trigger_config, processed_ids, processed_lock, executor,
+    worker_threads = [
+        threading.Thread(
+            target=_worker_loop,
+            args=(work_queue, stop_event, trigger_config, max_attempts),
+            name=f'figwatch-worker-{i}',
+            daemon=True,
         )
-        server = HTTPServer(('', port), handler)
+        for i in range(worker_count)
+    ]
+    for t in worker_threads:
+        t.start()
 
-        def _shutdown(sig, frame):
-            print('\n⏹  Shutting down — draining in-flight audits…', flush=True)
-            # Run server.shutdown() in a thread: it blocks until the HTTP server
-            # stops, and signal handlers must return promptly.
-            threading.Thread(target=server.shutdown, daemon=True).start()
+    handler = _make_handler(
+        pat, passcode, allowed_file_keys,
+        locale, model, claude_path,
+        trigger_config, processed_ids, processed_lock, work_queue,
+    )
+    server = HTTPServer(('', port), handler)
 
-        signal.signal(signal.SIGINT, _shutdown)
-        signal.signal(signal.SIGTERM, _shutdown)
+    def _shutdown(sig, frame):
+        print('\n⏹  Shutting down — draining in-flight audits…', flush=True)
+        stop_event.set()
+        # Poison pills wake workers waiting on queue.get.
+        for _ in worker_threads:
+            work_queue.put(None)
+        threading.Thread(target=server.shutdown, daemon=True).start()
 
+    signal.signal(signal.SIGINT, _shutdown)
+    signal.signal(signal.SIGTERM, _shutdown)
+
+    try:
         server.serve_forever()
-
-    # ThreadPoolExecutor.__exit__ calls shutdown(wait=True) here,
-    # so all in-flight AI tasks finish before the process exits.
-    print('⏹  All audits complete — exiting.', flush=True)
+    finally:
+        for t in worker_threads:
+            t.join(timeout=5)
+        print('⏹  All workers stopped — exiting.', flush=True)
 
 
 if __name__ == '__main__':

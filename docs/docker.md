@@ -142,6 +142,9 @@ Within seconds you should see the audit appear as a reply in the same thread.
 | `FIGWATCH_LOCALE` | No | `uk` | Locale for tone audits: `uk`, `de`, `fr`, `nl`, `benelux` |
 | `FIGWATCH_PORT` | No | `8080` | Port to listen on |
 | `FIGWATCH_WORKERS` | No | `4` | Number of concurrent skill executions |
+| `FIGWATCH_MAX_ATTEMPTS` | No | `3` | Retry attempts per audit before giving up (backoff: 30s, 2m, 5m) |
+| `FIGWATCH_GEMINI_RPM` | No | `15` | Gemini requests-per-minute cap. Workers block locally when the limit is reached rather than hitting 429s. Set to `0` to disable. |
+| `FIGWATCH_ANTHROPIC_RPM` | No | `5` | Anthropic requests-per-minute cap. Set to `0` to disable. |
 
 ## Restricting to specific files
 

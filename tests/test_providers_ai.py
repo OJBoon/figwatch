@@ -8,10 +8,19 @@ from figwatch.providers.ai import (
     GEMINI_MODELS,
     make_provider,
     parse_retry_seconds,
+    reset_limiters,
 )
 from figwatch.providers.ai.anthropic import AnthropicProvider
 from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
 from figwatch.providers.ai.gemini import GeminiProvider
+from figwatch.providers.ai.rate_limit import TokenBucket
+
+
+@pytest.fixture(autouse=True)
+def _reset_limiters():
+    reset_limiters()
+    yield
+    reset_limiters()
 
 
 # ── make_provider routing ─────────────────────────────────────────────
@@ -115,3 +124,41 @@ def test_parse_retry_seconds_custom_default():
 
 def test_parse_retry_seconds_case_insensitive():
     assert parse_retry_seconds("Retry After 45") == 45
+
+
+# ── Rate limiter wiring ───────────────────────────────────────────────
+
+def test_make_provider_wires_gemini_rate_limiter(monkeypatch):
+    monkeypatch.setenv("FIGWATCH_GEMINI_RPM", "10")
+    reset_limiters()
+    p = make_provider("gemini-flash", "claude")
+    assert isinstance(p._rate_limiter, TokenBucket)
+
+
+def test_make_provider_wires_anthropic_rate_limiter(monkeypatch):
+    monkeypatch.setenv("FIGWATCH_ANTHROPIC_RPM", "3")
+    reset_limiters()
+    p = make_provider("sonnet", "api")
+    assert isinstance(p._rate_limiter, TokenBucket)
+
+
+def test_make_provider_disables_gemini_limiter_when_zero(monkeypatch):
+    monkeypatch.setenv("FIGWATCH_GEMINI_RPM", "0")
+    reset_limiters()
+    p = make_provider("gemini-flash", "claude")
+    assert p._rate_limiter is None
+
+
+def test_make_provider_disables_anthropic_limiter_when_zero(monkeypatch):
+    monkeypatch.setenv("FIGWATCH_ANTHROPIC_RPM", "0")
+    reset_limiters()
+    p = make_provider("sonnet", "api")
+    assert p._rate_limiter is None
+
+
+def test_shared_limiter_across_provider_instances(monkeypatch):
+    monkeypatch.setenv("FIGWATCH_GEMINI_RPM", "10")
+    reset_limiters()
+    p1 = make_provider("gemini-flash", "claude")
+    p2 = make_provider("gemini-flash", "claude")
+    assert p1._rate_limiter is p2._rate_limiter

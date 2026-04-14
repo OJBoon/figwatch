@@ -9,15 +9,19 @@ class AnthropicProvider:
     name = 'Claude'
     inline_files = True
 
-    def __init__(self, model_name: str, api_key: str):
+    def __init__(self, model_name: str, api_key: str, rate_limiter=None):
         self._model_name = model_name
         self._api_key = api_key
+        self._rate_limiter = rate_limiter
 
     def call(self, prompt: str, image_path: 'str | None') -> str:
         try:
             import anthropic
         except ImportError:
             raise RuntimeError('anthropic package not installed — run: pip install anthropic')
+
+        if self._rate_limiter:
+            self._rate_limiter.acquire()
 
         client = anthropic.Anthropic(api_key=self._api_key)
         content = []
