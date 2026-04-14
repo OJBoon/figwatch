@@ -751,7 +751,7 @@ class FigWatch(NSObject):
         self._set_icon(False)
         btn.setTarget_(self); btn.setAction_(b"toggle:")
 
-        # Floating panel with frosted glass effect
+        # Floating panel with liquid glass effect
         self._panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, W, 400),
             NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
@@ -761,15 +761,29 @@ class FigWatch(NSObject):
         self._panel.setHasShadow_(True)
         self._panel.setOpaque_(False)
         self._panel.setBackgroundColor_(NSColor.clearColor())
-        # Replace content view with NSVisualEffectView for frosted glass
-        glass = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 400))
-        glass.setMaterial_(3)   # NSVisualEffectMaterialHUDWindow
-        glass.setState_(1)     # NSVisualEffectStateActive
-        glass.setBlendingMode_(0)  # behindWindow
+        # Liquid glass backdrop (macOS 26+) — falls back to NSVisualEffectView
+        # on older systems so the panel still renders.
+        try:
+            glass = NSGlassEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 400))
+        except Exception:
+            glass = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 400))
+            glass.setMaterial_(3)
+            glass.setState_(1)
+            glass.setBlendingMode_(0)
         glass.setWantsLayer_(True)
         glass.layer().setCornerRadius_(12)
         glass.layer().setMasksToBounds_(True)
         self._panel.setContentView_(glass)
+        # NSGlassEffectView hosts content inside its own contentView; older
+        # NSVisualEffectView uses itself as the container. Store the right
+        # target for _rebuild_popover.
+        host = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 400))
+        host.setWantsLayer_(True)
+        if glass.respondsToSelector_(b"setContentView:"):
+            glass.setContentView_(host)
+        else:
+            glass.addSubview_(host)
+        self._content_host = host
         # Also clip the window's backing layer to prevent background bleed
         self._panel.contentView().superview().setWantsLayer_(True)
         self._panel.contentView().superview().layer().setCornerRadius_(12)
@@ -1107,7 +1121,7 @@ class FigWatch(NSObject):
     def _rebuild_popover(self):
         """Build and display the panel with latest data."""
         view, h = self._build_current_view()
-        content = self._panel.contentView()
+        content = getattr(self, "_content_host", None) or self._panel.contentView()
         # Remove old subviews
         for sub in list(content.subviews()):
             sub.removeFromSuperview()
@@ -1116,6 +1130,8 @@ class FigWatch(NSObject):
         view.setWantsLayer_(True)
         view.layer().setBackgroundColor_(None)
         content.addSubview_(view)
+        # Keep host sized to the panel so the content lays out correctly.
+        content.setFrame_(NSMakeRect(0, 0, W, h))
         # Resize panel, keeping top-left fixed
         old_frame = self._panel.frame()
         new_y = old_frame.origin.y + old_frame.size.height - h
@@ -1159,15 +1175,25 @@ class FigWatch(NSObject):
                 if not self._state.get("popover_open"):
                     break
                 try:
-                    snap = self._data_snapshot()
-                    if snap != self._state.get("_last_data_snap"):
-                        self._state["_last_data_snap"] = snap
-                        self._rebuild_popover()
-                    else:
-                        self._update_countdown_label()
+                    self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                        b"_refreshTick:", None, False)
                 except Exception:
                     pass
         threading.Thread(target=_loop, daemon=True).start()
+
+    @objc.typedSelector(b"v@:@")
+    def _refreshTick_(self, _arg):
+        if not self._state.get("popover_open"):
+            return
+        try:
+            snap = self._data_snapshot()
+            if snap != self._state.get("_last_data_snap"):
+                self._state["_last_data_snap"] = snap
+                self._rebuild_popover()
+            else:
+                self._update_countdown_label()
+        except Exception:
+            pass
 
     def _stop_refresh_timer(self):
         pass  # Loop stops when popover_open is set to False
@@ -1455,14 +1481,13 @@ class FigWatch(NSObject):
         y += 28
 
         # Add button
-        add_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, y, SW, 24))
+        add_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, y, SW, 32))
         add_btn.setTitle_("Add Trigger")
         add_btn.setBezelStyle_(NSBezelStyleRecessed)
-        add_btn.setControlSize_(1)
-        add_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+        add_btn.setFont_(NSFont.systemFontOfSize_weight_(12, NSFontWeightMedium))
         add_btn.setTarget_(self); add_btn.setAction_(b"doAddTriggerInline:")
         acc.addSubview_(add_btn)
-        y += 28
+        y += 36
 
         # Store refs for the inline add handler
         self._add_trigger_kw = kw_field
