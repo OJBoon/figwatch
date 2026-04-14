@@ -6,6 +6,7 @@ All providers expose:
   .call(prompt, image_path) -> str
 """
 
+import logging
 import os
 import re
 import threading
@@ -13,6 +14,8 @@ import time
 from typing import Optional, Protocol, runtime_checkable
 
 from figwatch.providers.ai.rate_limit import TokenBucket
+
+logger = logging.getLogger(__name__)
 
 # Friendly aliases → full Anthropic API model IDs
 CLAUDE_API_MODELS = {
@@ -97,7 +100,10 @@ def with_retry(call_fn, is_rate_limit_fn, label):
         except Exception as e:
             if is_rate_limit_fn(e) and attempt == 0:
                 wait = parse_retry_seconds(e)
-                print(f'   {label} 429 — retrying in {wait}s…', flush=True)
+                logger.warning(
+                    'rate limited — retrying',
+                    extra={'provider': label, 'retry_in_seconds': wait},
+                )
                 time.sleep(wait)
             else:
                 raise

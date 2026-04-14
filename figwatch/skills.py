@@ -1,6 +1,7 @@
 """Skill discovery, introspection, prompt building, and execution."""
 
 import json
+import logging
 import os
 import re
 from pathlib import Path
@@ -10,6 +11,8 @@ from figwatch.providers.ai import make_provider, GEMINI_MODELS, CLAUDE_API_MODEL
 from figwatch.providers.ai.gemini import GeminiProvider
 from figwatch.providers.ai.anthropic import AnthropicProvider
 from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
+
+logger = logging.getLogger(__name__)
 
 _HOME = Path.home()
 _BUNDLED_SKILLS = Path(__file__).parent / 'skills'
@@ -279,6 +282,10 @@ def execute_skill(item):
 
     intro = _get_introspection(skill_ref, skill_path, item.claude_path, item.model)
     required_data = intro.get('required_data', ['screenshot', 'node_tree'])
+    logger.debug(
+        'fetching figma data',
+        extra={'required': ','.join(required_data)},
+    )
 
     data, tree_data = fetch_figma_data(required_data, item.file_key, item.node_id, item.pat)
 
@@ -303,6 +310,10 @@ def execute_skill(item):
 
     frame_name = tree_data.get('name', 'Unknown frame') if tree_data else 'Unknown frame'
     provider = make_provider(item.model, item.claude_path, skill_dir=skill_dir)
+    logger.debug(
+        'calling ai provider',
+        extra={'provider': provider.name, 'frame': frame_name},
+    )
     prompt = _build_prompt(
         item, skill_content, refs_section, data, tree_data, frame_name,
         inline_files=provider.inline_files,

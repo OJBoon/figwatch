@@ -145,6 +145,8 @@ Within seconds you should see the audit appear as a reply in the same thread.
 | `FIGWATCH_MAX_ATTEMPTS` | No | `3` | Retry attempts per audit before giving up (backoff: 30s, 2m, 5m) |
 | `FIGWATCH_GEMINI_RPM` | No | `15` | Gemini requests-per-minute cap. Workers block locally when the limit is reached rather than hitting 429s. Set to `0` to disable. |
 | `FIGWATCH_ANTHROPIC_RPM` | No | `5` | Anthropic requests-per-minute cap. Set to `0` to disable. |
+| `FIGWATCH_LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. `DEBUG` shows ack lifecycle, Figma API calls, rate limiter acquires. |
+| `FIGWATCH_LOG_FORMAT` | No | `text` | `text` for human-readable output (Dozzle-friendly, ANSI colors in TTY), or `json` for one JSON object per line (for log aggregators like Loki, Datadog). |
 
 ## Restricting to specific files
 
@@ -177,15 +179,26 @@ docker compose logs -f
 A healthy run looks like this:
 
 ```
-📥 FILE_COMMENT abc123 comment=1234567
-💬 @ux by Alice on abc123/176:24454
-   ack posted (comment 1234568)
-   running skill builtin:ux…
-   skill returned 1842 chars
-   ack deleted
-   reply posted to comment 1234567
-✅ @ux completed for 176:24454
+2026-04-14 19:19:06 INFO  server     📥 webhook received file=abc123 comment=1234567
+2026-04-14 19:19:06 INFO  server     audit=a3f9e2d1 trigger=@ux node=176:24454 file=abc123 💬 trigger matched user=alice
+2026-04-14 19:19:06 INFO  server     audit=a3f9e2d1 trigger=@ux node=176:24454 file=abc123 queue.enqueued depth=1
+2026-04-14 19:19:06 INFO  server     audit=a3f9e2d1 trigger=@ux node=176:24454 file=abc123 attempt=1 queue.dequeued depth=0 waited=0.10s
+2026-04-14 19:19:06 INFO  skills     audit=a3f9e2d1 trigger=@ux node=176:24454 file=abc123 attempt=1 running skill skill=builtin:ux
+2026-04-14 19:19:08 INFO  skills     audit=a3f9e2d1 trigger=@ux node=176:24454 file=abc123 attempt=1 skill returned chars=1842
+2026-04-14 19:19:08 INFO  server     audit=a3f9e2d1 trigger=@ux node=176:24454 file=abc123 attempt=1 reply posted reply_to=1234567
+2026-04-14 19:19:08 INFO  server     audit=a3f9e2d1 trigger=@ux node=176:24454 file=abc123 attempt=1 ✅ audit.completed queued=0.10s running=2.00s total=2.10s attempts=1
+
 ```
+
+### Correlating log lines for a single audit
+
+Every log line produced while processing a comment carries the same `audit=XXXXXXXX` ID. To see the full lifecycle for one audit in [Dozzle](https://dozzle.dev) or `docker compose logs`, search for that audit ID:
+
+```bash
+docker compose logs figwatch | grep 'audit=a3f9e2d1'
+```
+
+The same works for `trigger=@ux`, `node=176:24454`, or `file=abc123` if you want to filter by other dimensions.
 
 ## Troubleshooting
 

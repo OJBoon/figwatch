@@ -1,12 +1,15 @@
 """FigWatch comment watcher — polls Figma for trigger comments and dispatches work items."""
 
 import json
+import logging
 import os
 import threading
 
 from figwatch.domain import WorkItem, load_trigger_config, match_trigger
 from figwatch.processor import process_work_item
 from figwatch.providers.figma import figma_get
+
+logger = logging.getLogger(__name__)
 
 _EM_DASH = '\u2014'
 _OWN_REPLY_MARKERS = (_EM_DASH + ' Claude', _EM_DASH + ' Gemini')

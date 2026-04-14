@@ -22,27 +22,25 @@ Environment variables:
   GOOGLE_API_KEY              Google AI API key (for Gemini models)
 
   FIGWATCH_MODEL              Model to use (default: gemini-flash)
-                                Gemini:  gemini-flash, gemini-flash-lite,
-                                         or any full Gemini model ID
-                                Claude:  sonnet, opus, haiku
-  FIGWATCH_FILES              Optional — comma-separated Figma file URLs or keys;
-                              if set, only handle comments from these files
+  FIGWATCH_FILES              Optional — comma-separated Figma file URLs or keys
   FIGWATCH_LOCALE             Locale for tone audits: uk, de, fr, nl, benelux (default: uk)
   FIGWATCH_PORT               Port to listen on (default: 8080)
   FIGWATCH_WORKERS            Number of worker threads (default: 4)
   FIGWATCH_MAX_ATTEMPTS       Retry attempts per audit before giving up (default: 3)
   FIGWATCH_GEMINI_RPM         Requests per minute for Gemini (default: 15; 0 disables)
   FIGWATCH_ANTHROPIC_RPM      Requests per minute for Anthropic (default: 5; 0 disables)
+  FIGWATCH_LOG_LEVEL          Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)
+  FIGWATCH_LOG_FORMAT         Log format: text (default) or json
 """
 
 import json
+import logging
 import os
-import queue
 import re
 import signal
 import sys
 import threading
-from collections import namedtuple
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Allow running from the repo root without installing the package
@@ -51,21 +49,25 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from figwatch.domain import WorkItem, load_trigger_config, match_trigger
+from figwatch.log_context import (
+    new_audit_id, set_audit_context, reset_audit_context, clear_audit_context,
+)
+from figwatch.logging_config import configure_logging
 from figwatch.processor import (
     clean_reply, delete_ack, post_ack, post_reply, update_ack,
 )
 from figwatch.providers.figma import figma_get_retry
+from figwatch.queue_stats import InstrumentedQueue, QueuedItem
 from figwatch.skills import execute_skill
 from figwatch.watcher import load_processed, save_processed
+
+logger = logging.getLogger(__name__)
 
 # Retry backoff schedule (seconds). Length determines the max backoff —
 # subsequent retries reuse the final value.
 _BACKOFFS = [30, 120, 300]
 
 _EM_DASH = '\u2014'
-
-# Queue entry holds the item and the current ack_id, which changes across retries.
-QueuedItem = namedtuple('QueuedItem', ['item', 'ack_id'])
 
 
 def _parse_file_keys(files_str):
@@ -81,16 +83,13 @@ def _parse_file_keys(files_str):
         elif re.match(r'^[a-zA-Z0-9]{10,}$', item):
             keys.add(item)
         else:
-            print(f'⚠️  Skipping unrecognised entry: {item!r}', flush=True)
+            logger.warning('skipping unrecognised FIGWATCH_FILES entry',
+                           extra={'entry': item})
     return keys
 
 
 def _resolve_node_id(comment, file_key, pat, comment_id=None):
-    """Return node_id for a comment, fetching the full comment from REST API if needed.
-
-    Figma webhook v2 strips client_meta from the payload, so we always fall back
-    to a REST API lookup using either the parent_id (for replies) or comment_id.
-    """
+    """Return node_id for a comment, fetching the full comment from REST API if needed."""
     node_id = (comment.get('client_meta') or {}).get('node_id')
     if node_id:
         return node_id
@@ -106,7 +105,7 @@ def _resolve_node_id(comment, file_key, pat, comment_id=None):
             if str(c.get('id')) == str(lookup_id):
                 return (c.get('client_meta') or {}).get('node_id')
     except Exception as e:
-        print(f'   node_id lookup failed: {e}', flush=True)
+        logger.warning('node_id lookup failed', extra={'error': str(e)})
     return None
 
 
@@ -117,7 +116,6 @@ def _build_work_item(payload, comment_id, pat, allowed_file_keys, locale, model,
         return None, 'file not in allowlist'
 
     comment = payload.get('comment') or {}
-    # Webhook payloads use 'text'; REST API responses use 'message'
     message = comment.get('message') or comment.get('text', '')
 
     match = match_trigger(message, trigger_config)
@@ -152,55 +150,67 @@ def _build_work_item(payload, comment_id, pat, allowed_file_keys, locale, model,
 
 # ── Worker loop ────────────────────────────────────────────────────────
 
-def _run_audit(item, ack_id, trigger_config, log):
-    """Execute the skill and post the reply. Raises on failure.
-
-    Returns the final ack_id (may have been deleted already by this function).
-    """
-    log(f'running skill {item.skill_path}\u2026')
+def _run_audit(item, ack_id, trigger_config):
+    """Execute the skill and post the reply. Raises on failure."""
+    logger.info('running skill', extra={'skill': item.skill_path})
     response = execute_skill(item)
-    log(f'skill returned {len(response)} chars')
+    logger.info('skill returned', extra={'chars': len(response)})
 
-    delete_ack(item, ack_id, log=log)
+    delete_ack(item, ack_id)
     response = clean_reply(response, trigger_config)
     post_reply(item, response)
-    log(f'reply posted to comment {item.reply_to_id}')
+    logger.info('reply posted', extra={'reply_to': item.reply_to_id})
 
 
-def _worker_loop(work_queue, stop_event, trigger_config, max_attempts):
+def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config, max_attempts):
     while not stop_event.is_set():
-        try:
-            queued = work_queue.get(timeout=1)
-        except queue.Empty:
-            continue
+        queued = work_queue.get(timeout=1)
         if queued is None:
-            work_queue.task_done()
-            break
+            # Either Queue.Empty (timed out) or poison pill.
+            if stop_event.is_set():
+                break
+            continue
 
         item = queued.item
         ack_id = queued.ack_id
+        run_started_at = time.monotonic()
 
-        def _log(msg, node_id=item.node_id):
-            print(f'   [{node_id}] {msg}', flush=True)
-
+        token = set_audit_context(
+            audit=queued.audit_id,
+            trigger=item.trigger,
+            node=item.node_id,
+            file=item.file_key,
+            attempt=queued.attempt,
+        )
         try:
+            stats = work_queue.stats()
+            logger.info(
+                'queue.dequeued',
+                extra={'depth': stats.depth, 'waited': f'{queued.waited_seconds:.2f}s'},
+            )
+
             ack_id = update_ack(
                 item, ack_id,
                 f'\u23f3 Running {item.trigger.lstrip("@")} audit\u2026',
-                log=_log,
             )
 
             last_err = None
             success = False
             for attempt in range(max_attempts):
+                if attempt > 0:
+                    set_audit_context(attempt=attempt + 1)
                 try:
-                    _run_audit(item, ack_id, trigger_config, _log)
-                    ack_id = None  # _run_audit already deleted it
+                    _run_audit(item, ack_id, trigger_config)
+                    ack_id = None
                     success = True
                     break
                 except Exception as err:
                     last_err = err
-                    _log(f'attempt {attempt + 1}/{max_attempts} failed: {err}')
+                    logger.warning(
+                        'audit attempt failed',
+                        extra={'attempt': attempt + 1, 'max_attempts': max_attempts,
+                               'error': str(err)},
+                    )
                     if attempt >= max_attempts - 1:
                         break
                     backoff = _BACKOFFS[min(attempt, len(_BACKOFFS) - 1)]
@@ -208,18 +218,29 @@ def _worker_loop(work_queue, stop_event, trigger_config, max_attempts):
                         item, ack_id,
                         (
                             f'\u23f3 {item.trigger.lstrip("@")} audit hit a snag '
-                            f'({err}). Retrying in {backoff}s (attempt {attempt + 2}/{max_attempts})\u2026'
+                            f'({err}). Retrying in {backoff}s '
+                            f'(attempt {attempt + 2}/{max_attempts})\u2026'
                         ),
-                        log=_log,
                     )
                     if stop_event.wait(timeout=backoff):
-                        _log('shutdown requested during backoff — aborting')
+                        logger.info('shutdown during backoff — aborting retry')
                         break
 
+            running_seconds = time.monotonic() - run_started_at
+            total_seconds = time.monotonic() - queued.enqueued_at
+
             if success:
-                print(f'✅ {item.trigger} completed for {item.node_id}', flush=True)
+                logger.info(
+                    '\u2705 audit.completed',
+                    extra={
+                        'queued': f'{queued.waited_seconds:.2f}s',
+                        'running': f'{running_seconds:.2f}s',
+                        'total': f'{total_seconds:.2f}s',
+                        'attempts': attempt + 1,
+                    },
+                )
             else:
-                delete_ack(item, ack_id, log=_log)
+                delete_ack(item, ack_id)
                 try:
                     post_reply(
                         item,
@@ -228,13 +249,23 @@ def _worker_loop(work_queue, stop_event, trigger_config, max_attempts):
                             f'Last error: {last_err}\n\n{_EM_DASH} FigWatch'
                         ),
                     )
-                except Exception as post_err:
-                    _log(f'error reply post failed: {post_err}')
-                print(f'❌ {item.trigger} failed for {item.node_id}', flush=True)
-        except Exception as unexpected:
-            _log(f'worker crashed: {unexpected}')
+                except Exception:
+                    logger.exception('error reply post failed')
+                logger.error(
+                    '\u274c audit.failed',
+                    extra={
+                        'queued': f'{queued.waited_seconds:.2f}s',
+                        'running': f'{running_seconds:.2f}s',
+                        'total': f'{total_seconds:.2f}s',
+                        'attempts': max_attempts,
+                        'last_error': str(last_err) if last_err else 'unknown',
+                    },
+                )
+        except Exception:
+            logger.exception('worker crashed unexpectedly')
         finally:
             work_queue.task_done()
+            reset_audit_context(token)
 
 
 # ── HTTP handler ───────────────────────────────────────────────────────
@@ -249,6 +280,10 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
                 self._respond(404, 'Not found')
 
         def do_POST(self):
+            # Each request starts with a fresh context — worker threads will
+            # re-set their own when they pick up the work item.
+            clear_audit_context()
+
             if self.path != '/webhook':
                 self._respond(404, 'Not found')
                 return
@@ -267,6 +302,7 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
             event_type = payload.get('event_type')
 
             if event_type == 'PING':
+                logger.info('\U0001f3d3 ping received')
                 self._respond(200, 'pong')
                 return
 
@@ -274,17 +310,20 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
                 self._respond(200, 'Ignored')
                 return
 
-            # Figma sends comment as a list — normalise to a single object
             raw = payload.get('comment')
             payload['comment'] = (raw[0] if isinstance(raw, list) and raw else raw) or {}
 
             comment_id = payload.get('comment_id') or payload['comment'].get('id')
             file_key = payload.get('file_key', '?')
-            print(f'📥 FILE_COMMENT {file_key} comment={comment_id}', flush=True)
+
+            logger.info(
+                '\U0001f4e5 webhook received',
+                extra={'file': file_key, 'comment': comment_id},
+            )
 
             with processed_lock:
                 if comment_id in processed_ids:
-                    print('   skip: already processed', flush=True)
+                    logger.debug('skip — already processed')
                     self._respond(200, 'Already processed')
                     return
                 processed_ids.add(comment_id)
@@ -297,29 +336,50 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
             if item is None:
                 with processed_lock:
                     processed_ids.discard(comment_id)
-                print(f'   skip: {reason}', flush=True)
+                logger.debug('skip', extra={'reason': reason})
                 self._respond(200, reason)
                 return
 
             save_processed(processed_ids)
-            print(f'💬 {item.trigger} by {item.user_handle} on {file_key}/{item.node_id}', flush=True)
 
-            # Create the ack with queue position BEFORE enqueuing. Workers
-            # then own the ack lifecycle from here.
-            ahead = work_queue.qsize()
+            audit_id = new_audit_id()
+            # Temporarily set context so the ack post + enqueue log lines
+            # carry the new audit_id. Cleared on next request.
+            set_audit_context(
+                audit=audit_id,
+                trigger=item.trigger,
+                node=item.node_id,
+                file=file_key,
+            )
+
+            logger.info(
+                '\U0001f4ac trigger matched',
+                extra={'user': item.user_handle},
+            )
+
+            ahead = work_queue.depth
             if ahead == 0:
-                queue_msg = f'\u23f3 {item.trigger.lstrip("@")} audit queued \u2014 starting shortly\u2026'
+                queue_msg = (
+                    f'\u23f3 {item.trigger.lstrip("@")} audit queued '
+                    f'\u2014 starting shortly\u2026'
+                )
             else:
                 queue_msg = (
                     f'\u23f3 {item.trigger.lstrip("@")} audit queued '
                     f'({ahead} ahead of you)\u2026'
                 )
+            ack_id = post_ack(item, queue_msg)
 
-            ack_id = post_ack(
-                item, queue_msg,
-                log=lambda msg: print(f'   {msg}', flush=True),
+            queued = QueuedItem(
+                item=item,
+                ack_id=ack_id,
+                audit_id=audit_id,
             )
-            work_queue.put(QueuedItem(item=item, ack_id=ack_id))
+            work_queue.put(queued)
+
+            stats = work_queue.stats()
+            logger.info('queue.enqueued', extra={'depth': stats.depth})
+
             self._respond(200, 'Queued')
 
         def _respond(self, code, message):
@@ -331,20 +391,27 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
             self.wfile.write(body)
 
         def log_message(self, fmt, *args):
-            print(f'→ {self.command} {self.path} {args[1] if len(args) > 1 else ""}', flush=True)
+            # Route BaseHTTPRequestHandler's own access logging through our logger.
+            logger.debug(
+                'http access',
+                extra={'method': self.command, 'path': self.path,
+                       'status': args[1] if len(args) > 1 else ''},
+            )
 
     return WebhookHandler
 
 
 def main():
+    configure_logging()
+
     pat = os.environ.get('FIGMA_PAT', '').strip()
     passcode = os.environ.get('FIGWATCH_WEBHOOK_PASSCODE', '').strip()
 
     if not pat:
-        print('❌ FIGMA_PAT is required.', file=sys.stderr)
+        logger.error('FIGMA_PAT is required')
         sys.exit(1)
     if not passcode:
-        print('❌ FIGWATCH_WEBHOOK_PASSCODE is required.', file=sys.stderr)
+        logger.error('FIGWATCH_WEBHOOK_PASSCODE is required')
         sys.exit(1)
 
     files_str = os.environ.get('FIGWATCH_FILES', '').strip()
@@ -362,17 +429,18 @@ def main():
 
     processed_ids = load_processed()
     processed_lock = threading.Lock()
-    work_queue: queue.Queue = queue.Queue()
+    work_queue = InstrumentedQueue()
     stop_event = threading.Event()
 
-    print('🔍 FigWatch webhook server starting', flush=True)
-    print(f'   Listening: port {port}  →  POST /webhook', flush=True)
-    print(f'   Triggers:  {triggers_str}', flush=True)
-    print(f'   Locale:    {locale}  Model: {model}  Workers: {worker_count}  Max attempts: {max_attempts}', flush=True)
-    if allowed_file_keys:
-        print(f'   Files:     {", ".join(sorted(allowed_file_keys))}', flush=True)
-    else:
-        print('   Files:     all (no allowlist — set FIGWATCH_FILES to restrict)', flush=True)
+    logger.info(
+        '\U0001f50d figwatch starting',
+        extra={
+            'port': port, 'workers': worker_count, 'model': model,
+            'locale': locale, 'max_attempts': max_attempts,
+            'triggers': triggers_str,
+            'files': ','.join(sorted(allowed_file_keys)) if allowed_file_keys else 'all',
+        },
+    )
 
     worker_threads = [
         threading.Thread(
@@ -394,11 +462,9 @@ def main():
     server = HTTPServer(('', port), handler)
 
     def _shutdown(sig, frame):
-        print('\n⏹  Shutting down — draining in-flight audits…', flush=True)
+        logger.info('\u23f9 shutting down — draining in-flight audits')
         stop_event.set()
-        # Poison pills wake workers waiting on queue.get.
-        for _ in worker_threads:
-            work_queue.put(None)
+        # Workers wake via get(timeout=1) and break on stop_event — no pills needed.
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, _shutdown)
@@ -409,7 +475,7 @@ def main():
     finally:
         for t in worker_threads:
             t.join(timeout=5)
-        print('⏹  All workers stopped — exiting.', flush=True)
+        logger.info('\u23f9 all workers stopped — exiting')
 
 
 if __name__ == '__main__':

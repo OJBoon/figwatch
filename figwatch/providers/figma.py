@@ -1,6 +1,7 @@
 """Figma API client and design data fetching."""
 
 import json
+import logging
 import os
 import tempfile
 import time
@@ -8,6 +9,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+
+logger = logging.getLogger(__name__)
 
 FIGMA_API = 'https://api.figma.com/v1'
 
@@ -62,10 +65,18 @@ def figma_get_retry(path, pat, retries=1):
                     wait = int(e.headers.get('Retry-After', '0') or 0)
                 except Exception:
                     wait = 0
+                logger.warning(
+                    'figma 429 — retrying',
+                    extra={'path': path, 'retry_in_seconds': max(wait, 2)},
+                )
                 time.sleep(max(wait, 2))
                 continue
+            logger.warning('figma API error',
+                           extra={'path': path, 'status': e.code})
             return None
-        except Exception:
+        except Exception as e:
+            logger.warning('figma API call failed',
+                           extra={'path': path, 'error': str(e)})
             return None
     return None
 
