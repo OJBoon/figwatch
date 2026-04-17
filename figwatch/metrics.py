@@ -47,6 +47,10 @@ def init_metrics(service_name='figwatch'):
         )
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+        from opentelemetry.sdk.metrics.view import View
+        from opentelemetry.sdk.metrics.aggregation import (
+            ExplicitBucketHistogramAggregation,
+        )
         from opentelemetry.sdk.resources import Resource
     except ImportError:
         logger.warning(
@@ -57,7 +61,21 @@ def init_metrics(service_name='figwatch'):
 
     resource = Resource.create({'service.name': service_name})
     reader = PeriodicExportingMetricReader(OTLPMetricExporter())
-    provider = MeterProvider(resource=resource, metric_readers=[reader])
+
+    # Custom buckets for audit durations — default OTel buckets are tuned for
+    # sub-second HTTP latencies, but AI audits typically take 5-120 seconds.
+    audit_duration_view = View(
+        instrument_name='figwatch.audit.duration_seconds',
+        aggregation=ExplicitBucketHistogramAggregation(
+            boundaries=[1, 2, 5, 10, 15, 30, 45, 60, 90, 120, 180, 300],
+        ),
+    )
+
+    provider = MeterProvider(
+        resource=resource,
+        metric_readers=[reader],
+        views=[audit_duration_view],
+    )
     metrics.set_meter_provider(provider)
 
     _meter = provider.get_meter('figwatch')
