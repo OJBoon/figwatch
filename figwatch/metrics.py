@@ -47,8 +47,8 @@ def init_metrics(service_name='figwatch'):
         )
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
-        from opentelemetry.sdk.metrics.view import View
-        from opentelemetry.sdk.metrics.aggregation import (
+        from opentelemetry.sdk.metrics.view import (
+            View,
             ExplicitBucketHistogramAggregation,
         )
         from opentelemetry.sdk.resources import Resource

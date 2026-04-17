@@ -21,10 +21,13 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: pip install -e ".[dev,server]"
 
       - name: Run tests
         run: pytest
+
+      - name: Verify server imports
+        run: python -c "from figwatch.metrics import init_metrics; from figwatch.webhook_monitor import WebhookMonitor; print('ok')"
 
   docker:
     name: Docker build
