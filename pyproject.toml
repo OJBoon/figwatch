@@ -1,0 +1,36 @@
+[project]
+name = "figwatch"
+dynamic = ["version"]
+description = "AI-powered Figma design auditor — drop a trigger comment on any frame, get an instant audit reply"
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+# pip install -e ".[server]"  — installs API clients for server/Docker deployment
+server = [
+    "anthropic",
+    "google-genai",
+    "opentelemetry-api",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-otlp-proto-grpc",
+]
+# pip install -e ".[dev]"  — installs test dependencies
+dev = [
+    "pytest",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.dynamic]
+version = {attr = "figwatch.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["figwatch*"]
+
+[tool.setuptools.package-data]
+figwatch = ["skills/**/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
