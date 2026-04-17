@@ -148,6 +148,12 @@ Within seconds you should see the audit appear as a reply in the same thread.
 | `FIGWATCH_QUEUE_UPDATE_RPM` | No | `5` | Live queue-position ack updates per minute. When audits stack up behind others, a background worker refreshes their "N ahead of you" ack messages as the queue drains. Capped well below Figma's write budget so core audit replies always have headroom. Set to `0` to disable — acks then stay at their initial position until picked up. |
 | `FIGWATCH_LOG_LEVEL` | No | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. `DEBUG` shows ack lifecycle, Figma API calls, rate limiter acquires. |
 | `FIGWATCH_LOG_FORMAT` | No | `text` | `text` for human-readable output (Dozzle-friendly, ANSI colors in TTY), or `json` for one JSON object per line (for log aggregators like Loki, Datadog). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | No | — | OpenTelemetry collector endpoint (e.g. `http://otel-collector:4317`). Enables metrics export. |
+| `FIGWATCH_TEAM_ID` | No | — | Figma team ID. Enables webhook health monitoring — detects missed webhooks by reconciling against the Figma comments API. |
+| `FIGWATCH_MONITOR_TICK` | No | `60` | Seconds between checking the next file in the monitoring rotation. |
+| `FIGWATCH_MONITOR_GRACE` | No | `60` | Seconds to wait before flagging a comment as a missed webhook (gives the webhook time to arrive). |
+| `FIGWATCH_MONITOR_FILE_REFRESH` | No | `3600` | Seconds between re-enumerating team files for monitoring. |
+| `FIGWATCH_MONITOR_RPM` | No | `5` | Figma API requests-per-minute budget for the webhook monitor. Kept low so monitoring doesn't compete with audit operations. |
 
 ## Restricting to specific files
 
@@ -200,6 +206,52 @@ docker compose logs figwatch | grep 'audit=a3f9e2d1'
 ```
 
 The same works for `trigger=@ux`, `node=176:24454`, or `file=abc123` if you want to filter by other dimensions.
+
+## Webhook health monitoring
+
+Figma webhooks can be unreliable — sometimes a comment is created but the webhook never fires. FigWatch can detect these missed webhooks by periodically checking the Figma comments API and comparing against what arrived via webhook.
+
+### Enabling
+
+Set `FIGWATCH_TEAM_ID` to your Figma team ID:
+
+```env
+FIGWATCH_TEAM_ID=1234567890
+```
+
+On startup, FigWatch discovers all files in your team via the Figma API, then rotates through them one per tick (default 60 seconds). For each file it fetches recent comments and checks whether they were delivered via webhook. Missed comments are logged as warnings:
+
+```
+2026-04-17 10:30:12 WARNING monitor  monitor: missed webhook detected file=abc123 comment_id=9876543 comment_age_seconds=95
+```
+
+The file list is refreshed hourly so new files are picked up automatically.
+
+### Rate limiting
+
+The monitor uses a dedicated rate limiter (default 5 req/min) so it doesn't compete with audit operations for the shared Figma API budget. With 5 req/min and a 60-second tick, the monitor uses roughly 1 request per tick for comment checks, plus a small burst when enumerating team files on startup and hourly refresh.
+
+### OpenTelemetry metrics
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export metrics to any OTel-compatible collector:
+
+```env
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+```
+
+Key metrics:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `figwatch.webhook.received_total` | Counter | Webhook events received, by `event_type` |
+| `figwatch.webhook.missed_total` | Counter | Comments found in Figma but never received via webhook |
+| `figwatch.webhook.last_received_seconds` | Gauge | Unix timestamp of last webhook event |
+| `figwatch.monitor.files_tracked` | Gauge | Number of files in monitoring rotation |
+| `figwatch.audit.duration_seconds` | Histogram | End-to-end audit time |
+| `figwatch.audit.total` | Counter | Audits completed, by `status` |
+| `figwatch.queue.depth` | UpDownCounter | Current queue depth |
+
+Metrics are disabled (zero overhead) when `OTEL_EXPORTER_OTLP_ENDPOINT` is not set. The monitor can run without OTel — it still logs missed webhooks as warnings.
 
 ## Troubleshooting
 
