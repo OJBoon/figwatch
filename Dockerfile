@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir ".[server]"
 # Then copy source — changes here don't re-trigger pip install
 COPY figwatch/ ./figwatch/
 COPY server.py .
-RUN pip install --no-cache-dir --no-deps -e .
+RUN pip install --no-cache-dir --no-deps .
 
 VOLUME ["/app/custom-skills"]
 
