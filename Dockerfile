@@ -5,14 +5,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && \
 
 WORKDIR /app
 
-# Install deps first — layer rebuilds when pyproject.toml changes
 COPY pyproject.toml .
-RUN pip install --no-cache-dir ".[server]"
-
-# Then copy source — changes here don't re-trigger pip install
 COPY figwatch/ ./figwatch/
 COPY server.py .
-RUN pip install --no-cache-dir --no-deps .
+RUN pip install --no-cache-dir ".[server]"
 
 VOLUME ["/app/custom-skills"]
 
