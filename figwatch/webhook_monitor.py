@@ -130,7 +130,7 @@ class WebhookMonitor:
         """Fetch all file keys from team projects via Figma API."""
         file_keys = set()
 
-        projects = self._api_get(f'/v1/teams/{self._team_id}/projects')
+        projects = self._api_get(f'/teams/{self._team_id}/projects')
         if not projects or 'projects' not in projects:
             logger.warning(
                 'monitor: failed to fetch team projects',
@@ -145,7 +145,7 @@ class WebhookMonitor:
             if not project_id:
                 continue
 
-            files = self._api_get(f'/v1/projects/{project_id}/files')
+            files = self._api_get(f'/projects/{project_id}/files')
             if files and 'files' in files:
                 for f in files['files']:
                     fk = f.get('key')
@@ -206,7 +206,7 @@ class WebhookMonitor:
         since = self._file_state.get(file_key) or self._start_time
         now = time.time()
 
-        data = self._api_get(f'/v1/files/{file_key}/comments')
+        data = self._api_get(f'/files/{file_key}/comments')
         if not data or 'comments' not in data:
             logger.debug(
                 'monitor: no comments data',

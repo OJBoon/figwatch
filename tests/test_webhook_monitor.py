@@ -83,13 +83,13 @@ def _iso(unix_ts):
 
 def test_discover_files_from_team(monkeypatch):
     stub = _FigmaStub()
-    stub.responses['/v1/teams/team-1/projects'] = {
+    stub.responses['/teams/team-1/projects'] = {
         'projects': [{'id': 'proj-1'}, {'id': 'proj-2'}],
     }
-    stub.responses['/v1/projects/proj-1/files'] = {
+    stub.responses['/projects/proj-1/files'] = {
         'files': [{'key': 'file-a'}, {'key': 'file-b'}],
     }
-    stub.responses['/v1/projects/proj-2/files'] = {
+    stub.responses['/projects/proj-2/files'] = {
         'files': [{'key': 'file-c'}],
     }
 
@@ -105,10 +105,10 @@ def test_discover_files_from_team(monkeypatch):
 
 def test_discover_files_includes_extra_keys(monkeypatch):
     stub = _FigmaStub()
-    stub.responses['/v1/teams/team-1/projects'] = {
+    stub.responses['/teams/team-1/projects'] = {
         'projects': [{'id': 'proj-1'}],
     }
-    stub.responses['/v1/projects/proj-1/files'] = {
+    stub.responses['/projects/proj-1/files'] = {
         'files': [{'key': 'file-a'}],
     }
 
@@ -124,10 +124,10 @@ def test_discover_files_includes_extra_keys(monkeypatch):
 def test_discover_files_keeps_state_on_failure(monkeypatch):
     stub = _FigmaStub()
     # First refresh succeeds
-    stub.responses['/v1/teams/team-1/projects'] = {
+    stub.responses['/teams/team-1/projects'] = {
         'projects': [{'id': 'proj-1'}],
     }
-    stub.responses['/v1/projects/proj-1/files'] = {
+    stub.responses['/projects/proj-1/files'] = {
         'files': [{'key': 'file-a'}],
     }
     mon = _make_monitor(stub)
@@ -137,7 +137,7 @@ def test_discover_files_keeps_state_on_failure(monkeypatch):
 
     # Second refresh fails (API returns None)
     mon._last_file_refresh = 0  # force refresh
-    stub.responses['/v1/teams/team-1/projects'] = None
+    stub.responses['/teams/team-1/projects'] = None
     mon._refresh_files()
 
     # Should keep existing file list
@@ -146,10 +146,10 @@ def test_discover_files_keeps_state_on_failure(monkeypatch):
 
 def test_discover_removes_stale_files(monkeypatch):
     stub = _FigmaStub()
-    stub.responses['/v1/teams/team-1/projects'] = {
+    stub.responses['/teams/team-1/projects'] = {
         'projects': [{'id': 'proj-1'}],
     }
-    stub.responses['/v1/projects/proj-1/files'] = {
+    stub.responses['/projects/proj-1/files'] = {
         'files': [{'key': 'file-a'}, {'key': 'file-b'}],
     }
     mon = _make_monitor(stub)
@@ -159,7 +159,7 @@ def test_discover_removes_stale_files(monkeypatch):
 
     # file-b removed from team
     mon._last_file_refresh = 0
-    stub.responses['/v1/projects/proj-1/files'] = {
+    stub.responses['/projects/proj-1/files'] = {
         'files': [{'key': 'file-a'}],
     }
     mon._refresh_files()
@@ -181,9 +181,9 @@ def test_rotation_advances_index(monkeypatch):
     mon._rotation_index = 0
 
     # Each call to _check_next_file should return empty data but advance index
-    stub.responses['/v1/files/file-a/comments'] = {'comments': []}
-    stub.responses['/v1/files/file-b/comments'] = {'comments': []}
-    stub.responses['/v1/files/file-c/comments'] = {'comments': []}
+    stub.responses['/files/file-a/comments'] = {'comments': []}
+    stub.responses['/files/file-b/comments'] = {'comments': []}
+    stub.responses['/files/file-c/comments'] = {'comments': []}
 
     mon._check_next_file()
     assert mon._rotation_index == 1
@@ -227,7 +227,7 @@ def test_detects_missed_webhook(monkeypatch):
     mon._start_time = comment_time - 10
     mon._rotation_index = 0
 
-    stub.responses['/v1/files/file-a/comments'] = {
+    stub.responses['/files/file-a/comments'] = {
         'comments': [_comment('c-1', _iso(comment_time))],
     }
 
@@ -257,7 +257,7 @@ def test_does_not_flag_received_comment(monkeypatch):
     mon._start_time = comment_time - 10
     mon._rotation_index = 0
 
-    stub.responses['/v1/files/file-a/comments'] = {
+    stub.responses['/files/file-a/comments'] = {
         'comments': [_comment('c-1', _iso(comment_time))],
     }
 
@@ -286,7 +286,7 @@ def test_grace_period_respected(monkeypatch):
     mon._start_time = comment_time - 5
     mon._rotation_index = 0
 
-    stub.responses['/v1/files/file-a/comments'] = {
+    stub.responses['/files/file-a/comments'] = {
         'comments': [_comment('c-1', _iso(comment_time))],
     }
 
@@ -316,7 +316,7 @@ def test_skips_comments_before_last_check(monkeypatch):
     mon._start_time = now - 7200
     mon._rotation_index = 0
 
-    stub.responses['/v1/files/file-a/comments'] = {
+    stub.responses['/files/file-a/comments'] = {
         'comments': [_comment('c-old', _iso(old_comment_time))],
     }
 
@@ -345,7 +345,7 @@ def test_dedup_missed_alerts(monkeypatch):
     mon._start_time = comment_time - 10
     mon._rotation_index = 0
 
-    stub.responses['/v1/files/file-a/comments'] = {
+    stub.responses['/files/file-a/comments'] = {
         'comments': [_comment('c-1', _iso(comment_time))],
     }
 
@@ -380,7 +380,7 @@ def test_first_check_uses_start_time(monkeypatch):
     mon._start_time = start_time
     mon._rotation_index = 0
 
-    stub.responses['/v1/files/file-a/comments'] = {
+    stub.responses['/files/file-a/comments'] = {
         'comments': [_comment('c-old', _iso(old_comment))],
     }
 
@@ -431,7 +431,7 @@ def test_monitor_thread_starts_and_stops(monkeypatch):
     monkeypatch.setattr('figwatch.webhook_monitor.record_reconciliation', lambda *a: None)
 
     stub = _FigmaStub()
-    stub.responses['/v1/teams/team-1/projects'] = {'projects': []}
+    stub.responses['/teams/team-1/projects'] = {'projects': []}
 
     stop = threading.Event()
     mon = _make_monitor(stub, stop_event=stop)
