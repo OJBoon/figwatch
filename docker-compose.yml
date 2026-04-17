@@ -16,6 +16,13 @@ services:
       - FIGWATCH_LOCALE
       - FIGWATCH_PORT
       - FIGWATCH_WORKERS
+      # Webhook health monitoring
+      - OTEL_EXPORTER_OTLP_ENDPOINT
+      - FIGWATCH_TEAM_ID
+      - FIGWATCH_MONITOR_TICK
+      - FIGWATCH_MONITOR_GRACE
+      - FIGWATCH_MONITOR_FILE_REFRESH
+      - FIGWATCH_MONITOR_RPM
     volumes:
       # Optional: mount custom skill files
       - ./custom-skills:/app/custom-skills

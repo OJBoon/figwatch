@@ -31,6 +31,14 @@ Environment variables:
   FIGWATCH_ANTHROPIC_RPM      Requests per minute for Anthropic (default: 5; 0 disables)
   FIGWATCH_LOG_LEVEL          Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)
   FIGWATCH_LOG_FORMAT         Log format: text (default) or json
+
+  Webhook health monitoring (all optional):
+  OTEL_EXPORTER_OTLP_ENDPOINT   OTel collector endpoint (metrics disabled if unset)
+  FIGWATCH_TEAM_ID              Figma team ID — enables webhook miss detection
+  FIGWATCH_MONITOR_TICK         Seconds between checking next file (default: 60)
+  FIGWATCH_MONITOR_GRACE        Seconds before flagging a missed webhook (default: 60)
+  FIGWATCH_MONITOR_FILE_REFRESH Seconds between re-enumerating team files (default: 3600)
+  FIGWATCH_MONITOR_RPM          Max Figma API requests/min for monitor (default: 5)
 """
 
 import json
@@ -54,6 +62,10 @@ from figwatch.log_context import (
     new_audit_id, set_audit_context, reset_audit_context, clear_audit_context,
 )
 from figwatch.logging_config import configure_logging
+from figwatch.metrics import (
+    init_metrics, record_audit_completed, record_queue_change,
+    record_webhook_received,
+)
 from figwatch.processor import (
     clean_reply, delete_ack, post_ack, post_reply, update_ack,
 )
@@ -61,6 +73,7 @@ from figwatch.providers.figma import figma_get_retry
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
 from figwatch.skills import execute_skill
 from figwatch.watcher import load_processed, save_processed
+from figwatch.webhook_monitor import WebhookMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -188,6 +201,7 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
             attempt=queued.attempt,
         )
         try:
+            record_queue_change(-1)
             stats = work_queue.stats()
             logger.info(
                 'queue.dequeued',
@@ -235,6 +249,7 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
             total_seconds = time.monotonic() - queued.enqueued_at
 
             if success:
+                record_audit_completed(total_seconds, 'success')
                 logger.info(
                     '\u2705 audit.completed',
                     extra={
@@ -256,6 +271,7 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
                     )
                 except Exception:
                     logger.exception('error reply post failed')
+                record_audit_completed(total_seconds, 'failed')
                 logger.error(
                     '\u274c audit.failed',
                     extra={
@@ -277,7 +293,7 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
 
 def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
                   trigger_config, processed_ids, processed_lock, work_queue,
-                  ack_updater: AckUpdater):
+                  ack_updater: AckUpdater, received_events, received_lock):
     class WebhookHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == '/health':
@@ -307,6 +323,8 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
 
             event_type = payload.get('event_type')
 
+            record_webhook_received(event_type or 'UNKNOWN')
+
             if event_type == 'PING':
                 logger.info('\U0001f3d3 ping received')
                 self._respond(200, 'pong')
@@ -321,6 +339,11 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
 
             comment_id = payload.get('comment_id') or payload['comment'].get('id')
             file_key = payload.get('file_key', '?')
+
+            # Track for webhook health monitoring (before dedup/trigger logic)
+            if comment_id:
+                with received_lock:
+                    received_events[str(comment_id)] = time.time()
 
             logger.info(
                 '\U0001f4e5 webhook received',
@@ -382,6 +405,7 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
                 audit_id=audit_id,
             )
             work_queue.put(queued)
+            record_queue_change(1)
 
             # Record initial displayed position so the updater only fires
             # when the position actually changes.
@@ -435,11 +459,15 @@ def main():
     queue_update_rpm = int(os.environ.get('FIGWATCH_QUEUE_UPDATE_RPM', '5'))
     claude_path = 'api'
 
+    init_metrics()
+
     trigger_config = load_trigger_config()
     triggers_str = ', '.join(t.get('trigger', '') for t in trigger_config)
 
     processed_ids = load_processed()
     processed_lock = threading.Lock()
+    received_events = {}   # {comment_id: receive_unix_timestamp} for webhook monitoring
+    received_lock = threading.Lock()
     work_queue = InstrumentedQueue()
     stop_event = threading.Event()
 
@@ -473,9 +501,24 @@ def main():
         pat, passcode, allowed_file_keys,
         locale, model, claude_path,
         trigger_config, processed_ids, processed_lock, work_queue,
-        ack_updater,
+        ack_updater, received_events, received_lock,
     )
     server = HTTPServer(('', port), handler)
+
+    team_id = os.environ.get('FIGWATCH_TEAM_ID', '').strip()
+    if team_id:
+        monitor = WebhookMonitor(
+            pat=pat,
+            team_id=team_id,
+            extra_file_keys=allowed_file_keys,
+            received_events=received_events,
+            received_lock=received_lock,
+            stop_event=stop_event,
+        )
+        monitor.start()
+    else:
+        monitor = None
+        logger.info('FIGWATCH_TEAM_ID not set \u2014 webhook monitor disabled')
 
     def _shutdown(sig, frame):
         logger.info('\u23f9 shutting down — draining in-flight audits')
@@ -490,6 +533,8 @@ def main():
         server.serve_forever()
     finally:
         ack_updater.stop()
+        if monitor:
+            monitor.stop()
         for t in worker_threads:
             t.join(timeout=5)
         logger.info('\u23f9 all workers stopped — exiting')
