@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import threading
+from collections import OrderedDict
 
 from figwatch.domain import WorkItem, load_trigger_config, match_trigger
 from figwatch.processor import process_work_item
@@ -13,6 +14,42 @@ logger = logging.getLogger(__name__)
 
 _EM_DASH = '\u2014'
 _OWN_REPLY_MARKERS = (_EM_DASH + ' Claude', _EM_DASH + ' Gemini')
+
+_PROCESSED_MAXLEN = 500
+
+
+# ── Bounded set ───────────────────────────────────────────────────────
+
+class BoundedSet:
+    """Set with a maximum size. Oldest entries evicted on overflow."""
+
+    def __init__(self, maxlen=_PROCESSED_MAXLEN):
+        self._maxlen = maxlen
+        self._data = OrderedDict()
+
+    def add(self, item):
+        if item in self._data:
+            self._data.move_to_end(item)
+            return
+        if len(self._data) >= self._maxlen:
+            self._data.popitem(last=False)
+        self._data[item] = None
+
+    def __contains__(self, item):
+        return item in self._data
+
+    def __len__(self):
+        return len(self._data)
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def update(self, items):
+        for item in items:
+            self.add(item)
+
+    def clear(self):
+        self._data.clear()
 
 
 # ── Processed comment tracking ────────────────────────────────────────
@@ -33,19 +70,17 @@ def _processed_path():
 def load_processed():
     try:
         with open(_processed_path()) as f:
-            return set(json.load(f))
+            ids = json.load(f)
+            bounded = BoundedSet()
+            bounded.update(ids)
+            return bounded
     except Exception:
-        return set()
+        return BoundedSet()
 
 
 def save_processed(ids):
-    id_list = list(ids)
-    if len(id_list) > 500:
-        id_list = id_list[-500:]
-        ids.clear()
-        ids.update(id_list)
     with open(_processed_path(), 'w') as f:
-        json.dump(id_list, f)
+        json.dump(list(ids), f)
 
 
 # ── Trigger detection (fast path — 1 API call) ────────────────────────
