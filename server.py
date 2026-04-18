@@ -41,6 +41,7 @@ Environment variables:
   FIGWATCH_MONITOR_RPM          Max Figma API requests/min for monitor (default: 5)
 """
 
+import hmac
 import json
 import logging
 import os
@@ -317,7 +318,7 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
                 self._respond(400, 'Bad request')
                 return
 
-            if payload.get('passcode') != passcode:
+            if not hmac.compare_digest(payload.get('passcode', ''), passcode):
                 self._respond(403, 'Forbidden')
                 return
 
