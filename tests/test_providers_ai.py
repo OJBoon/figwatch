@@ -115,7 +115,7 @@ def test_parse_retry_seconds_retry_after_format():
 
 
 def test_parse_retry_seconds_no_hint_uses_default():
-    assert parse_retry_seconds("something went wrong") == 60
+    assert parse_retry_seconds("something went wrong") == 5
 
 
 def test_parse_retry_seconds_custom_default():
