@@ -215,6 +215,7 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
 
             last_err = None
             success = False
+            attempt = 0
             for attempt in range(max_attempts):
                 if attempt > 0:
                     set_audit_context(attempt=attempt + 1)
@@ -455,7 +456,7 @@ def main():
     model = os.environ.get('FIGWATCH_MODEL', 'gemini-flash')
     port = int(os.environ.get('FIGWATCH_PORT', '8080'))
     worker_count = int(os.environ.get('FIGWATCH_WORKERS', '4'))
-    max_attempts = int(os.environ.get('FIGWATCH_MAX_ATTEMPTS', '3'))
+    max_attempts = max(1, int(os.environ.get('FIGWATCH_MAX_ATTEMPTS', '3')))
     queue_update_rpm = int(os.environ.get('FIGWATCH_QUEUE_UPDATE_RPM', '5'))
     claude_path = 'api'
 
