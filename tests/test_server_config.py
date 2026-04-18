@@ -32,6 +32,7 @@ def _run_main(env):
          mock.patch('server.AckUpdater'), \
          mock.patch('server.HTTPServer'), \
          mock.patch('server.WebhookMonitor'), \
+         mock.patch('server.threading.Thread'), \
          mock.patch('signal.signal'):
         import server
         server.main()
