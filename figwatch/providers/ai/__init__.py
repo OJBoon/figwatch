@@ -34,8 +34,9 @@ GEMINI_MODELS = {
 
 # Shared rate limiters, lazy-initialized from env vars.
 # Set FIGWATCH_{PROVIDER}_RPM=0 to disable rate limiting for that provider.
-_gemini_limiter: Optional[TokenBucket] = None
-_anthropic_limiter: Optional[TokenBucket] = None
+_UNSET = object()
+_gemini_limiter: Optional[TokenBucket] = _UNSET
+_anthropic_limiter: Optional[TokenBucket] = _UNSET
 _limiter_lock = threading.Lock()
 
 
@@ -49,20 +50,20 @@ def _build_limiter(env_var: str, default_rpm: int) -> Optional[TokenBucket]:
 
 def get_gemini_limiter() -> Optional[TokenBucket]:
     global _gemini_limiter
-    if _gemini_limiter is not None:
+    if _gemini_limiter is not _UNSET:
         return _gemini_limiter
     with _limiter_lock:
-        if _gemini_limiter is None:
+        if _gemini_limiter is _UNSET:
             _gemini_limiter = _build_limiter('FIGWATCH_GEMINI_RPM', 15)
     return _gemini_limiter
 
 
 def get_anthropic_limiter() -> Optional[TokenBucket]:
     global _anthropic_limiter
-    if _anthropic_limiter is not None:
+    if _anthropic_limiter is not _UNSET:
         return _anthropic_limiter
     with _limiter_lock:
-        if _anthropic_limiter is None:
+        if _anthropic_limiter is _UNSET:
             _anthropic_limiter = _build_limiter('FIGWATCH_ANTHROPIC_RPM', 5)
     return _anthropic_limiter
 
@@ -71,8 +72,8 @@ def reset_limiters() -> None:
     """Reset module-level limiters. Used by tests."""
     global _gemini_limiter, _anthropic_limiter
     with _limiter_lock:
-        _gemini_limiter = None
-        _anthropic_limiter = None
+        _gemini_limiter = _UNSET
+        _anthropic_limiter = _UNSET
 
 
 @runtime_checkable
