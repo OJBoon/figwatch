@@ -365,8 +365,6 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
             )
 
             if item is None:
-                with processed_lock:
-                    processed_ids.discard(comment_id)
                 logger.debug('skip', extra={'reason': reason})
                 self._respond(200, reason)
                 return
