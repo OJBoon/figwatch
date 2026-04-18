@@ -85,7 +85,7 @@ class AIProvider(Protocol):
         ...
 
 
-def parse_retry_seconds(err, default=60):
+def parse_retry_seconds(err, default=5):
     """Extract suggested retry delay in seconds from a 429 error message."""
     m = re.search(r'retry[_\s]delay\D*?(\d+)|retry after (\d+)', str(err), re.IGNORECASE)
     if m:

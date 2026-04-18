@@ -45,6 +45,6 @@ class AnthropicProvider:
             return response.content[0].text.strip()
 
         def _is_rate_limit(e):
-            return '429' in str(e) or 'rate' in str(e).lower() or 'RateLimitError' in type(e).__name__
+            return 'RateLimitError' in type(e).__name__ or '429' in str(e)
 
         return with_retry(_call, _is_rate_limit, 'anthropic')
