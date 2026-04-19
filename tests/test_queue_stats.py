@@ -9,7 +9,7 @@ from figwatch.queue_stats import InstrumentedQueue, QueuedItem
 
 
 def _queued(audit_id='a3f9', attempt=1):
-    return QueuedItem(item='stub', ack_id=None, audit_id=audit_id, attempt=attempt)
+    return QueuedItem(audit='stub', ack_id=None, audit_id=audit_id, attempt=attempt)
 
 
 # ── Basic put / get ──────────────────────────────────────────────────
@@ -128,7 +128,7 @@ def test_stats_snapshot_does_not_share_state():
 # ── QueuedItem ───────────────────────────────────────────────────────
 
 def test_queued_item_defaults():
-    item = QueuedItem(item='work', ack_id=None, audit_id='a3f9')
+    item = QueuedItem(audit='work', ack_id=None, audit_id='a3f9')
     assert item.attempt == 1
     assert item.waited_seconds == 0.0
     assert item.enqueued_at > 0

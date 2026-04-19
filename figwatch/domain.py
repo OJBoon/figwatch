@@ -19,13 +19,7 @@ class AuditStatus(Enum):
     ERROR = 'error'
 
 
-# Deprecated — use AuditStatus enum. Kept for backward compatibility
-# with processor.py and macos/FigWatch.py until Phase 4.
 STATUS_LIVE = 'live'
-STATUS_DETECTED = AuditStatus.DETECTED.value
-STATUS_PROCESSING = AuditStatus.PROCESSING.value
-STATUS_REPLIED = AuditStatus.REPLIED.value
-STATUS_ERROR = AuditStatus.ERROR.value
 
 
 # ── Value objects (frozen) ───────────────────────────────────────────
@@ -125,17 +119,6 @@ class Audit:
     def collect_events(self) -> list:
         events, self._events = self._events, []
         return events
-
-
-# ── WorkItem (deprecated — use Audit) ───────────────────────────────
-
-from collections import namedtuple  # noqa: E402
-
-WorkItem = namedtuple('WorkItem', [
-    'file_key', 'comment_id', 'reply_to_id', 'node_id',
-    'trigger', 'skill_path', 'user_handle', 'extra',
-    'locale', 'model', 'reply_lang', 'pat', 'claude_path', 'on_status',
-])
 
 
 # ── Pure domain functions ────────────────────────────────────────────

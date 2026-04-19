@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from figwatch.log_context import set_audit_context, reset_audit_context
-from figwatch.processor import post_ack, delete_ack
+from figwatch.ports import CommentRepository
 from figwatch.providers.ai.rate_limit import TokenBucket
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
 
@@ -57,10 +57,12 @@ class AckUpdater:
     def __init__(
         self,
         work_queue: InstrumentedQueue,
+        comment_repo: CommentRepository,
         rate_per_minute: int = 5,
         poll_seconds: float = 2.0,
     ):
         self._queue = work_queue
+        self._comment_repo = comment_repo
         self._rate_per_minute = rate_per_minute
         self._poll_seconds = poll_seconds
         # Maps audit_id → last-posted position. An audit with no entry here
@@ -189,17 +191,28 @@ class AckUpdater:
                          extra={'audit': update.audit_id})
             return
 
+        audit = queued.audit
+        trigger_kw = audit.trigger_match.trigger.keyword
+        file_key = audit.comment.file_key
+        node_id = audit.comment.node_id
+
         token = set_audit_context(
             audit=update.audit_id,
-            trigger=queued.item.trigger,
-            node=queued.item.node_id,
-            file=queued.item.file_key,
+            trigger=trigger_kw,
+            node=node_id,
+            file=file_key,
         )
         try:
-            new_message = _position_message(queued.item.trigger, update.new_position)
+            new_message = _position_message(trigger_kw, update.new_position)
             old_ack_id = queued.ack_id
-            delete_ack(queued.item, old_ack_id)
-            new_ack_id = post_ack(queued.item, new_message)
+
+            # Delete old ack, post new one
+            if old_ack_id:
+                self._comment_repo.delete_comment(file_key, old_ack_id)
+            new_ack_id = self._comment_repo.post_reply(
+                file_key, audit.reply_to_id, new_message,
+            )
+
             # Write the new ack_id back onto the QueuedItem so the worker
             # picks it up when/if it dequeues. If the worker dequeued
             # concurrently, this write is to a detached object — harmless.
@@ -212,5 +225,3 @@ class AckUpdater:
             logger.exception('ack update post failed')
         finally:
             reset_audit_context(token)
-
-

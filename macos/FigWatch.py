@@ -24,7 +24,13 @@ from Foundation import *
 from PyObjCTools import AppHelper
 
 import figwatch.handlers as handlers
-from figwatch.domain import STATUS_LIVE, STATUS_DETECTED, STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR
+from figwatch.domain import AuditStarted, AuditCompleted, AuditFailed, AuditStatus, STATUS_LIVE
+
+# String status values for UI state tracking
+STATUS_DETECTED = AuditStatus.DETECTED.value
+STATUS_PROCESSING = AuditStatus.PROCESSING.value
+STATUS_REPLIED = AuditStatus.REPLIED.value
+STATUS_ERROR = AuditStatus.ERROR.value
 
 # ── Config ──────────────────────────────────────────────────────────
 
@@ -889,15 +895,35 @@ class FigWatch(NSObject):
             self._state["workers"].append(t)
 
     def _worker_loop(self, q):
-        from figwatch.processor import process_work_item
         while True:
-            item = q.get()
-            if item is None:
+            audit = q.get()
+            if audit is None:
                 break
             try:
-                process_work_item(item)
+                svc = self._state.get("audit_service")
+                if svc:
+                    response = svc.execute(audit)
+                    svc.post_reply(audit, response)
             except Exception:
                 pass
+
+    def _build_audit_service(self):
+        """Construct AuditService for macOS polling path."""
+        from figwatch.providers.figma import FigmaCommentRepository, FigmaDesignDataRepository
+        from figwatch.services import AuditConfig, AuditService
+
+        pat = self._state["pat"]
+        return AuditService(
+            comment_repo=FigmaCommentRepository(pat),
+            design_repo=FigmaDesignDataRepository(pat),
+            config=AuditConfig(
+                model=self._state.get("model", "sonnet"),
+                claude_path=_resolve_claude_path(),
+                reply_lang=self._state.get("reply_lang", "en"),
+                locale=self._state.get("locale", "uk"),
+            ),
+            trigger_config=self._state["trigger_config"],
+        )
 
     def _start_watcher(self, f, initial_delay=0):
         from figwatch.watcher import FigmaWatcher
@@ -911,32 +937,37 @@ class FigWatch(NSObject):
             "last_poll": None, "error": None,
         }
 
-        def on_status(event, item, **kwargs):
+        # Lazily construct audit service
+        if "audit_service" not in self._state:
+            self._state["audit_service"] = self._build_audit_service()
+
+        def event_listener(event, audit):
             if key not in self._state["file_statuses"]:
                 return
             fs = self._state["file_statuses"][key]
-            if event == STATUS_PROCESSING:
+            if isinstance(event, AuditStarted):
                 fs["status"] = STATUS_PROCESSING
-                fs["trigger"] = item.trigger
-                fs["user"] = item.user_handle
-            elif event == STATUS_REPLIED:
+                fs["trigger"] = audit.trigger_match.trigger.keyword
+                fs["user"] = audit.comment.user_handle
+            elif isinstance(event, AuditCompleted):
                 fs["status"] = STATUS_REPLIED
                 def _revert(k=key):
                     if k in self._state.get("file_statuses", {}):
                         self._state["file_statuses"][k]["status"] = STATUS_LIVE
                         self._schedule_refresh()
                 threading.Timer(4.0, _revert).start()
-            elif event == STATUS_ERROR:
+            elif isinstance(event, AuditFailed):
                 fs["status"] = STATUS_ERROR
-                fs["error"] = kwargs.get("error", "Unknown error")
+                fs["error"] = event.error
             self._schedule_refresh()
             self._update_icon_state()
 
-        def dispatch(item):
-            if item.trigger == "@tone":
-                self._state["work_queue_tone"].put(item)
+        def dispatch(audit):
+            trigger_kw = audit.trigger_match.trigger.keyword
+            if trigger_kw == "@tone":
+                self._state["work_queue_tone"].put(audit)
             else:
-                self._state["work_queue_ux"].put(item)
+                self._state["work_queue_ux"].put(audit)
 
         def on_poll():
             if key in self._state["file_statuses"]:
@@ -944,15 +975,12 @@ class FigWatch(NSObject):
 
         w = FigmaWatcher(
             key, self._state["pat"],
-            locale=self._state.get("locale", "uk"),
-            model=self._state.get("model", "sonnet"),
-            reply_lang=self._state.get("reply_lang", "en"),
-            claude_path=_resolve_claude_path(),
+            audit_service=self._state["audit_service"],
             log=self._write_log,
             trigger_config=self._state["trigger_config"],
             dispatch=dispatch,
             on_poll=on_poll,
-            on_status=on_status,
+            event_listener=event_listener,
             initial_delay=initial_delay,
         )
         w.start()

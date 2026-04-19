@@ -6,7 +6,6 @@ import os
 import re
 from pathlib import Path
 
-from figwatch.providers.figma import fetch_figma_data
 from figwatch.providers.ai import make_provider, GEMINI_MODELS, CLAUDE_API_MODELS
 from figwatch.providers.ai.gemini import GeminiProvider
 from figwatch.providers.ai.anthropic import AnthropicProvider
@@ -194,7 +193,7 @@ def _get_introspection(skill_ref, skill_path, claude_path, model):
 
 # ── Prompt builder ────────────────────────────────────────────────────
 
-def _build_prompt(item, skill_content, refs_section, data, tree_data, frame_name, *, inline_files, config=None):
+def _build_prompt(audit, skill_content, refs_section, data, tree_data, frame_name, *, inline_files, config=None):
     """Build the skill execution prompt.
 
     inline_files=True: node tree JSON is embedded directly (for API providers).
@@ -231,16 +230,9 @@ def _build_prompt(item, skill_content, refs_section, data, tree_data, frame_name
 
     data_section = '\n\n'.join(data_desc) if data_desc else 'No data available.'
 
-    # Support both Audit (trigger_match.extra) and WorkItem (extra)
-    extra = getattr(item, 'extra', None) or (
-        item.trigger_match.extra if hasattr(item, 'trigger_match') else ''
-    )
-    trigger_kw = getattr(item, 'trigger', None) or (
-        item.trigger_match.trigger.keyword if hasattr(item, 'trigger_match') else ''
-    )
-    reply_lang = getattr(item, 'reply_lang', None) or (
-        config.reply_lang if config else ''
-    )
+    extra = audit.trigger_match.extra
+    trigger_kw = audit.trigger_match.trigger.keyword
+    reply_lang = config.reply_lang if config else ''
 
     extra_ctx = f'\nAdditional context from reviewer: "{extra}"' if extra else ''
     lang_instruction = (
@@ -278,28 +270,14 @@ CRITICAL RULES:
 
 # ── Skill execution ───────────────────────────────────────────────────
 
-def execute_skill(item, *, config=None, design_repo=None):
-    """Execute any skill (builtin or custom). Returns the reply string.
-
-    Accepts either a WorkItem (legacy) or an Audit with config + design_repo.
-    """
-    # Extract fields from either Audit or WorkItem
-    if hasattr(item, 'trigger_match'):
-        # Audit aggregate
-        skill_ref = item.trigger_match.trigger.skill_ref
-        file_key = item.comment.file_key
-        node_id = item.comment.node_id
-        trigger_kw = item.trigger_match.trigger.keyword
-        model = config.model if config else 'gemini-flash'
-        claude_path = config.claude_path if config else 'api'
-    else:
-        # Legacy WorkItem
-        skill_ref = item.skill_path
-        file_key = item.file_key
-        node_id = item.node_id
-        trigger_kw = item.trigger
-        model = item.model
-        claude_path = item.claude_path
+def execute_skill(audit, *, config, design_repo):
+    """Execute any skill (builtin or custom) for an Audit. Returns the reply string."""
+    skill_ref = audit.trigger_match.trigger.skill_ref
+    file_key = audit.comment.file_key
+    node_id = audit.comment.node_id
+    trigger_kw = audit.trigger_match.trigger.keyword
+    model = config.model
+    claude_path = config.claude_path
 
     skill_path = skill_ref
 
@@ -319,10 +297,7 @@ def execute_skill(item, *, config=None, design_repo=None):
         extra={'required': ','.join(required_data)},
     )
 
-    if design_repo is not None:
-        data, tree_data = design_repo.fetch(required_data, file_key, node_id)
-    else:
-        data, tree_data = fetch_figma_data(required_data, file_key, node_id, item.pat)
+    data, tree_data = design_repo.fetch(required_data, file_key, node_id)
 
     with open(skill_path, encoding='utf-8') as f:
         skill_content = f.read()
@@ -350,7 +325,7 @@ def execute_skill(item, *, config=None, design_repo=None):
         extra={'provider': provider.name, 'frame': frame_name},
     )
     prompt = _build_prompt(
-        item, skill_content, refs_section, data, tree_data, frame_name,
+        audit, skill_content, refs_section, data, tree_data, frame_name,
         inline_files=provider.inline_files, config=config,
     )
 

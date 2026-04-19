@@ -11,13 +11,8 @@ from figwatch.domain import (
     AuditStarted,
     AuditStatus,
     Comment,
-    STATUS_DETECTED,
-    STATUS_ERROR,
-    STATUS_PROCESSING,
-    STATUS_REPLIED,
     Trigger,
     TriggerMatch,
-    WorkItem,
     match_trigger,
 )
 
@@ -73,13 +68,14 @@ def test_match_trigger_returns_trigger_match():
     assert isinstance(result.trigger, Trigger)
 
 
-# ── Deprecated STATUS_* constants ────────────────────────────────────
+# ── AuditStatus enum ─────────────────────────────────────────────────
 
-def test_status_constants_match_enum():
-    assert STATUS_DETECTED == AuditStatus.DETECTED.value
-    assert STATUS_PROCESSING == AuditStatus.PROCESSING.value
-    assert STATUS_REPLIED == AuditStatus.REPLIED.value
-    assert STATUS_ERROR == AuditStatus.ERROR.value
+def test_audit_status_values():
+    assert AuditStatus.DETECTED.value == 'detected'
+    assert AuditStatus.QUEUED.value == 'queued'
+    assert AuditStatus.PROCESSING.value == 'processing'
+    assert AuditStatus.REPLIED.value == 'replied'
+    assert AuditStatus.ERROR.value == 'error'
 
 
 # ── Value objects (frozen) ───────────────────────────────────────────
@@ -195,26 +191,3 @@ def test_audit_collect_events_clears():
     assert audit.collect_events() == []
 
 
-# ── WorkItem (deprecated) ───────────────────────────────────────────
-
-def test_work_item_is_namedtuple():
-    item = WorkItem(
-        file_key="abc", comment_id="1", reply_to_id="1", node_id="2:3",
-        trigger="@ux", skill_path="builtin:ux", user_handle="alice", extra="",
-        locale="uk", model="gemini-flash", reply_lang="en", pat="figd_x",
-        claude_path="api", on_status=None,
-    )
-    assert item.file_key == "abc"
-    assert item.trigger == "@ux"
-
-
-def test_work_item_replace():
-    item = WorkItem(
-        file_key="abc", comment_id="1", reply_to_id="1", node_id="2:3",
-        trigger="@ux", skill_path="builtin:ux", user_handle="alice", extra="",
-        locale=None, model=None, reply_lang=None, pat="figd_x",
-        claude_path=None, on_status=None,
-    )
-    filled = item._replace(locale="uk", model="gemini-flash", reply_lang="en", claude_path="api")
-    assert filled.locale == "uk"
-    assert filled.model == "gemini-flash"

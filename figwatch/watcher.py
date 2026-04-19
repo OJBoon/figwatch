@@ -1,4 +1,4 @@
-"""FigWatch comment watcher — polls Figma for trigger comments and dispatches work items."""
+"""FigWatch comment watcher — polls Figma for trigger comments and dispatches audits."""
 
 import json
 import logging
@@ -6,10 +6,10 @@ import os
 import threading
 from collections import OrderedDict
 
-from figwatch.domain import WorkItem, match_trigger
-from figwatch.trigger_config import load_trigger_config
-from figwatch.processor import process_work_item
+from figwatch.domain import Audit, AuditStatus, Comment, match_trigger
+from figwatch.log_context import new_audit_id
 from figwatch.providers.figma import figma_get
+from figwatch.trigger_config import load_trigger_config
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +86,8 @@ def save_processed(ids):
 
 # ── Trigger detection (fast path — 1 API call) ────────────────────────
 
-def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log, on_status=None):
-    """Fetch comments, find trigger matches, return list[WorkItem].
+def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log):
+    """Fetch comments, find trigger matches, return list[Audit].
 
     Fast path: single API call, <1s. Does NOT call any AI provider.
     """
@@ -114,23 +114,24 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log, on_sta
                 candidates.append(c)
 
     initial_count = len(processed_ids)
-    items = []
+    audits = []
     for comment in candidates:
         if comment['id'] in processed_ids or comment['id'] in replied_to:
             continue
         if comment.get('parent_id') and comment['parent_id'] in replied_to:
             continue
 
-        match = match_trigger(comment.get('message', ''), trigger_config)
-        if not match:
+        trigger_match = match_trigger(comment.get('message', ''), trigger_config)
+        if not trigger_match:
             continue
 
         node_id = (comment.get('client_meta') or {}).get('node_id')
         reply_to_id = comment['id']
+        parent_id = None
         if comment.get('parent_id'):
             parent = comment_map.get(comment['parent_id'])
             node_id = node_id or ((parent.get('client_meta') or {}).get('node_id') if parent else None)
-            reply_to_id = comment['parent_id']
+            parent_id = comment['parent_id']
 
         if not node_id:
             processed_ids.add(comment['id'])
@@ -139,52 +140,43 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log, on_sta
         processed_ids.add(comment['id'])
         user_handle = comment.get('user', {}).get('handle', 'unknown')
 
-        item = WorkItem(
-            file_key=file_key,
-            comment_id=comment['id'],
-            reply_to_id=reply_to_id,
-            node_id=node_id,
-            trigger=match.trigger.keyword,
-            skill_path=match.trigger.skill_ref,
-            user_handle=user_handle,
-            extra=match.extra,
-            locale=None,
-            model=None,
-            reply_lang=None,
-            pat=pat,
-            claude_path=None,
-            on_status=on_status,
+        audit = Audit(
+            audit_id=new_audit_id(),
+            comment=Comment(
+                comment_id=comment['id'],
+                message=comment.get('message', ''),
+                parent_id=parent_id,
+                node_id=node_id,
+                user_handle=user_handle,
+                file_key=file_key,
+            ),
+            trigger_match=trigger_match,
         )
-        items.append(item)
-        log(f'\U0001f4ac {match.trigger.keyword} comment by {user_handle} on node {node_id}')
+        audits.append(audit)
+        log(f'\U0001f4ac {trigger_match.trigger.keyword} comment by {user_handle} on node {node_id}')
 
     if len(processed_ids) > initial_count:
         save_processed(processed_ids)
-    return items
+    return audits
 
 
 # ── Watcher class ─────────────────────────────────────────────────────
 
 class FigmaWatcher:
-    def __init__(self, file_key, pat, *, locale='uk', model='sonnet', reply_lang='en',
-                 interval=30, claude_path='claude', log=print,
-                 trigger_config=None, dispatch=None, on_poll=None, on_status=None,
-                 initial_delay=0,
-                 on_reply=None):  # on_reply deprecated — use on_status
+    def __init__(self, file_key, pat, *, audit_service,
+                 interval=30, log=print,
+                 trigger_config=None, dispatch=None, on_poll=None,
+                 initial_delay=0, event_listener=None):
         self.file_key = file_key
         self.pat = pat
-        self.locale = locale
-        self.model = model
-        self.reply_lang = reply_lang
+        self.audit_service = audit_service
         self.interval = interval
-        self.claude_path = claude_path
         self.log = log
         self.trigger_config = trigger_config or load_trigger_config()
         self.dispatch = dispatch
         self.on_poll = on_poll
-        self.on_status = on_status
         self.initial_delay = initial_delay
-        self._on_reply = on_reply
+        self._event_listener = event_listener
         self._stop_event = threading.Event()
         self._thread = None
         self._processed = load_processed()
@@ -216,24 +208,15 @@ class FigmaWatcher:
 
         while not self._stop_event.is_set():
             try:
-                items = detect_triggers(
+                audits = detect_triggers(
                     self.file_key, self.pat, self._processed,
-                    self.trigger_config, log=self.log, on_status=self.on_status,
+                    self.trigger_config, log=self.log,
                 )
-                for item in items:
-                    item = item._replace(
-                        locale=self.locale,
-                        model=self.model,
-                        reply_lang=self.reply_lang,
-                        claude_path=self.claude_path,
-                        on_status=self.on_status,
-                    )
+                for audit in audits:
                     if self.dispatch:
-                        self.dispatch(item)
+                        self.dispatch(audit)
                     else:
-                        process_work_item(item, trigger_config=self.trigger_config)
-                        if self._on_reply:
-                            self._on_reply(item.trigger, item.user_handle, item.node_id)
+                        self._execute_audit(audit)
 
                 if self.on_poll:
                     self.on_poll()
@@ -241,11 +224,32 @@ class FigmaWatcher:
                 self.log(f'\u26a0\ufe0f Poll error: {err}')
             self._stop_event.wait(timeout=self.interval)
 
+    def _execute_audit(self, audit):
+        """Execute audit via AuditService and notify event listener."""
+        try:
+            response = self.audit_service.execute(audit)
+            self.audit_service.post_reply(audit, response)
+        except Exception as err:
+            try:
+                self.audit_service.post_reply(
+                    audit,
+                    f'Audit failed: {err}\n\n{_EM_DASH} FigWatch',
+                )
+            except Exception:
+                logger.exception('error reply post also failed')
+
+        if self._event_listener:
+            for event in audit.collect_events():
+                self._event_listener(event, audit)
+
 
 # ── CLI entry point ───────────────────────────────────────────────────
 
 if __name__ == '__main__':
     import sys
+
+    from figwatch.providers.figma import FigmaCommentRepository, FigmaDesignDataRepository
+    from figwatch.services import AuditConfig, AuditService
 
     args = sys.argv[1:]
     if not args or args[0] != 'watch' or len(args) < 2:
@@ -277,7 +281,13 @@ if __name__ == '__main__':
         print('\u274c No Figma PAT found in ~/.figwatch/config.json')
         sys.exit(1)
 
-    w = FigmaWatcher(file_key, pat, locale=locale, interval=interval)
+    svc = AuditService(
+        comment_repo=FigmaCommentRepository(pat),
+        design_repo=FigmaDesignDataRepository(pat),
+        config=AuditConfig(model='sonnet', claude_path='api', reply_lang='en', locale=locale),
+        trigger_config=load_trigger_config(),
+    )
+    w = FigmaWatcher(file_key, pat, audit_service=svc, interval=interval)
     w.start()
 
     try:
