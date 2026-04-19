@@ -256,3 +256,42 @@ def fetch_figma_data(required_data, file_key, node_id, pat):
             result['annotations'] = _extract_annotations(tree_data)
 
     return result, tree_data
+
+
+# ── Repository implementations ───────────────────────────────────────
+
+class FigmaCommentRepository:
+    """CommentRepository implementation backed by the Figma REST API."""
+
+    def __init__(self, pat: str):
+        self._pat = pat
+
+    def post_reply(self, file_key: str, parent_comment_id: str, message: str):
+        try:
+            resp = figma_post(f'/files/{file_key}/comments', {
+                'message': message,
+                'comment_id': parent_comment_id,
+            }, self._pat)
+            return resp.get('id')
+        except Exception:
+            return None
+
+    def delete_comment(self, file_key: str, comment_id: str) -> None:
+        try:
+            figma_delete(f'/files/{file_key}/comments/{comment_id}', self._pat)
+        except Exception:
+            pass
+
+    def fetch_comments(self, file_key: str) -> list:
+        data = figma_get(f'/files/{file_key}/comments', self._pat)
+        return (data or {}).get('comments', [])
+
+
+class FigmaDesignDataRepository:
+    """DesignDataRepository implementation backed by the Figma REST API."""
+
+    def __init__(self, pat: str):
+        self._pat = pat
+
+    def fetch(self, required_data: list, file_key: str, node_id: str) -> tuple:
+        return fetch_figma_data(required_data, file_key, node_id, self._pat)
