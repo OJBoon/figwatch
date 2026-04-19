@@ -3,7 +3,7 @@
 Structural (duck-typed) protocols. Implementations live in providers/.
 """
 
-from typing import Optional, Protocol, runtime_checkable
+from typing import Any, Optional, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -11,7 +11,7 @@ class CommentRepository(Protocol):
     """Port for reading and writing Figma comments."""
 
     def post_reply(self, file_key: str, parent_comment_id: str, message: str) -> Optional[str]:
-        """Post a comment reply. Returns comment ID or None on failure."""
+        """Post a comment reply. Returns comment ID. Raises on failure."""
         ...
 
     def delete_comment(self, file_key: str, comment_id: str) -> None:
@@ -27,6 +27,6 @@ class CommentRepository(Protocol):
 class DesignDataRepository(Protocol):
     """Port for fetching Figma design data needed by skills."""
 
-    def fetch(self, required_data: list, file_key: str, node_id: str) -> tuple:
-        """Fetch design data. Returns (data_dict, tree_data)."""
+    def fetch(self, required_data: list, file_key: str, node_id: str) -> tuple[dict, Optional[dict]]:
+        """Fetch design data. Returns (data_dict, tree_data_or_None)."""
         ...

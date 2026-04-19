@@ -47,11 +47,15 @@ class AuditService:
         return self._design
 
     def post_ack(self, audit: Audit, message: str) -> Optional[str]:
-        return self._comments.post_reply(
-            audit.comment.file_key,
-            audit.reply_to_id,
-            message,
-        )
+        try:
+            return self._comments.post_reply(
+                audit.comment.file_key,
+                audit.reply_to_id,
+                message,
+            )
+        except Exception as e:
+            logger.warning('ack post failed (non-fatal)', extra={'error': str(e)})
+            return None
 
     def delete_ack(self, audit: Audit, ack_id: Optional[str]) -> None:
         if not ack_id:
@@ -86,11 +90,7 @@ class AuditService:
                 design_repo=self._design,
             )
             cleaned = clean_reply(response, self._trigger_config)
-            audit.complete(AuditResult(
-                reply_text=cleaned,
-                provider_name='',  # embedded in response header by execute_skill
-                frame_name='',
-            ))
+            audit.complete(AuditResult(reply_text=cleaned))
             return cleaned
         except Exception as err:
             audit.fail(str(err))

@@ -267,14 +267,11 @@ class FigmaCommentRepository:
         self._pat = pat
 
     def post_reply(self, file_key: str, parent_comment_id: str, message: str):
-        try:
-            resp = figma_post(f'/files/{file_key}/comments', {
-                'message': message,
-                'comment_id': parent_comment_id,
-            }, self._pat)
-            return resp.get('id')
-        except Exception:
-            return None
+        resp = figma_post(f'/files/{file_key}/comments', {
+            'message': message,
+            'comment_id': parent_comment_id,
+        }, self._pat)
+        return resp.get('id')
 
     def delete_comment(self, file_key: str, comment_id: str) -> None:
         try:

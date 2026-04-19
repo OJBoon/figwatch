@@ -226,10 +226,18 @@ class FigmaWatcher:
 
     def _execute_audit(self, audit):
         """Execute audit via AuditService and notify event listener."""
+        trigger_name = audit.trigger_match.trigger.keyword.lstrip('@')
+        ack_id = self.audit_service.post_ack(
+            audit,
+            f'\u23f3 {trigger_name} audit received \u2014 working on it\u2026',
+        )
+
         try:
             response = self.audit_service.execute(audit)
+            self.audit_service.delete_ack(audit, ack_id)
             self.audit_service.post_reply(audit, response)
         except Exception as err:
+            self.audit_service.delete_ack(audit, ack_id)
             try:
                 self.audit_service.post_reply(
                     audit,

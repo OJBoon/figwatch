@@ -2,6 +2,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 from figwatch.ports import CommentRepository, DesignDataRepository
 from figwatch.providers.figma import FigmaCommentRepository, FigmaDesignDataRepository
 
@@ -32,10 +34,11 @@ def test_post_reply_returns_id(mock_post):
 
 
 @patch('figwatch.providers.figma.figma_post')
-def test_post_reply_returns_none_on_error(mock_post):
+def test_post_reply_raises_on_error(mock_post):
     mock_post.side_effect = Exception('network error')
     repo = FigmaCommentRepository('test-pat')
-    assert repo.post_reply('f', 'p', 'msg') is None
+    with pytest.raises(Exception, match='network error'):
+        repo.post_reply('f', 'p', 'msg')
 
 
 @patch('figwatch.providers.figma.figma_delete')

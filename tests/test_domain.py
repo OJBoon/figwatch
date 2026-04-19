@@ -100,7 +100,7 @@ def test_comment_frozen():
 
 
 def test_audit_result_frozen():
-    r = AuditResult(reply_text="ok", provider_name="Claude", frame_name="Frame 1")
+    r = AuditResult(reply_text="ok")
     with pytest.raises(AttributeError):
         r.reply_text = "no"
 
@@ -165,7 +165,7 @@ def test_audit_start_processing():
 
 def test_audit_complete():
     audit = _make_audit()
-    result = AuditResult(reply_text="looks good", provider_name="Claude", frame_name="Frame 1")
+    result = AuditResult(reply_text="looks good")
     audit.complete(result)
     assert audit.status == AuditStatus.REPLIED
     events = audit.collect_events()

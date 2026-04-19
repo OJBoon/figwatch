@@ -6,7 +6,7 @@ and the AuditStatus enum for the Comment Auditing bounded context.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import List, Optional, Union
 
 
 # ── Audit status ─────────────────────────────────────────────────────
@@ -49,8 +49,6 @@ class Comment:
 @dataclass(frozen=True)
 class AuditResult:
     reply_text: str
-    provider_name: str
-    frame_name: str
 
 
 # ── Domain events (frozen) ──────────────────────────────────────────
@@ -85,6 +83,9 @@ class AuditFailed:
     error: str
 
 
+DomainEvent = Union[TriggerDetected, AuditQueued, AuditStarted, AuditCompleted, AuditFailed]
+
+
 # ── Audit aggregate root ────────────────────────────────────────────
 
 @dataclass
@@ -94,7 +95,7 @@ class Audit:
     comment: Comment
     trigger_match: TriggerMatch
     status: AuditStatus = AuditStatus.DETECTED
-    _events: List = field(default_factory=list, repr=False)
+    _events: List[DomainEvent] = field(default_factory=list, repr=False)
 
     @property
     def reply_to_id(self) -> str:
