@@ -6,7 +6,8 @@ import os
 import threading
 from collections import OrderedDict
 
-from figwatch.domain import WorkItem, load_trigger_config, match_trigger
+from figwatch.domain import WorkItem, match_trigger
+from figwatch.trigger_config import load_trigger_config
 from figwatch.processor import process_work_item
 from figwatch.providers.figma import figma_get
 
@@ -143,10 +144,10 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log, on_sta
             comment_id=comment['id'],
             reply_to_id=reply_to_id,
             node_id=node_id,
-            trigger=match['trigger'],
-            skill_path=match['skill'],
+            trigger=match.trigger.keyword,
+            skill_path=match.trigger.skill_ref,
             user_handle=user_handle,
-            extra=match['extra'],
+            extra=match.extra,
             locale=None,
             model=None,
             reply_lang=None,
@@ -155,7 +156,7 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log, on_sta
             on_status=on_status,
         )
         items.append(item)
-        log(f'\U0001f4ac {match["trigger"]} comment by {user_handle} on node {node_id}')
+        log(f'\U0001f4ac {match.trigger.keyword} comment by {user_handle} on node {node_id}')
 
     if len(processed_ids) > initial_count:
         save_processed(processed_ids)

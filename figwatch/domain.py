@@ -1,19 +1,135 @@
-"""FigWatch domain types and trigger configuration."""
+"""FigWatch domain types — pure module, no I/O.
 
-import json
-import os
-from collections import namedtuple
-from pathlib import Path
+Defines the Audit aggregate root, value objects, domain events,
+and the AuditStatus enum for the Comment Auditing bounded context.
+"""
 
-# ── Status constants ──────────────────────────────────────────────────
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import List, Optional
 
+
+# ── Audit status ─────────────────────────────────────────────────────
+
+class AuditStatus(Enum):
+    DETECTED = 'detected'
+    QUEUED = 'queued'
+    PROCESSING = 'processing'
+    REPLIED = 'replied'
+    ERROR = 'error'
+
+
+# Deprecated — use AuditStatus enum. Kept for backward compatibility
+# with processor.py and macos/FigWatch.py until Phase 4.
 STATUS_LIVE = 'live'
-STATUS_DETECTED = 'detected'
-STATUS_PROCESSING = 'processing'
-STATUS_REPLIED = 'replied'
-STATUS_ERROR = 'error'
+STATUS_DETECTED = AuditStatus.DETECTED.value
+STATUS_PROCESSING = AuditStatus.PROCESSING.value
+STATUS_REPLIED = AuditStatus.REPLIED.value
+STATUS_ERROR = AuditStatus.ERROR.value
 
-# ── WorkItem ──────────────────────────────────────────────────────────
+
+# ── Value objects (frozen) ───────────────────────────────────────────
+
+@dataclass(frozen=True)
+class Trigger:
+    keyword: str       # e.g. "@ux"
+    skill_ref: str     # e.g. "builtin:ux" or "/path/to/skill.md"
+
+
+@dataclass(frozen=True)
+class TriggerMatch:
+    trigger: Trigger
+    extra: str         # additional context after the trigger word
+
+
+@dataclass(frozen=True)
+class Comment:
+    comment_id: str
+    message: str
+    parent_id: Optional[str]
+    node_id: Optional[str]
+    user_handle: str
+    file_key: str
+
+
+@dataclass(frozen=True)
+class AuditResult:
+    reply_text: str
+    provider_name: str
+    frame_name: str
+
+
+# ── Domain events (frozen) ──────────────────────────────────────────
+
+@dataclass(frozen=True)
+class TriggerDetected:
+    audit_id: str
+    trigger_keyword: str
+    file_key: str
+    node_id: str
+
+
+@dataclass(frozen=True)
+class AuditQueued:
+    audit_id: str
+
+
+@dataclass(frozen=True)
+class AuditStarted:
+    audit_id: str
+
+
+@dataclass(frozen=True)
+class AuditCompleted:
+    audit_id: str
+    result: AuditResult
+
+
+@dataclass(frozen=True)
+class AuditFailed:
+    audit_id: str
+    error: str
+
+
+# ── Audit aggregate root ────────────────────────────────────────────
+
+@dataclass
+class Audit:
+    """Aggregate root — one per trigger comment detected."""
+    audit_id: str
+    comment: Comment
+    trigger_match: TriggerMatch
+    status: AuditStatus = AuditStatus.DETECTED
+    _events: List = field(default_factory=list, repr=False)
+
+    @property
+    def reply_to_id(self) -> str:
+        return self.comment.parent_id or self.comment.comment_id
+
+    def queue(self):
+        self.status = AuditStatus.QUEUED
+        self._events.append(AuditQueued(self.audit_id))
+
+    def start_processing(self):
+        self.status = AuditStatus.PROCESSING
+        self._events.append(AuditStarted(self.audit_id))
+
+    def complete(self, result: AuditResult):
+        self.status = AuditStatus.REPLIED
+        self._events.append(AuditCompleted(self.audit_id, result))
+
+    def fail(self, error: str):
+        self.status = AuditStatus.ERROR
+        self._events.append(AuditFailed(self.audit_id, error))
+
+    def collect_events(self) -> list:
+        events, self._events = self._events, []
+        return events
+
+
+# ── WorkItem (deprecated — use Audit) ───────────────────────────────
+
+from collections import namedtuple  # noqa: E402
 
 WorkItem = namedtuple('WorkItem', [
     'file_key', 'comment_id', 'reply_to_id', 'node_id',
@@ -21,87 +137,13 @@ WorkItem = namedtuple('WorkItem', [
     'locale', 'model', 'reply_lang', 'pat', 'claude_path', 'on_status',
 ])
 
-# ── Trigger config ────────────────────────────────────────────────────
 
-DEFAULT_TRIGGERS = [
-    {"trigger": "@tone", "skill": "builtin:tone"},
-    {"trigger": "@ux", "skill": "builtin:ux"},
-]
-
-
-def _discover_custom_triggers(skills_dir=None):
-    """Scan custom-skills directory for .md files and return trigger entries.
-
-    Supports flat files (a11y.md → @a11y) and subdirectories (a11y/skill.md → @a11y).
-
-    Args:
-        skills_dir: Path to the custom-skills directory. Defaults to
-                    ``os.getcwd() / 'custom-skills'`` when *None*.
-    """
-    custom_dir = Path(skills_dir) if skills_dir else Path(os.getcwd()) / 'custom-skills'
-    if not custom_dir.is_dir():
-        return []
-
-    triggers = []
-    seen = set()
-
-    for path in sorted(custom_dir.glob('*.md')):
-        name = path.stem
-        if name not in seen:
-            seen.add(name)
-            triggers.append({'trigger': f'@{name}', 'skill': str(path.resolve())})
-
-    for skill_dir in sorted(p for p in custom_dir.iterdir() if p.is_dir()):
-        name = skill_dir.name
-        if name in seen:
-            continue
-        for fname in ['skill.md', 'SKILL.md']:
-            skill_path = skill_dir / fname
-            if skill_path.exists():
-                seen.add(name)
-                triggers.append({'trigger': f'@{name}', 'skill': str(skill_path.resolve())})
-                break
-
-    return triggers
-
-
-def load_trigger_config(skills_dir=None):
-    """Load trigger config from config file or built-in defaults, plus any custom skills.
-
-    Priority:
-      1. ~/.figwatch/config.json  (written by the macOS app)
-      2. Built-in defaults        (@tone, @ux)
-
-    In both cases, any .md files found in the custom-skills directory are appended
-    automatically.
-
-    Args:
-        skills_dir: Path to the custom-skills directory. Passed through to
-                    :func:`_discover_custom_triggers`.
-    """
-    custom = _discover_custom_triggers(skills_dir)
-
-    try:
-        config_path = os.path.join(os.path.expanduser('~'), '.figwatch', 'config.json')
-        with open(config_path) as f:
-            config = json.load(f)
-        triggers = config.get('triggers')
-        if triggers and isinstance(triggers, list):
-            existing = {t.get('trigger') for t in triggers}
-            for t in custom:
-                if t['trigger'] not in existing:
-                    triggers.append(t)
-            return triggers
-    except Exception:
-        pass
-
-    return list(DEFAULT_TRIGGERS) + custom
-
+# ── Pure domain functions ────────────────────────────────────────────
 
 def match_trigger(message, trigger_config):
     """Match a comment message against configured triggers.
 
-    Returns {"trigger": str, "skill": str, "extra": str} or None.
+    Returns a TriggerMatch or None.
     """
     lower = message.lower().strip()
     for entry in trigger_config:
@@ -109,5 +151,8 @@ def match_trigger(message, trigger_config):
         if trigger and trigger.lower() in lower:
             idx = lower.index(trigger.lower())
             extra = message[idx + len(trigger):].strip()
-            return {'trigger': trigger, 'skill': entry.get('skill', ''), 'extra': extra}
+            return TriggerMatch(
+                trigger=Trigger(keyword=trigger, skill_ref=entry.get('skill', '')),
+                extra=extra,
+            )
     return None

@@ -1,14 +1,23 @@
-"""Tests for figwatch.domain — trigger matching and config loading."""
+"""Tests for figwatch.domain — trigger matching, value objects, and Audit aggregate."""
 
-import json
-import os
 import pytest
 
 from figwatch.domain import (
-    DEFAULT_TRIGGERS,
+    Audit,
+    AuditCompleted,
+    AuditFailed,
+    AuditQueued,
+    AuditResult,
+    AuditStarted,
+    AuditStatus,
+    Comment,
+    STATUS_DETECTED,
+    STATUS_ERROR,
+    STATUS_PROCESSING,
+    STATUS_REPLIED,
+    Trigger,
+    TriggerMatch,
     WorkItem,
-    _discover_custom_triggers,
-    load_trigger_config,
     match_trigger,
 )
 
@@ -23,26 +32,26 @@ TRIGGERS = [
 
 def test_match_trigger_exact():
     result = match_trigger("@ux", TRIGGERS)
-    assert result["trigger"] == "@ux"
-    assert result["skill"] == "builtin:ux"
-    assert result["extra"] == ""
+    assert result.trigger.keyword == "@ux"
+    assert result.trigger.skill_ref == "builtin:ux"
+    assert result.extra == ""
 
 
 def test_match_trigger_with_extra():
     result = match_trigger("@ux please check the nav", TRIGGERS)
-    assert result["trigger"] == "@ux"
-    assert result["extra"] == "please check the nav"
+    assert result.trigger.keyword == "@ux"
+    assert result.extra == "please check the nav"
 
 
 def test_match_trigger_mid_message():
     result = match_trigger("hey can you @tone this screen", TRIGGERS)
-    assert result["trigger"] == "@tone"
+    assert result.trigger.keyword == "@tone"
 
 
 def test_match_trigger_case_insensitive():
     result = match_trigger("@UX audit this", TRIGGERS)
     assert result is not None
-    assert result["trigger"] == "@ux"
+    assert result.trigger.keyword == "@ux"
 
 
 def test_match_trigger_no_match():
@@ -54,82 +63,139 @@ def test_match_trigger_empty_message():
 
 
 def test_match_trigger_first_wins():
-    # @ux appears before @tone in config — should match @ux
     result = match_trigger("@ux @tone", TRIGGERS)
-    assert result["trigger"] == "@ux"
+    assert result.trigger.keyword == "@ux"
 
 
-# ── load_trigger_config ───────────────────────────────────────────────
-
-def test_load_trigger_config_defaults_when_no_config(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-    config = load_trigger_config()
-    assert config == DEFAULT_TRIGGERS
+def test_match_trigger_returns_trigger_match():
+    result = match_trigger("@ux check this", TRIGGERS)
+    assert isinstance(result, TriggerMatch)
+    assert isinstance(result.trigger, Trigger)
 
 
-def test_load_trigger_config_from_file(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-    figwatch_dir = tmp_path / ".figwatch"
-    figwatch_dir.mkdir()
-    config_data = {"triggers": [{"trigger": "@a11y", "skill": "/skills/a11y.md"}]}
-    (figwatch_dir / "config.json").write_text(json.dumps(config_data))
+# ── Deprecated STATUS_* constants ────────────────────────────────────
 
-    config = load_trigger_config()
-    assert any(t["trigger"] == "@a11y" for t in config)
+def test_status_constants_match_enum():
+    assert STATUS_DETECTED == AuditStatus.DETECTED.value
+    assert STATUS_PROCESSING == AuditStatus.PROCESSING.value
+    assert STATUS_REPLIED == AuditStatus.REPLIED.value
+    assert STATUS_ERROR == AuditStatus.ERROR.value
 
 
-def test_load_trigger_config_discovers_custom_skills(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-    custom_dir = tmp_path / "custom-skills"
-    custom_dir.mkdir()
-    (custom_dir / "brand.md").write_text("# Brand skill")
+# ── Value objects (frozen) ───────────────────────────────────────────
 
-    config = load_trigger_config()
-    assert any(t["trigger"] == "@brand" for t in config)
+def test_trigger_frozen():
+    t = Trigger(keyword="@ux", skill_ref="builtin:ux")
+    with pytest.raises(AttributeError):
+        t.keyword = "@tone"
 
 
-def test_load_trigger_config_custom_skill_subdir(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.chdir(tmp_path)
-    skill_dir = tmp_path / "custom-skills" / "motion"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "skill.md").write_text("# Motion skill")
-
-    config = load_trigger_config()
-    assert any(t["trigger"] == "@motion" for t in config)
+def test_trigger_match_frozen():
+    tm = TriggerMatch(trigger=Trigger(keyword="@ux", skill_ref="builtin:ux"), extra="")
+    with pytest.raises(AttributeError):
+        tm.extra = "new"
 
 
-# ── FIGWATCH_SKILLS_DIR ─────────────────────────────────────────────
-
-def test_discover_custom_triggers_explicit_dir(tmp_path):
-    skills = tmp_path / "my-skills"
-    skills.mkdir()
-    (skills / "perf.md").write_text("# Perf skill")
-
-    triggers = _discover_custom_triggers(str(skills))
-    assert any(t["trigger"] == "@perf" for t in triggers)
+def test_comment_frozen():
+    c = Comment(comment_id="1", message="hi", parent_id=None,
+                node_id="2:3", user_handle="alice", file_key="abc")
+    with pytest.raises(AttributeError):
+        c.message = "bye"
 
 
-def test_load_trigger_config_with_skills_dir(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    skills = tmp_path / "my-skills"
-    skills.mkdir()
-    (skills / "perf.md").write_text("# Perf skill")
-
-    config = load_trigger_config(skills_dir=str(skills))
-    assert any(t["trigger"] == "@perf" for t in config)
+def test_audit_result_frozen():
+    r = AuditResult(reply_text="ok", provider_name="Claude", frame_name="Frame 1")
+    with pytest.raises(AttributeError):
+        r.reply_text = "no"
 
 
-def test_discover_custom_triggers_explicit_dir_missing(tmp_path):
-    """Non-existent explicit dir returns empty (caller validates at startup)."""
-    triggers = _discover_custom_triggers(str(tmp_path / "nope"))
-    assert triggers == []
+# ── Audit aggregate ─────────────────────────────────────────────────
+
+def _make_audit(audit_id="audit-1"):
+    return Audit(
+        audit_id=audit_id,
+        comment=Comment(
+            comment_id="c1", message="@ux check", parent_id="p1",
+            node_id="2:3", user_handle="alice", file_key="abc",
+        ),
+        trigger_match=TriggerMatch(
+            trigger=Trigger(keyword="@ux", skill_ref="builtin:ux"),
+            extra="check",
+        ),
+    )
 
 
-# ── WorkItem ──────────────────────────────────────────────────────────
+def test_audit_initial_status():
+    audit = _make_audit()
+    assert audit.status == AuditStatus.DETECTED
+
+
+def test_audit_reply_to_id_with_parent():
+    audit = _make_audit()
+    assert audit.reply_to_id == "p1"
+
+
+def test_audit_reply_to_id_without_parent():
+    audit = Audit(
+        audit_id="a1",
+        comment=Comment(
+            comment_id="c1", message="@ux", parent_id=None,
+            node_id="2:3", user_handle="alice", file_key="abc",
+        ),
+        trigger_match=TriggerMatch(
+            trigger=Trigger(keyword="@ux", skill_ref="builtin:ux"), extra="",
+        ),
+    )
+    assert audit.reply_to_id == "c1"
+
+
+def test_audit_queue_transition():
+    audit = _make_audit()
+    audit.queue()
+    assert audit.status == AuditStatus.QUEUED
+    events = audit.collect_events()
+    assert len(events) == 1
+    assert isinstance(events[0], AuditQueued)
+    assert events[0].audit_id == "audit-1"
+
+
+def test_audit_start_processing():
+    audit = _make_audit()
+    audit.start_processing()
+    assert audit.status == AuditStatus.PROCESSING
+    events = audit.collect_events()
+    assert isinstance(events[0], AuditStarted)
+
+
+def test_audit_complete():
+    audit = _make_audit()
+    result = AuditResult(reply_text="looks good", provider_name="Claude", frame_name="Frame 1")
+    audit.complete(result)
+    assert audit.status == AuditStatus.REPLIED
+    events = audit.collect_events()
+    assert isinstance(events[0], AuditCompleted)
+    assert events[0].result == result
+
+
+def test_audit_fail():
+    audit = _make_audit()
+    audit.fail("timeout")
+    assert audit.status == AuditStatus.ERROR
+    events = audit.collect_events()
+    assert isinstance(events[0], AuditFailed)
+    assert events[0].error == "timeout"
+
+
+def test_audit_collect_events_clears():
+    audit = _make_audit()
+    audit.queue()
+    audit.start_processing()
+    events = audit.collect_events()
+    assert len(events) == 2
+    assert audit.collect_events() == []
+
+
+# ── WorkItem (deprecated) ───────────────────────────────────────────
 
 def test_work_item_is_namedtuple():
     item = WorkItem(

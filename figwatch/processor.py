@@ -9,7 +9,8 @@ import logging
 import re
 from typing import Optional
 
-from figwatch.domain import STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR, load_trigger_config
+from figwatch.domain import STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR
+from figwatch.trigger_config import load_trigger_config
 from figwatch.providers.figma import figma_post, figma_delete
 
 logger = logging.getLogger(__name__)

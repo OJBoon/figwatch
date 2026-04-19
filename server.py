@@ -59,7 +59,8 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from figwatch.ack_updater import AckUpdater
-from figwatch.domain import WorkItem, load_trigger_config, match_trigger
+from figwatch.domain import WorkItem, match_trigger
+from figwatch.trigger_config import load_trigger_config
 from figwatch.log_context import (
     new_audit_id, set_audit_context, reset_audit_context, clear_audit_context,
 )
@@ -151,10 +152,10 @@ def _build_work_item(payload, comment_id, pat, allowed_file_keys, locale, model,
         comment_id=comment_id,
         reply_to_id=reply_to_id,
         node_id=node_id,
-        trigger=match['trigger'],
-        skill_path=match['skill'],
+        trigger=match.trigger.keyword,
+        skill_path=match.trigger.skill_ref,
         user_handle=(comment.get('user') or payload.get('triggered_by') or {}).get('handle', 'unknown'),
-        extra=match['extra'],
+        extra=match.extra,
         locale=locale,
         model=model,
         reply_lang='en',

@@ -804,7 +804,7 @@ class FigWatch(NSObject):
         """Background init: validate PAT, load config, start watchers."""
         self._state["user"] = _validate_token(self._state["pat"])
 
-        from figwatch.domain import load_trigger_config
+        from figwatch.trigger_config import load_trigger_config
         self._state["trigger_config"] = load_trigger_config()
 
         if not os.path.exists(WATCHED_PATH) and os.path.exists(RECENTS_PATH):
