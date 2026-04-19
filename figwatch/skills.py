@@ -194,7 +194,7 @@ def _get_introspection(skill_ref, skill_path, claude_path, model):
 
 # ── Prompt builder ────────────────────────────────────────────────────
 
-def _build_prompt(item, skill_content, refs_section, data, tree_data, frame_name, *, inline_files):
+def _build_prompt(item, skill_content, refs_section, data, tree_data, frame_name, *, inline_files, config=None):
     """Build the skill execution prompt.
 
     inline_files=True: node tree JSON is embedded directly (for API providers).
@@ -230,10 +230,22 @@ def _build_prompt(item, skill_content, refs_section, data, tree_data, frame_name
             data_desc.append(f'{key}: {json.dumps(data[key], indent=2)[:5000]}')
 
     data_section = '\n\n'.join(data_desc) if data_desc else 'No data available.'
-    extra_ctx = f'\nAdditional context from reviewer: "{item.extra}"' if item.extra else ''
+
+    # Support both Audit (trigger_match.extra) and WorkItem (extra)
+    extra = getattr(item, 'extra', None) or (
+        item.trigger_match.extra if hasattr(item, 'trigger_match') else ''
+    )
+    trigger_kw = getattr(item, 'trigger', None) or (
+        item.trigger_match.trigger.keyword if hasattr(item, 'trigger_match') else ''
+    )
+    reply_lang = getattr(item, 'reply_lang', None) or (
+        config.reply_lang if config else ''
+    )
+
+    extra_ctx = f'\nAdditional context from reviewer: "{extra}"' if extra else ''
     lang_instruction = (
         '\nIMPORTANT: Write your entire reply in Simplified Chinese.'
-        if item.reply_lang == 'cn' else ''
+        if reply_lang == 'cn' else ''
     )
     eval_instruction = (
         'Evaluate according to the skill using the data provided, then respond with ONLY a'
@@ -248,7 +260,7 @@ Use Mode 3 (Comment Reply) if the skill defines it.
 
 Now evaluate this screen:
 - Frame name: {frame_name}
-- Trigger: {item.trigger}{extra_ctx}
+- Trigger: {trigger_kw}{extra_ctx}
 
 Available data:
 {data_section}
@@ -266,9 +278,29 @@ CRITICAL RULES:
 
 # ── Skill execution ───────────────────────────────────────────────────
 
-def execute_skill(item):
-    """Execute any skill (builtin or custom) for a WorkItem. Returns the reply string."""
-    skill_ref = item.skill_path
+def execute_skill(item, *, config=None, design_repo=None):
+    """Execute any skill (builtin or custom). Returns the reply string.
+
+    Accepts either a WorkItem (legacy) or an Audit with config + design_repo.
+    """
+    # Extract fields from either Audit or WorkItem
+    if hasattr(item, 'trigger_match'):
+        # Audit aggregate
+        skill_ref = item.trigger_match.trigger.skill_ref
+        file_key = item.comment.file_key
+        node_id = item.comment.node_id
+        trigger_kw = item.trigger_match.trigger.keyword
+        model = config.model if config else 'gemini-flash'
+        claude_path = config.claude_path if config else 'api'
+    else:
+        # Legacy WorkItem
+        skill_ref = item.skill_path
+        file_key = item.file_key
+        node_id = item.node_id
+        trigger_kw = item.trigger
+        model = item.model
+        claude_path = item.claude_path
+
     skill_path = skill_ref
 
     if skill_path.startswith('builtin:'):
@@ -280,14 +312,17 @@ def execute_skill(item):
     if not os.path.exists(skill_path):
         raise FileNotFoundError(f'Skill file not found: {skill_path}')
 
-    intro = _get_introspection(skill_ref, skill_path, item.claude_path, item.model)
+    intro = _get_introspection(skill_ref, skill_path, claude_path, model)
     required_data = intro.get('required_data', ['screenshot', 'node_tree'])
     logger.debug(
         'fetching figma data',
         extra={'required': ','.join(required_data)},
     )
 
-    data, tree_data = fetch_figma_data(required_data, item.file_key, item.node_id, item.pat)
+    if design_repo is not None:
+        data, tree_data = design_repo.fetch(required_data, file_key, node_id)
+    else:
+        data, tree_data = fetch_figma_data(required_data, file_key, node_id, item.pat)
 
     with open(skill_path, encoding='utf-8') as f:
         skill_content = f.read()
@@ -309,19 +344,19 @@ def execute_skill(item):
             refs_section = '\n\nReference files:\n' + '\n\n'.join(ref_parts)
 
     frame_name = tree_data.get('name', 'Unknown frame') if tree_data else 'Unknown frame'
-    provider = make_provider(item.model, item.claude_path, skill_dir=skill_dir)
+    provider = make_provider(model, claude_path, skill_dir=skill_dir)
     logger.debug(
         'calling ai provider',
         extra={'provider': provider.name, 'frame': frame_name},
     )
     prompt = _build_prompt(
         item, skill_content, refs_section, data, tree_data, frame_name,
-        inline_files=provider.inline_files,
+        inline_files=provider.inline_files, config=config,
     )
 
     try:
         reply = provider.call(prompt, data.get('screenshot'))
-        header = f'\U0001f5e3\ufe0f {item.trigger} Audit \u2014 {frame_name}'
+        header = f'\U0001f5e3\ufe0f {trigger_kw} Audit \u2014 {frame_name}'
         return f'{header}\n\n{reply}\n\n\u2014 {provider.name}'
     finally:
         for key in ['screenshot', 'node_tree']:

@@ -59,7 +59,10 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from figwatch.ack_updater import AckUpdater
-from figwatch.domain import WorkItem, match_trigger
+from figwatch.domain import (
+    Audit, AuditStatus, Comment, Trigger, TriggerMatch,
+    WorkItem, match_trigger,
+)
 from figwatch.trigger_config import load_trigger_config
 from figwatch.log_context import (
     new_audit_id, set_audit_context, reset_audit_context, clear_audit_context,
@@ -73,8 +76,11 @@ from figwatch.processor import (
     clean_reply, delete_ack, post_ack, post_reply, update_ack,
 )
 from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS
-from figwatch.providers.figma import figma_get_retry
+from figwatch.providers.figma import (
+    FigmaCommentRepository, FigmaDesignDataRepository, figma_get_retry,
+)
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
+from figwatch.services import AuditConfig, AuditService
 from figwatch.skills import execute_skill
 from figwatch.watcher import load_processed, save_processed
 from figwatch.webhook_monitor import WebhookMonitor
@@ -168,8 +174,8 @@ def _build_work_item(payload, comment_id, pat, allowed_file_keys, locale, model,
 
 # ── Worker loop ────────────────────────────────────────────────────────
 
-def _run_audit(item, ack_id, trigger_config):
-    """Execute the skill and post the reply. Raises on failure."""
+def _run_audit_legacy(item, ack_id, trigger_config):
+    """Execute the skill and post the reply (legacy path). Raises on failure."""
     logger.info('running skill', extra={'skill': item.skill_path})
     response = execute_skill(item)
     logger.info('skill returned', extra={'chars': len(response)})
@@ -180,8 +186,20 @@ def _run_audit(item, ack_id, trigger_config):
     logger.info('reply posted', extra={'reply_to': item.reply_to_id})
 
 
+def _run_audit_service(audit, ack_id, audit_service):
+    """Execute via AuditService. Raises on failure."""
+    trigger_kw = audit.trigger_match.trigger.keyword
+    logger.info('running skill', extra={'skill': audit.trigger_match.trigger.skill_ref})
+    response = audit_service.execute(audit)
+    logger.info('skill returned', extra={'chars': len(response)})
+
+    audit_service.delete_ack(audit, ack_id)
+    audit_service.post_reply(audit, response)
+    logger.info('reply posted', extra={'reply_to': audit.reply_to_id})
+
+
 def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
-                 max_attempts, ack_updater: AckUpdater):
+                 max_attempts, ack_updater: AckUpdater, audit_service: AuditService = None):
     while not stop_event.is_set():
         queued = work_queue.get(timeout=1)
         if queued is None:
@@ -193,15 +211,28 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
         # BEFORE reading ack_id so we can't race with an in-flight update.
         ack_updater.cancel(queued.audit_id)
 
+        audit = queued.audit
         item = queued.item
+        use_service = audit is not None and audit_service is not None
+
+        # Extract trigger/node/file from whichever is available
+        if use_service:
+            trigger_kw = audit.trigger_match.trigger.keyword
+            node_id = audit.comment.node_id
+            file_key = audit.comment.file_key
+        else:
+            trigger_kw = item.trigger
+            node_id = item.node_id
+            file_key = item.file_key
+
         ack_id = queued.ack_id
         run_started_at = time.monotonic()
 
         token = set_audit_context(
             audit=queued.audit_id,
-            trigger=item.trigger,
-            node=item.node_id,
-            file=item.file_key,
+            trigger=trigger_kw,
+            node=node_id,
+            file=file_key,
             attempt=queued.attempt,
         )
         try:
@@ -212,10 +243,16 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
                 extra={'depth': stats.depth, 'waited': f'{queued.waited_seconds:.2f}s'},
             )
 
-            ack_id = update_ack(
-                item, ack_id,
-                f'\u23f3 Running {item.trigger.lstrip("@")} audit\u2026',
-            )
+            if use_service:
+                ack_id = audit_service.update_ack(
+                    audit, ack_id,
+                    f'\u23f3 Running {trigger_kw.lstrip("@")} audit\u2026',
+                )
+            else:
+                ack_id = update_ack(
+                    item, ack_id,
+                    f'\u23f3 Running {trigger_kw.lstrip("@")} audit\u2026',
+                )
 
             last_err = None
             success = False
@@ -224,7 +261,10 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
                 if attempt > 0:
                     set_audit_context(attempt=attempt + 1)
                 try:
-                    _run_audit(item, ack_id, trigger_config)
+                    if use_service:
+                        _run_audit_service(audit, ack_id, audit_service)
+                    else:
+                        _run_audit_legacy(item, ack_id, trigger_config)
                     ack_id = None
                     success = True
                     break
@@ -238,14 +278,24 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
                     if attempt >= max_attempts - 1:
                         break
                     backoff = _BACKOFFS[min(attempt, len(_BACKOFFS) - 1)]
-                    ack_id = update_ack(
-                        item, ack_id,
-                        (
-                            f'\u23f3 {item.trigger.lstrip("@")} audit hit a snag '
-                            f'({err}). Retrying in {backoff}s '
-                            f'(attempt {attempt + 2}/{max_attempts})\u2026'
-                        ),
-                    )
+                    if use_service:
+                        ack_id = audit_service.update_ack(
+                            audit, ack_id,
+                            (
+                                f'\u23f3 {trigger_kw.lstrip("@")} audit hit a snag '
+                                f'({err}). Retrying in {backoff}s '
+                                f'(attempt {attempt + 2}/{max_attempts})\u2026'
+                            ),
+                        )
+                    else:
+                        ack_id = update_ack(
+                            item, ack_id,
+                            (
+                                f'\u23f3 {trigger_kw.lstrip("@")} audit hit a snag '
+                                f'({err}). Retrying in {backoff}s '
+                                f'(attempt {attempt + 2}/{max_attempts})\u2026'
+                            ),
+                        )
                     if stop_event.wait(timeout=backoff):
                         logger.info('shutdown during backoff — aborting retry')
                         break
@@ -254,7 +304,10 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
             total_seconds = time.monotonic() - queued.enqueued_at
 
             if success:
-                record_audit_completed(total_seconds, 'success')
+                if use_service:
+                    audit_service.dispatch_events(audit, total_seconds)
+                else:
+                    record_audit_completed(total_seconds, 'success')
                 logger.info(
                     '\u2705 audit.completed',
                     extra={
@@ -265,18 +318,32 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
                     },
                 )
             else:
-                delete_ack(item, ack_id)
-                try:
-                    post_reply(
-                        item,
-                        (
-                            f'Audit failed after {max_attempts} attempts.\n'
-                            f'Last error: {last_err}\n\n{_EM_DASH} FigWatch'
-                        ),
-                    )
-                except Exception:
-                    logger.exception('error reply post failed')
-                record_audit_completed(total_seconds, 'failed')
+                if use_service:
+                    audit_service.delete_ack(audit, ack_id)
+                    try:
+                        audit_service.post_reply(
+                            audit,
+                            (
+                                f'Audit failed after {max_attempts} attempts.\n'
+                                f'Last error: {last_err}\n\n{_EM_DASH} FigWatch'
+                            ),
+                        )
+                    except Exception:
+                        logger.exception('error reply post failed')
+                    audit_service.dispatch_events(audit, total_seconds)
+                else:
+                    delete_ack(item, ack_id)
+                    try:
+                        post_reply(
+                            item,
+                            (
+                                f'Audit failed after {max_attempts} attempts.\n'
+                                f'Last error: {last_err}\n\n{_EM_DASH} FigWatch'
+                            ),
+                        )
+                    except Exception:
+                        logger.exception('error reply post failed')
+                    record_audit_completed(total_seconds, 'failed')
                 logger.error(
                     '\u274c audit.failed',
                     extra={
@@ -298,7 +365,8 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event, trigger_config,
 
 def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
                   trigger_config, processed_ids, processed_lock, work_queue,
-                  ack_updater: AckUpdater, received_events, received_lock):
+                  ack_updater: AckUpdater, received_events, received_lock,
+                  audit_service: AuditService = None):
     class WebhookHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == '/health':
@@ -375,6 +443,24 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
             save_processed(processed_ids)
 
             audit_id = new_audit_id()
+
+            # Build Audit aggregate alongside legacy WorkItem
+            comment_obj = payload.get('comment') or {}
+            message = comment_obj.get('message') or comment_obj.get('text', '')
+            trigger_match = match_trigger(message, trigger_config)
+            audit_obj = Audit(
+                audit_id=audit_id,
+                comment=Comment(
+                    comment_id=str(comment_id),
+                    message=message,
+                    parent_id=item.reply_to_id if item.reply_to_id != str(comment_id) else None,
+                    node_id=item.node_id,
+                    user_handle=item.user_handle,
+                    file_key=item.file_key,
+                ),
+                trigger_match=trigger_match,
+            )
+
             # Temporarily set context so the ack post + enqueue log lines
             # carry the new audit_id. Cleared on next request.
             set_audit_context(
@@ -400,12 +486,17 @@ def _make_handler(pat, passcode, allowed_file_keys, locale, model, claude_path,
                     f'\u23f3 {item.trigger.lstrip("@")} audit queued '
                     f'({ahead} ahead of you)\u2026'
                 )
-            ack_id = post_ack(item, queue_msg)
+
+            if audit_service:
+                ack_id = audit_service.post_ack(audit_obj, queue_msg)
+            else:
+                ack_id = post_ack(item, queue_msg)
 
             queued = QueuedItem(
                 item=item,
                 ack_id=ack_id,
                 audit_id=audit_id,
+                audit=audit_obj,
             )
             work_queue.put(queued)
             record_queue_change(1)
@@ -541,6 +632,15 @@ def main():
     trigger_config = load_trigger_config(skills_dir)
     triggers_str = ', '.join(t.get('trigger', '') for t in trigger_config)
 
+    # Construct repositories and application service
+    comment_repo = FigmaCommentRepository(pat)
+    design_repo = FigmaDesignDataRepository(pat)
+    audit_config = AuditConfig(
+        model=model, claude_path=claude_path,
+        reply_lang='en', locale=locale,
+    )
+    audit_service = AuditService(comment_repo, design_repo, audit_config, trigger_config)
+
     processed_ids = load_processed()
     processed_lock = threading.Lock()
     received_events = {}   # {comment_id: receive_unix_timestamp} for webhook monitoring
@@ -565,7 +665,8 @@ def main():
     worker_threads = [
         threading.Thread(
             target=_worker_loop,
-            args=(work_queue, stop_event, trigger_config, max_attempts, ack_updater),
+            args=(work_queue, stop_event, trigger_config, max_attempts,
+                  ack_updater, audit_service),
             name=f'figwatch-worker-{i}',
             daemon=True,
         )
@@ -579,6 +680,7 @@ def main():
         locale, model, claude_path,
         trigger_config, processed_ids, processed_lock, work_queue,
         ack_updater, received_events, received_lock,
+        audit_service,
     )
     server = HTTPServer(('', port), handler)
 
