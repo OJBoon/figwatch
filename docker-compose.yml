@@ -7,7 +7,6 @@ services:
       # Required
       - FIGMA_PAT=${FIGMA_PAT}
       - FIGWATCH_WEBHOOK_PASSCODE=${FIGWATCH_WEBHOOK_PASSCODE}
-      - FIGWATCH_TEAM_ID=${FIGWATCH_TEAM_ID}
       # AI provider — set one (or both if you switch models)
       - ANTHROPIC_API_KEY
       - GOOGLE_API_KEY
@@ -17,12 +16,8 @@ services:
       - FIGWATCH_LOCALE
       - FIGWATCH_PORT
       - FIGWATCH_WORKERS
-      # Webhook health monitoring
+      # Observability
       - OTEL_EXPORTER_OTLP_ENDPOINT
-      - FIGWATCH_MONITOR_TICK
-      - FIGWATCH_MONITOR_GRACE
-      - FIGWATCH_MONITOR_FILE_REFRESH
-      - FIGWATCH_MONITOR_RPM
     volumes:
       # Optional: mount custom skill files
       - ./custom-skills:/app/custom-skills

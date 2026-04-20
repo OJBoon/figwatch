@@ -34,13 +34,8 @@ Environment variables:
   FIGWATCH_SKILLS_DIR         Path to custom-skills directory (default: ./custom-skills)
   FIGWATCH_SKIP_TOKEN_CHECK   Skip Figma token validation at startup (for CI)
 
-  Webhook health monitoring (all optional):
+  Observability (optional):
   OTEL_EXPORTER_OTLP_ENDPOINT   OTel collector endpoint (metrics disabled if unset)
-  FIGWATCH_TEAM_ID              Figma team ID — enables webhook miss detection
-  FIGWATCH_MONITOR_TICK         Seconds between checking next file (default: 60)
-  FIGWATCH_MONITOR_GRACE        Seconds before flagging a missed webhook (default: 60)
-  FIGWATCH_MONITOR_FILE_REFRESH Seconds between re-enumerating team files (default: 3600)
-  FIGWATCH_MONITOR_RPM          Max Figma API requests/min for monitor (default: 5)
 """
 
 import hmac
@@ -78,7 +73,6 @@ from figwatch.providers.figma import (
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
 from figwatch.services import AuditConfig, AuditService
 from figwatch.watcher import load_processed, save_processed
-from figwatch.webhook_monitor import WebhookMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -304,7 +298,7 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
 
 def _make_handler(pat, passcode, allowed_file_keys,
                   trigger_config, processed_ids, processed_lock, work_queue,
-                  ack_updater: AckUpdater, received_events, received_lock,
+                  ack_updater: AckUpdater,
                   audit_service: AuditService):
     class WebhookHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -351,11 +345,6 @@ def _make_handler(pat, passcode, allowed_file_keys,
 
             comment_id = payload.get('comment_id') or payload['comment'].get('id')
             file_key = payload.get('file_key', '?')
-
-            # Track for webhook health monitoring (before dedup/trigger logic)
-            if comment_id:
-                with received_lock:
-                    received_events[str(comment_id)] = time.time()
 
             logger.info(
                 '\U0001f4e5 webhook received',
@@ -532,30 +521,6 @@ def main():
                      extra={'value': anthropic_rpm, 'min': 0})
         sys.exit(1)
 
-    monitor_tick = int(os.environ.get('FIGWATCH_MONITOR_TICK', '60'))
-    if monitor_tick < 1:
-        logger.error('invalid FIGWATCH_MONITOR_TICK',
-                     extra={'value': monitor_tick, 'min': 1})
-        sys.exit(1)
-
-    monitor_grace = int(os.environ.get('FIGWATCH_MONITOR_GRACE', '60'))
-    if monitor_grace < 1:
-        logger.error('invalid FIGWATCH_MONITOR_GRACE',
-                     extra={'value': monitor_grace, 'min': 1})
-        sys.exit(1)
-
-    monitor_file_refresh = int(os.environ.get('FIGWATCH_MONITOR_FILE_REFRESH', '3600'))
-    if monitor_file_refresh < 1:
-        logger.error('invalid FIGWATCH_MONITOR_FILE_REFRESH',
-                     extra={'value': monitor_file_refresh, 'min': 1})
-        sys.exit(1)
-
-    monitor_rpm = int(os.environ.get('FIGWATCH_MONITOR_RPM', '5'))
-    if monitor_rpm < 1:
-        logger.error('invalid FIGWATCH_MONITOR_RPM',
-                     extra={'value': monitor_rpm, 'min': 1})
-        sys.exit(1)
-
     skills_dir = os.environ.get('FIGWATCH_SKILLS_DIR', '').strip() or None
     if skills_dir and not os.path.isdir(skills_dir):
         logger.error('FIGWATCH_SKILLS_DIR does not exist or is not a directory',
@@ -578,8 +543,6 @@ def main():
 
     processed_ids = load_processed()
     processed_lock = threading.Lock()
-    received_events = {}   # {comment_id: receive_unix_timestamp} for webhook monitoring
-    received_lock = threading.Lock()
     work_queue = InstrumentedQueue()
     stop_event = threading.Event()
 
@@ -613,29 +576,10 @@ def main():
     handler = _make_handler(
         pat, passcode, allowed_file_keys,
         trigger_config, processed_ids, processed_lock, work_queue,
-        ack_updater, received_events, received_lock,
+        ack_updater,
         audit_service,
     )
     server = HTTPServer(('', port), handler)
-
-    team_id = os.environ.get('FIGWATCH_TEAM_ID', '').strip()
-    if team_id:
-        monitor = WebhookMonitor(
-            pat=pat,
-            team_id=team_id,
-            extra_file_keys=allowed_file_keys,
-            received_events=received_events,
-            received_lock=received_lock,
-            stop_event=stop_event,
-            tick_interval=monitor_tick,
-            grace_period=monitor_grace,
-            file_refresh_interval=monitor_file_refresh,
-            monitor_rpm=monitor_rpm,
-        )
-        monitor.start()
-    else:
-        monitor = None
-        logger.info('FIGWATCH_TEAM_ID not set \u2014 webhook monitor disabled')
 
     def _shutdown(sig, frame):
         logger.info('\u23f9 shutting down — draining in-flight audits')
@@ -650,8 +594,6 @@ def main():
         server.serve_forever()
     finally:
         ack_updater.stop()
-        if monitor:
-            monitor.stop()
         for t in worker_threads:
             t.join(timeout=5)
         logger.info('\u23f9 all workers stopped — exiting')

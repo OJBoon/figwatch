@@ -132,7 +132,6 @@ figwatch/processor.py            process_work_item — ack → run skill → pos
 figwatch/watcher.py              FigmaWatcher — polls comments, detects triggers (macOS path)
 figwatch/skills.py               skill discovery, introspection, prompt building, execution
 figwatch/ack_updater.py          live queue-position updates on waiting audits
-figwatch/webhook_monitor.py      detects missed webhooks by reconciling against Figma API
 figwatch/queue_stats.py          queue depth tracking for ack messages
 figwatch/metrics.py              OpenTelemetry metric definitions
 figwatch/logging_config.py       structured logging setup (text + JSON formats)
@@ -157,7 +156,6 @@ figwatch/skills/                 bundled skill definitions (.md) + reference fil
 
 - **Webhook-driven server** — replaced polling with Figma `FILE_COMMENT` webhooks; audits trigger in real time with no polling delay. See the [Docker setup guide](docs/docker.md) for webhook registration.
 - **Google Gemini support** — primary provider for Docker deployments (free tier available); Anthropic Claude remains fully supported
-- **Webhook health monitoring** — detects missed webhooks by reconciling against the Figma comments API. See [Webhook health monitoring](docs/docker.md#webhook-health-monitoring).
 - **OpenTelemetry metrics** — export audit duration, queue depth, and webhook reliability metrics to any OTel-compatible collector. See [OpenTelemetry metrics](docs/docker.md#opentelemetry-metrics).
 - **Live queue-position updates** — when audits queue behind others, ack messages update with their position as the queue drains
 - **Per-provider rate limiting** — configurable RPM caps for Gemini and Anthropic prevent 429 errors at the source

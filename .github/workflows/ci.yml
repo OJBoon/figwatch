@@ -27,7 +27,7 @@ jobs:
         run: pytest
 
       - name: Verify server imports
-        run: python -c "from figwatch.metrics import init_metrics; from figwatch.webhook_monitor import WebhookMonitor; print('ok')"
+        run: python -c "from figwatch.metrics import init_metrics; print('ok')"
 
   docker:
     name: Docker build
