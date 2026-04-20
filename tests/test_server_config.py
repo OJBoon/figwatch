@@ -143,6 +143,23 @@ def test_anthropic_rpm_zero_accepted():
     _run_main(_env(FIGWATCH_ANTHROPIC_RPM='0'))
 
 
+# ── FIGWATCH_FIGMA_PLAN / FIGWATCH_FIGMA_SEAT ──────────────────────
+
+
+def test_figma_plan_invalid_exits():
+    with pytest.raises(SystemExit):
+        _run_main(_env(FIGWATCH_FIGMA_PLAN='invalid'))
+
+
+def test_figma_seat_invalid_exits():
+    with pytest.raises(SystemExit):
+        _run_main(_env(FIGWATCH_FIGMA_SEAT='admin'))
+
+
+def test_figma_plan_valid():
+    _run_main(_env(FIGWATCH_FIGMA_PLAN='organization', FIGWATCH_FIGMA_SEAT='dev'))
+
+
 # ── FIGMA_PAT token validation at startup ───────────────────────────
 
 

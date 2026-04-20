@@ -79,4 +79,4 @@ def test_design_data_repo_delegates(mock_fetch):
     data, tree = repo.fetch(['screenshot'], 'file-1', '2:3')
     assert data == {'screenshot': '/tmp/s.png'}
     assert tree == {'name': 'Frame'}
-    mock_fetch.assert_called_once_with(['screenshot'], 'file-1', '2:3', 'test-pat')
+    mock_fetch.assert_called_once_with(['screenshot'], 'file-1', '2:3', 'test-pat', limiter=None)

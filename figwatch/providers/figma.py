@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import socket
 import tempfile
 import time
@@ -10,6 +11,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+
+from figwatch.providers.ai.rate_limit import TokenBucket
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,81 @@ _MAX_IMAGE_BYTES = int(3.75 * 1024 * 1024)
 
 def urllib_quote(s):
     return urllib.parse.quote(s, safe='')
+
+
+# ── Figma rate limit tiers ───────────────────────────────────────────
+
+TIER_1 = 1  # Heavy: full file, nodes, image renders
+TIER_2 = 2  # Medium: comments, dev_resources, variables, projects
+TIER_3 = 3  # Light: styles, components, metadata
+
+_TIER_PATTERNS: list[tuple[str, int]] = [
+    # Tier 1
+    ('/images/', TIER_1),
+    ('/nodes', TIER_1),
+    # Tier 3 (check before generic fallback)
+    ('/styles', TIER_3),
+    ('/components', TIER_3),
+    ('/component_sets', TIER_3),
+    ('/meta', TIER_3),
+]
+
+# RPM budgets from Figma docs: (tier1, tier2, tier3)
+_RATE_LIMITS = {
+    'starter': (1, 5, 10),  # Tier 1 is 6/month — use 1 as floor
+    ('professional', 'view'): (1, 5, 10),
+    ('professional', 'dev'): (10, 25, 50),
+    ('organization', 'view'): (1, 5, 10),
+    ('organization', 'dev'): (15, 50, 100),
+    ('enterprise', 'view'): (1, 5, 10),
+    ('enterprise', 'dev'): (15, 50, 100),
+}
+
+
+def endpoint_tier(path: str) -> int:
+    """Determine Figma rate limit tier from API path."""
+    for pattern, tier in _TIER_PATTERNS:
+        if pattern in path:
+            return tier
+    # Bare /files/:key (with optional query string) = Tier 1
+    if re.search(r'/files/[^/]+(\?.*)?$', path):
+        return TIER_1
+    return TIER_2
+
+
+class FigmaRateLimiter:
+    """Three independent token buckets matching Figma's tiered rate limits."""
+
+    def __init__(self, plan: str, seat: str = 'dev'):
+        if plan == 'starter':
+            key = 'starter'
+        else:
+            key = (plan, seat)
+        if key not in _RATE_LIMITS:
+            raise ValueError(f'Unknown plan/seat combination: {key!r}')
+        tier1_rpm, tier2_rpm, tier3_rpm = _RATE_LIMITS[key]
+        self._buckets = {
+            TIER_1: TokenBucket(capacity=max(tier1_rpm, 1), refill_per_second=tier1_rpm / 60),
+            TIER_2: TokenBucket(capacity=tier2_rpm, refill_per_second=tier2_rpm / 60),
+            TIER_3: TokenBucket(capacity=tier3_rpm, refill_per_second=tier3_rpm / 60),
+        }
+
+    def acquire(self, path: str) -> None:
+        """Block until a token is available in the correct tier bucket."""
+        tier = endpoint_tier(path)
+        self._buckets[tier].acquire()
+
+    def backoff(self, path: str, retry_after: float) -> None:
+        """Drain the tier bucket after a 429, forcing other threads to wait.
+
+        Sets the bucket's token count to negative so threads must wait for
+        refill_rate * retry_after seconds before proceeding.
+        """
+        tier = endpoint_tier(path)
+        bucket = self._buckets[tier]
+        with bucket._lock:
+            # Drain tokens so subsequent acquires block for ~retry_after seconds
+            bucket._tokens = -(bucket._refill_rate * retry_after)
 
 
 # ── REST helpers ──────────────────────────────────────────────────────
@@ -90,13 +168,18 @@ def figma_delete(path, pat):
     _make_request(f'{FIGMA_API}{path}', pat, method='DELETE')
 
 
-def figma_get_retry(path, pat, retries=1, timeout=15):
+def figma_get_retry(path, pat, retries=1, timeout=15, limiter=None):
     """GET a Figma API endpoint with retry on 429. Returns parsed JSON or None.
 
     Raises FigmaTokenExpired immediately on 403 token-expiry (no retry).
     Raises socket.timeout / TimeoutError on timeout so callers can distinguish
     slow responses from other failures.
+
+    If *limiter* is provided, acquires from the appropriate tier bucket before
+    making the request.
     """
+    if limiter:
+        limiter.acquire(path)
     for attempt in range(retries + 1):
         try:
             req = urllib.request.Request(
@@ -112,11 +195,14 @@ def figma_get_retry(path, pat, retries=1, timeout=15):
                     wait = int(e.headers.get('Retry-After', '0') or 0)
                 except Exception:
                     wait = 0
+                wait = max(wait, 2)
+                if limiter:
+                    limiter.backoff(path, wait)
                 logger.warning(
                     'figma 429 — retrying',
-                    extra={'path': path, 'retry_in_seconds': max(wait, 2)},
+                    extra={'path': path, 'retry_in_seconds': wait},
                 )
-                time.sleep(max(wait, 2))
+                time.sleep(wait)
                 continue
             logger.warning('figma API error',
                            extra={'path': path, 'status': e.code})
@@ -198,7 +284,7 @@ def _extract_annotations(node):
 
 # ── Data fetching ─────────────────────────────────────────────────────
 
-def fetch_screenshot(file_key, node_id, pat):
+def fetch_screenshot(file_key, node_id, pat, limiter=None):
     """Download a Figma node screenshot. Returns file path or None.
 
     Tries progressively smaller PNG scales then falls back to JPEG. Returns None
@@ -220,6 +306,7 @@ def fetch_screenshot(file_key, node_id, pat):
                 f'/images/{file_key}?ids={enc_id}&scale={scale}&format={fmt}',
                 pat,
                 timeout=45,
+                limiter=limiter,
             )
             if not data or data.get('err') or data.get('status') == 400:
                 continue
@@ -245,11 +332,11 @@ def fetch_screenshot(file_key, node_id, pat):
     return None
 
 
-def fetch_node_tree(file_key, node_id, pat):
+def fetch_node_tree(file_key, node_id, pat, limiter=None):
     """Fetch the full node tree for a Figma node. Returns (file_path, parsed_data) or (None, None)."""
     enc_id = urllib_quote(node_id)
     try:
-        data = figma_get_retry(f'/files/{file_key}/nodes?ids={enc_id}&depth=100', pat)
+        data = figma_get_retry(f'/files/{file_key}/nodes?ids={enc_id}&depth=100', pat, limiter=limiter)
         node = data.get('nodes', {}).get(node_id, {}).get('document') if data else None
         if not node:
             return None, None
@@ -264,7 +351,7 @@ def fetch_node_tree(file_key, node_id, pat):
         return None, None
 
 
-def fetch_figma_data(required_data, file_key, node_id, pat):
+def fetch_figma_data(required_data, file_key, node_id, pat, limiter=None):
     """Fetch only the declared data points from Figma API in parallel.
 
     Returns (dict[data_type -> value], tree_data).
@@ -276,28 +363,28 @@ def fetch_figma_data(required_data, file_key, node_id, pat):
     futures = {}
     with ThreadPoolExecutor(max_workers=3) as pool:
         if 'screenshot' in required_data:
-            futures['screenshot'] = pool.submit(fetch_screenshot, file_key, node_id, pat)
+            futures['screenshot'] = pool.submit(fetch_screenshot, file_key, node_id, pat, limiter=limiter)
         needs_tree = any(k in required_data for k in ('node_tree', 'text_nodes', 'annotations', 'prototype_flows'))
         if needs_tree:
-            futures['_tree'] = pool.submit(fetch_node_tree, file_key, node_id, pat)
+            futures['_tree'] = pool.submit(fetch_node_tree, file_key, node_id, pat, limiter=limiter)
         if 'dev_resources' in required_data:
             futures['dev_resources'] = pool.submit(
-                figma_get_retry, f'/files/{file_key}/dev_resources?node_ids={enc_id}', pat
+                figma_get_retry, f'/files/{file_key}/dev_resources?node_ids={enc_id}', pat, limiter=limiter
             )
         if 'variables_local' in required_data:
             futures['variables_local'] = pool.submit(
-                figma_get_retry, f'/files/{file_key}/variables/local', pat
+                figma_get_retry, f'/files/{file_key}/variables/local', pat, limiter=limiter
             )
         if 'variables_published' in required_data:
             futures['variables_published'] = pool.submit(
-                figma_get_retry, f'/files/{file_key}/variables/published', pat
+                figma_get_retry, f'/files/{file_key}/variables/published', pat, limiter=limiter
             )
         if 'styles' in required_data:
-            futures['styles'] = pool.submit(figma_get_retry, f'/files/{file_key}/styles', pat)
+            futures['styles'] = pool.submit(figma_get_retry, f'/files/{file_key}/styles', pat, limiter=limiter)
         if 'components' in required_data:
-            futures['components'] = pool.submit(figma_get_retry, f'/files/{file_key}/components', pat)
+            futures['components'] = pool.submit(figma_get_retry, f'/files/{file_key}/components', pat, limiter=limiter)
         if 'file_structure' in required_data:
-            futures['file_structure'] = pool.submit(figma_get_retry, f'/files/{file_key}?depth=2', pat)
+            futures['file_structure'] = pool.submit(figma_get_retry, f'/files/{file_key}?depth=2', pat, limiter=limiter)
 
         for key, future in futures.items():
             try:
@@ -350,8 +437,9 @@ class FigmaCommentRepository:
 class FigmaDesignDataRepository:
     """DesignDataRepository implementation backed by the Figma REST API."""
 
-    def __init__(self, pat: str):
+    def __init__(self, pat: str, limiter: 'FigmaRateLimiter | None' = None):
         self._pat = pat
+        self._limiter = limiter
 
     def fetch(self, required_data: list, file_key: str, node_id: str) -> tuple:
-        return fetch_figma_data(required_data, file_key, node_id, self._pat)
+        return fetch_figma_data(required_data, file_key, node_id, self._pat, limiter=self._limiter)

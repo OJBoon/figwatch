@@ -33,6 +33,8 @@ Environment variables:
   FIGWATCH_LOG_FORMAT         Log format: text (default) or json
   FIGWATCH_SKILLS_DIR         Path to custom-skills directory (default: ./custom-skills)
   FIGWATCH_SKIP_TOKEN_CHECK   Skip Figma token validation at startup (for CI)
+  FIGWATCH_FIGMA_PLAN           Figma plan: starter, professional, organization, enterprise (default: professional)
+  FIGWATCH_FIGMA_SEAT           Figma seat type: dev, view (default: dev; ignored for starter)
 
   Observability (optional):
   OTEL_EXPORTER_OTLP_ENDPOINT   OTel collector endpoint (metrics disabled if unset)
@@ -67,8 +69,8 @@ from figwatch.metrics import (
 )
 from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS
 from figwatch.providers.figma import (
-    FigmaCommentRepository, FigmaDesignDataRepository, FigmaTokenExpired,
-    figma_get_retry, validate_token,
+    FigmaCommentRepository, FigmaDesignDataRepository, FigmaRateLimiter,
+    FigmaTokenExpired, figma_get_retry, validate_token,
 )
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
 from figwatch.services import AuditConfig, AuditService
@@ -101,7 +103,7 @@ def _parse_file_keys(files_str):
     return keys
 
 
-def _resolve_node_id(comment, file_key, pat, comment_id=None):
+def _resolve_node_id(comment, file_key, pat, comment_id=None, limiter=None):
     """Return node_id for a comment, fetching the full comment from REST API if needed."""
     node_id = (comment.get('client_meta') or {}).get('node_id')
     if node_id:
@@ -113,7 +115,7 @@ def _resolve_node_id(comment, file_key, pat, comment_id=None):
         return None
 
     try:
-        data = figma_get_retry(f'/files/{file_key}/comments', pat)
+        data = figma_get_retry(f'/files/{file_key}/comments', pat, limiter=limiter)
         for c in (data or {}).get('comments', []):
             if str(c.get('id')) == str(lookup_id):
                 return (c.get('client_meta') or {}).get('node_id')
@@ -122,7 +124,8 @@ def _resolve_node_id(comment, file_key, pat, comment_id=None):
     return None
 
 
-def _build_audit(payload, comment_id, pat, allowed_file_keys, trigger_config, audit_id):
+def _build_audit(payload, comment_id, pat, allowed_file_keys, trigger_config, audit_id,
+                 limiter=None):
     """Parse a FILE_COMMENT payload into an Audit, or return (None, reason)."""
     file_key = payload.get('file_key')
     if allowed_file_keys and file_key not in allowed_file_keys:
@@ -137,7 +140,7 @@ def _build_audit(payload, comment_id, pat, allowed_file_keys, trigger_config, au
 
     parent_id = comment.get('parent_id') or ''
 
-    node_id = _resolve_node_id(comment, file_key, pat, comment_id=comment_id)
+    node_id = _resolve_node_id(comment, file_key, pat, comment_id=comment_id, limiter=limiter)
     if not node_id:
         return None, 'no node_id'
 
@@ -299,7 +302,7 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
 def _make_handler(pat, passcode, allowed_file_keys,
                   trigger_config, processed_ids, processed_lock, work_queue,
                   ack_updater: AckUpdater,
-                  audit_service: AuditService):
+                  audit_service: AuditService, limiter=None):
     class WebhookHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == '/health':
@@ -361,7 +364,7 @@ def _make_handler(pat, passcode, allowed_file_keys,
             audit_id = new_audit_id()
             audit, reason = _build_audit(
                 payload, comment_id, pat, allowed_file_keys,
-                trigger_config, audit_id,
+                trigger_config, audit_id, limiter=limiter,
             )
 
             if audit is None:
@@ -521,6 +524,22 @@ def main():
                      extra={'value': anthropic_rpm, 'min': 0})
         sys.exit(1)
 
+    figma_plan = os.environ.get('FIGWATCH_FIGMA_PLAN', 'professional').strip().lower()
+    valid_plans = ('starter', 'professional', 'organization', 'enterprise')
+    if figma_plan not in valid_plans:
+        logger.error('invalid FIGWATCH_FIGMA_PLAN',
+                     extra={'value': figma_plan, 'valid': valid_plans})
+        sys.exit(1)
+
+    figma_seat = os.environ.get('FIGWATCH_FIGMA_SEAT', 'dev').strip().lower()
+    valid_seats = ('dev', 'view')
+    if figma_seat not in valid_seats:
+        logger.error('invalid FIGWATCH_FIGMA_SEAT',
+                     extra={'value': figma_seat, 'valid': valid_seats})
+        sys.exit(1)
+
+    figma_limiter = FigmaRateLimiter(plan=figma_plan, seat=figma_seat)
+
     skills_dir = os.environ.get('FIGWATCH_SKILLS_DIR', '').strip() or None
     if skills_dir and not os.path.isdir(skills_dir):
         logger.error('FIGWATCH_SKILLS_DIR does not exist or is not a directory',
@@ -534,7 +553,7 @@ def main():
 
     # Construct repositories and application service
     comment_repo = FigmaCommentRepository(pat)
-    design_repo = FigmaDesignDataRepository(pat)
+    design_repo = FigmaDesignDataRepository(pat, limiter=figma_limiter)
     audit_config = AuditConfig(
         model=model, claude_path=claude_path,
         reply_lang='en', locale=locale,
@@ -577,7 +596,7 @@ def main():
         pat, passcode, allowed_file_keys,
         trigger_config, processed_ids, processed_lock, work_queue,
         ack_updater,
-        audit_service,
+        audit_service, limiter=figma_limiter,
     )
     server = HTTPServer(('', port), handler)
 
