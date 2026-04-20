@@ -1,7 +1,6 @@
 """AI provider protocol and factory.
 
 All providers expose:
-  .name         — display name used in sign-offs (e.g. 'Gemini', 'Claude')
   .model_id     — resolved model identifier (e.g. 'claude-sonnet-4-6')
   .inline_files — True if prompt embeds data inline; False if it uses file paths
   .call(prompt, image_path) -> str
@@ -79,7 +78,6 @@ def reset_limiters() -> None:
 
 @runtime_checkable
 class AIProvider(Protocol):
-    name: str
     model_id: str
     inline_files: bool
 

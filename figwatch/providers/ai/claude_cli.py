@@ -8,7 +8,6 @@ _HOME = Path.home()
 
 
 class ClaudeCLIProvider:
-    name = 'Claude'
     inline_files = False
 
     def __init__(self, model: str, claude_path: str, skill_dir: str = ''):

@@ -322,7 +322,7 @@ def execute_skill(audit, *, config, design_repo):
     provider = make_provider(model, claude_path, skill_dir=skill_dir)
     logger.debug(
         'calling ai provider',
-        extra={'provider': provider.name, 'frame': frame_name},
+        extra={'provider': provider.model_id, 'frame': frame_name},
     )
     prompt = _build_prompt(
         audit, skill_content, refs_section, data, tree_data, frame_name,

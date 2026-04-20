@@ -40,7 +40,7 @@ FigWatch operates in a single bounded context: **Comment Auditing**.
 | **TriggerMatch** | `TriggerMatch` | Value object: result of matching a comment against triggers — includes the trigger, skill path, and extra context text. |
 | **Comment** | `Comment` | Value object: a Figma comment — ID, message text, parent ID, node ID, user handle, file key. Replaces untyped dict fields on `WorkItem`. |
 | **Skill** | `Skill` | Value object: what AI prompt to run — a reference (builtin or file path) and compatibility metadata. |
-| **AuditResult** | `AuditResult` | Value object: the AI provider's response text, provider name, and frame name. Replaces raw string returns. |
+| **AuditResult** | `AuditResult` | Value object: the AI provider's response text, model ID, and frame name. Replaces raw string returns. |
 | **AuditStatus** | `AuditStatus` | Enum replacing string constants: `DETECTED`, `QUEUED`, `PROCESSING`, `REPLIED`, `ERROR`. |
 
 The term "WorkItem" is retired in favour of "Audit" — it better reflects the domain ("we are auditing a design") and matches how log messages and user-facing ack messages already describe the operation.

@@ -6,7 +6,6 @@ from figwatch.providers.ai import with_retry
 
 
 class AnthropicProvider:
-    name = 'Claude'
     inline_files = True
 
     def __init__(self, model_name: str, api_key: str, rate_limiter=None):

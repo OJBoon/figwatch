@@ -66,19 +66,19 @@ def test_make_provider_cli_passes_skill_dir():
 
 def test_gemini_provider_properties():
     p = GeminiProvider("gemini-flash", "key")
-    assert p.name == "Gemini"
+    assert p.model_id == "gemini-flash"
     assert p.inline_files is True
 
 
 def test_anthropic_provider_properties():
     p = AnthropicProvider("claude-sonnet-4-6", "key")
-    assert p.name == "Claude"
+    assert p.model_id == "claude-sonnet-4-6"
     assert p.inline_files is True
 
 
 def test_claude_cli_provider_properties():
     p = ClaudeCLIProvider("sonnet", "claude")
-    assert p.name == "Claude"
+    assert p.model_id == "sonnet"
     assert p.inline_files is False
 
 
