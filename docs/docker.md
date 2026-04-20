@@ -132,7 +132,7 @@ All variables are documented in [`.env.example`](../.env.example) with sensible 
 |----------|-------------|
 | `FIGMA_PAT` | Figma Personal Access Token |
 | `FIGWATCH_WEBHOOK_PASSCODE` | Secret passphrase set when registering the webhook |
-| `FIGWATCH_TEAM_ID` | Figma team ID — needed for webhook registration and enables webhook health monitoring |
+| `FIGWATCH_TEAM_ID` | Figma team ID — needed for webhook registration |
 | `GOOGLE_API_KEY` | Google AI API key — required when `FIGWATCH_MODEL` starts with `gemini` |
 | `ANTHROPIC_API_KEY` | Anthropic API key — required when `FIGWATCH_MODEL` is `sonnet`, `opus`, or `haiku` |
 
@@ -164,15 +164,11 @@ All variables are documented in [`.env.example`](../.env.example) with sensible 
 | `FIGWATCH_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, or `ERROR` |
 | `FIGWATCH_LOG_FORMAT` | `text` | `text` (human-readable, ANSI colors in TTY) or `json` (one object per line, for Loki/Datadog) |
 
-### Monitoring and observability
+### Observability
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OpenTelemetry collector endpoint (e.g. `http://otel-collector:4317`). Metrics disabled when unset. |
-| `FIGWATCH_MONITOR_TICK` | `60` | Seconds between checking the next file in the rotation |
-| `FIGWATCH_MONITOR_GRACE` | `60` | Seconds before flagging a comment as a missed webhook |
-| `FIGWATCH_MONITOR_FILE_REFRESH` | `3600` | Seconds between re-enumerating team files |
-| `FIGWATCH_MONITOR_RPM` | `5` | Figma API req/min budget for the monitor |
 
 ## Custom skills
 
@@ -215,23 +211,7 @@ docker compose logs figwatch | grep 'audit=a3f9e2d1'
 
 The same works for `trigger=@ux`, `node=176:24454`, or `file=abc123` if you want to filter by other dimensions.
 
-## Webhook health monitoring
-
-Figma webhooks can be unreliable — sometimes a comment is created but the webhook never fires. FigWatch detects these missed webhooks by periodically checking the Figma comments API and comparing against what arrived via webhook.
-
-Since `FIGWATCH_TEAM_ID` is already set (required for webhook registration), monitoring is enabled automatically. On startup, FigWatch discovers all files in your team via the Figma API, then rotates through them one per tick (default 60 seconds). For each file it fetches recent comments and checks whether they were delivered via webhook. Missed comments are logged as warnings:
-
-```
-2026-04-17 10:30:12 WARNING webhook_moni file=abc123 comment_id=9876543 comment_age_seconds=95 monitor: missed webhook detected
-```
-
-The file list is refreshed hourly so new files are picked up automatically.
-
-### Rate limiting
-
-The monitor uses a dedicated rate limiter (default 5 req/min) so it doesn't compete with audit operations for the shared Figma API budget. With 5 req/min and a 60-second tick, the monitor uses roughly 1 request per tick for comment checks, plus a small burst when enumerating team files on startup and hourly refresh.
-
-### OpenTelemetry metrics
+## OpenTelemetry metrics
 
 Set `OTEL_EXPORTER_OTLP_ENDPOINT` to export metrics to any OTel-compatible collector:
 
@@ -244,14 +224,12 @@ Key metrics:
 | Metric | Type | Description |
 |--------|------|-------------|
 | `figwatch.webhook.received_total` | Counter | Webhook events received, by `event_type` |
-| `figwatch.webhook.missed_total` | Counter | Comments found in Figma but never received via webhook |
 | `figwatch.webhook.last_received_seconds` | Gauge | Unix timestamp of last webhook event |
-| `figwatch.monitor.files_tracked` | Gauge | Number of files in monitoring rotation |
 | `figwatch.audit.duration_seconds` | Histogram | End-to-end audit time |
 | `figwatch.audit.total` | Counter | Audits completed, by `status` |
 | `figwatch.queue.depth` | UpDownCounter | Current queue depth |
 
-Metrics are disabled (zero overhead) when `OTEL_EXPORTER_OTLP_ENDPOINT` is not set. The monitor can run without OTel — it still logs missed webhooks as warnings.
+Metrics are disabled (zero overhead) when `OTEL_EXPORTER_OTLP_ENDPOINT` is not set.
 
 ## Troubleshooting
 

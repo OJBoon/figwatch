@@ -32,7 +32,6 @@ def _run_main(env):
          mock.patch('server.load_processed', return_value=set()), \
          mock.patch('server.AckUpdater'), \
          mock.patch('server.HTTPServer'), \
-         mock.patch('server.WebhookMonitor'), \
          mock.patch('server.threading.Thread'), \
          mock.patch('signal.signal'):
         import server
@@ -142,54 +141,6 @@ def test_anthropic_rpm_negative_exits():
 def test_anthropic_rpm_zero_accepted():
     """RPM=0 disables rate limiting — valid."""
     _run_main(_env(FIGWATCH_ANTHROPIC_RPM='0'))
-
-
-# ── FIGWATCH_MONITOR_TICK ────────────────────────────────────────────
-
-
-def test_monitor_tick_zero_exits():
-    with pytest.raises(SystemExit):
-        _run_main(_env(FIGWATCH_MONITOR_TICK='0'))
-
-
-def test_monitor_tick_valid():
-    _run_main(_env(FIGWATCH_MONITOR_TICK='30'))
-
-
-# ── FIGWATCH_MONITOR_GRACE ───────────────────────────────────────────
-
-
-def test_monitor_grace_zero_exits():
-    with pytest.raises(SystemExit):
-        _run_main(_env(FIGWATCH_MONITOR_GRACE='0'))
-
-
-def test_monitor_grace_valid():
-    _run_main(_env(FIGWATCH_MONITOR_GRACE='120'))
-
-
-# ── FIGWATCH_MONITOR_FILE_REFRESH ────────────────────────────────────
-
-
-def test_monitor_file_refresh_zero_exits():
-    with pytest.raises(SystemExit):
-        _run_main(_env(FIGWATCH_MONITOR_FILE_REFRESH='0'))
-
-
-def test_monitor_file_refresh_valid():
-    _run_main(_env(FIGWATCH_MONITOR_FILE_REFRESH='7200'))
-
-
-# ── FIGWATCH_MONITOR_RPM ────────────────────────────────────────────
-
-
-def test_monitor_rpm_zero_exits():
-    with pytest.raises(SystemExit):
-        _run_main(_env(FIGWATCH_MONITOR_RPM='0'))
-
-
-def test_monitor_rpm_valid():
-    _run_main(_env(FIGWATCH_MONITOR_RPM='10'))
 
 
 # ── FIGMA_PAT token validation at startup ───────────────────────────

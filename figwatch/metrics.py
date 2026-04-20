@@ -14,12 +14,7 @@ logger = logging.getLogger(__name__)
 # Lazy-initialised instruments — populated by init_metrics().
 _meter = None
 _webhook_received = None
-_webhook_missed = None
 _webhook_last_received = None
-_monitor_reconciliation = None
-_monitor_comments_checked = None
-_monitor_files_tracked = None
-_monitor_rotation_seconds = None
 _audit_duration = None
 _audit_total = None
 _queue_depth = None
@@ -31,9 +26,7 @@ def init_metrics(service_name='figwatch'):
     OTEL_EXPORTER_OTLP_ENDPOINT is not set.
     """
     global _meter
-    global _webhook_received, _webhook_missed, _webhook_last_received
-    global _monitor_reconciliation, _monitor_comments_checked
-    global _monitor_files_tracked, _monitor_rotation_seconds
+    global _webhook_received, _webhook_last_received
     global _audit_duration, _audit_total, _queue_depth, _token_expired
 
     endpoint = os.environ.get('OTEL_EXPORTER_OTLP_ENDPOINT', '').strip()
@@ -86,31 +79,9 @@ def init_metrics(service_name='figwatch'):
         'figwatch.webhook.received_total',
         description='Webhook events received',
     )
-    _webhook_missed = _meter.create_counter(
-        'figwatch.webhook.missed_total',
-        description='Comments found in Figma but never received via webhook',
-    )
     _webhook_last_received = _meter.create_gauge(
         'figwatch.webhook.last_received_seconds',
         description='Unix timestamp of last webhook event',
-    )
-
-    # Monitor reconciliation
-    _monitor_reconciliation = _meter.create_counter(
-        'figwatch.monitor.reconciliation_total',
-        description='Files checked (reconciliation ticks)',
-    )
-    _monitor_comments_checked = _meter.create_counter(
-        'figwatch.monitor.comments_checked',
-        description='Total comments evaluated across all ticks',
-    )
-    _monitor_files_tracked = _meter.create_gauge(
-        'figwatch.monitor.files_tracked',
-        description='Number of files in monitoring rotation',
-    )
-    _monitor_rotation_seconds = _meter.create_gauge(
-        'figwatch.monitor.rotation_seconds',
-        description='Estimated seconds for one full rotation',
     )
 
     # Audit processing
@@ -145,24 +116,6 @@ def record_webhook_received(event_type):
     if _webhook_last_received:
         _webhook_last_received.set(time.time())
 
-
-def record_webhook_missed(file_key, comment_id):
-    if _webhook_missed:
-        _webhook_missed.add(1, {'file_key': file_key})
-
-
-def record_reconciliation(comments_checked):
-    if _monitor_reconciliation:
-        _monitor_reconciliation.add(1)
-    if _monitor_comments_checked:
-        _monitor_comments_checked.add(comments_checked)
-
-
-def record_files_tracked(count, tick_interval):
-    if _monitor_files_tracked:
-        _monitor_files_tracked.set(count)
-    if _monitor_rotation_seconds:
-        _monitor_rotation_seconds.set(count * tick_interval)
 
 
 def record_audit_completed(duration_seconds, status):

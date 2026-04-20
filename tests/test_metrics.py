@@ -12,7 +12,6 @@ def test_init_metrics_noop_without_endpoint(monkeypatch):
     # Reset module state
     m._meter = None
     m._webhook_received = None
-    m._webhook_missed = None
 
     m.init_metrics()
 
@@ -36,22 +35,6 @@ def test_record_webhook_received_noop():
     m._webhook_last_received = None
     m.record_webhook_received('FILE_COMMENT')  # should not raise
 
-
-def test_record_webhook_missed_noop():
-    m._webhook_missed = None
-    m.record_webhook_missed('abc123', 'comment-1')
-
-
-def test_record_reconciliation_noop():
-    m._monitor_reconciliation = None
-    m._monitor_comments_checked = None
-    m.record_reconciliation(5)
-
-
-def test_record_files_tracked_noop():
-    m._monitor_files_tracked = None
-    m._monitor_rotation_seconds = None
-    m.record_files_tracked(10, 60)
 
 
 def test_record_audit_completed_noop():
@@ -108,15 +91,6 @@ def test_record_webhook_received_calls_instruments():
     assert gauge.calls[0][0] > 0
 
 
-def test_record_webhook_missed_calls_counter():
-    counter = _FakeCounter()
-    m._webhook_missed = counter
-
-    m.record_webhook_missed('file-abc', 'comment-42')
-
-    assert len(counter.calls) == 1
-    assert counter.calls[0] == (1, {'file_key': 'file-abc'})
-
 
 def test_record_audit_completed_calls_instruments():
     hist = _FakeHistogram()
@@ -140,13 +114,3 @@ def test_record_queue_change_calls_updown():
     assert counter.calls == [(1, None), (-1, None)]
 
 
-def test_record_files_tracked_calls_gauges():
-    files_gauge = _FakeGauge()
-    rotation_gauge = _FakeGauge()
-    m._monitor_files_tracked = files_gauge
-    m._monitor_rotation_seconds = rotation_gauge
-
-    m.record_files_tracked(50, 60)
-
-    assert files_gauge.calls == [(50, None)]
-    assert rotation_gauge.calls == [(3000, None)]
