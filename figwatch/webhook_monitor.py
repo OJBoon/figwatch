@@ -295,7 +295,10 @@ class WebhookMonitor:
         )
 
         # Initial file discovery
-        self._refresh_files()
+        try:
+            self._refresh_files()
+        except Exception:
+            logger.exception('monitor: initial file discovery failed')
 
         tick_count = 0
         while not self._stop.is_set():

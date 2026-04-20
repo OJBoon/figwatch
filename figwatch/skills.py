@@ -299,6 +299,10 @@ def execute_skill(audit, *, config, design_repo):
 
     data, tree_data = design_repo.fetch(required_data, file_key, node_id)
 
+    missing = [k for k in required_data if not data.get(k)]
+    if missing:
+        raise RuntimeError(f'Failed to fetch required data: {", ".join(missing)}')
+
     with open(skill_path, encoding='utf-8') as f:
         skill_content = f.read()
 
