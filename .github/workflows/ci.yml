@@ -51,6 +51,7 @@ jobs:
           docker run -d --name figwatch-ci \
             -e FIGMA_PAT=figd_placeholder \
             -e FIGWATCH_WEBHOOK_PASSCODE=placeholder \
+            -e FIGWATCH_SKIP_TOKEN_CHECK=1 \
             -p 8080:8080 \
             figwatch:ci
           sleep 5

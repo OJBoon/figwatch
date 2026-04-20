@@ -32,6 +32,7 @@ Environment variables:
   FIGWATCH_LOG_LEVEL          Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)
   FIGWATCH_LOG_FORMAT         Log format: text (default) or json
   FIGWATCH_SKILLS_DIR         Path to custom-skills directory (default: ./custom-skills)
+  FIGWATCH_SKIP_TOKEN_CHECK   Skip Figma token validation at startup (for CI)
 
   Webhook health monitoring (all optional):
   OTEL_EXPORTER_OTLP_ENDPOINT   OTel collector endpoint (metrics disabled if unset)
@@ -66,11 +67,13 @@ from figwatch.log_context import (
 )
 from figwatch.logging_config import configure_logging
 from figwatch.metrics import (
-    init_metrics, record_queue_change, record_webhook_received,
+    init_metrics, record_queue_change, record_token_expired,
+    record_webhook_received,
 )
 from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS
 from figwatch.providers.figma import (
-    FigmaCommentRepository, FigmaDesignDataRepository, figma_get_retry,
+    FigmaCommentRepository, FigmaDesignDataRepository, FigmaTokenExpired,
+    figma_get_retry, validate_token,
 )
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
 from figwatch.services import AuditConfig, AuditService
@@ -222,6 +225,14 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
                     _run_audit(audit, ack_id, audit_service)
                     ack_id = None
                     success = True
+                    break
+                except FigmaTokenExpired as err:
+                    last_err = err
+                    record_token_expired()
+                    logger.error(
+                        'Figma token expired — skipping retries',
+                        extra={'attempt': attempt + 1},
+                    )
                     break
                 except Exception as err:
                     last_err = err
@@ -449,6 +460,22 @@ def main():
     if not passcode:
         logger.error('FIGWATCH_WEBHOOK_PASSCODE is required')
         sys.exit(1)
+
+    if os.environ.get('FIGWATCH_SKIP_TOKEN_CHECK', '').strip().lower() in ('1', 'true', 'yes'):
+        logger.warning('FIGWATCH_SKIP_TOKEN_CHECK set — skipping Figma token validation')
+    else:
+        try:
+            handle = validate_token(pat)
+            logger.info('figma token valid', extra={'user': handle})
+        except FigmaTokenExpired:
+            logger.error(
+                'Figma token expired — generate a new token at '
+                'https://www.figma.com/developers/api#access-tokens'
+            )
+            sys.exit(1)
+        except Exception as e:
+            logger.error('Figma token validation failed', extra={'error': str(e)})
+            sys.exit(1)
 
     files_str = os.environ.get('FIGWATCH_FILES', '').strip()
     allowed_file_keys = _parse_file_keys(files_str) if files_str else set()

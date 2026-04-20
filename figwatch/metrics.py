@@ -23,6 +23,7 @@ _monitor_rotation_seconds = None
 _audit_duration = None
 _audit_total = None
 _queue_depth = None
+_token_expired = None
 
 
 def init_metrics(service_name='figwatch'):
@@ -33,7 +34,7 @@ def init_metrics(service_name='figwatch'):
     global _webhook_received, _webhook_missed, _webhook_last_received
     global _monitor_reconciliation, _monitor_comments_checked
     global _monitor_files_tracked, _monitor_rotation_seconds
-    global _audit_duration, _audit_total, _queue_depth
+    global _audit_duration, _audit_total, _queue_depth, _token_expired
 
     endpoint = os.environ.get('OTEL_EXPORTER_OTLP_ENDPOINT', '').strip()
     if not endpoint:
@@ -127,6 +128,11 @@ def init_metrics(service_name='figwatch'):
         description='Current queue depth',
     )
 
+    _token_expired = _meter.create_counter(
+        'figwatch.auth.token_expired',
+        description='Figma token expiry events detected',
+    )
+
     logger.info('OTel metrics initialised', extra={'endpoint': endpoint})
 
 
@@ -164,6 +170,11 @@ def record_audit_completed(duration_seconds, status):
         _audit_duration.record(duration_seconds)
     if _audit_total:
         _audit_total.add(1, {'status': status})
+
+
+def record_token_expired():
+    if _token_expired:
+        _token_expired.add(1)
 
 
 def record_queue_change(delta):

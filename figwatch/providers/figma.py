@@ -15,6 +15,10 @@ logger = logging.getLogger(__name__)
 
 FIGMA_API = 'https://api.figma.com/v1'
 
+
+class FigmaTokenExpired(Exception):
+    """Raised when Figma returns 403 with 'Token expired'."""
+
 # Base64 adds ~33% overhead; cap raw bytes at 3.75 MB to stay under the 5 MB API limit.
 _MAX_IMAGE_BYTES = int(3.75 * 1024 * 1024)
 
@@ -25,6 +29,21 @@ def urllib_quote(s):
 
 # ── REST helpers ──────────────────────────────────────────────────────
 
+def _check_token_expired(e):
+    """Raise FigmaTokenExpired if an HTTPError is a 403 token-expiry response."""
+    if e.code != 403:
+        return
+    try:
+        body = json.loads(e.read())
+    except Exception:
+        return
+    if 'token expired' in str(body.get('err', '')).lower():
+        raise FigmaTokenExpired(
+            'Figma token expired — generate a new token at '
+            'https://www.figma.com/developers/api#access-tokens'
+        ) from e
+
+
 def _make_request(url, pat, method='GET', body=None):
     headers = {'X-Figma-Token': pat}
     data = None
@@ -32,10 +51,31 @@ def _make_request(url, pat, method='GET', body=None):
         headers['Content-Type'] = 'application/json'
         data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=15) as r:
-        if method == 'DELETE':
-            return None
-        return json.loads(r.read())
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            if method == 'DELETE':
+                return None
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        _check_token_expired(e)
+        raise
+
+
+def validate_token(pat):
+    """Check token validity against /v1/me. Returns user handle or raises.
+
+    Raises FigmaTokenExpired on expired token, RuntimeError on other failures.
+    """
+    try:
+        data = _make_request(f'{FIGMA_API}/me', pat)
+    except FigmaTokenExpired:
+        raise
+    except Exception as e:
+        raise RuntimeError(f'Figma token validation failed: {e}') from e
+    handle = (data or {}).get('handle')
+    if not handle:
+        raise RuntimeError('Figma token validation returned no user handle')
+    return handle
 
 
 def figma_get(path, pat):
@@ -53,6 +93,7 @@ def figma_delete(path, pat):
 def figma_get_retry(path, pat, retries=1, timeout=15):
     """GET a Figma API endpoint with retry on 429. Returns parsed JSON or None.
 
+    Raises FigmaTokenExpired immediately on 403 token-expiry (no retry).
     Raises socket.timeout / TimeoutError on timeout so callers can distinguish
     slow responses from other failures.
     """
@@ -65,6 +106,7 @@ def figma_get_retry(path, pat, retries=1, timeout=15):
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read())
         except urllib.error.HTTPError as e:
+            _check_token_expired(e)
             if e.code == 429 and attempt < retries:
                 try:
                     wait = int(e.headers.get('Retry-After', '0') or 0)

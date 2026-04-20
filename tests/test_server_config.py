@@ -27,6 +27,7 @@ def _run_main(env):
     with mock.patch.dict('os.environ', env, clear=True), \
          mock.patch('server.configure_logging'), \
          mock.patch('server.init_metrics'), \
+         mock.patch('server.validate_token', return_value='testuser'), \
          mock.patch('server.load_trigger_config', return_value=[]), \
          mock.patch('server.load_processed', return_value=set()), \
          mock.patch('server.AckUpdater'), \
@@ -189,3 +190,30 @@ def test_monitor_rpm_zero_exits():
 
 def test_monitor_rpm_valid():
     _run_main(_env(FIGWATCH_MONITOR_RPM='10'))
+
+
+# ── FIGMA_PAT token validation at startup ───────────────────────────
+
+
+def test_expired_token_exits():
+    from figwatch.providers.figma import FigmaTokenExpired
+
+    with mock.patch.dict('os.environ', _VALID_ENV, clear=True), \
+         mock.patch('server.configure_logging'), \
+         mock.patch('server.validate_token', side_effect=FigmaTokenExpired('expired')):
+        import server
+        with pytest.raises(SystemExit):
+            server.main()
+
+
+def test_invalid_token_exits():
+    with mock.patch.dict('os.environ', _VALID_ENV, clear=True), \
+         mock.patch('server.configure_logging'), \
+         mock.patch('server.validate_token', side_effect=RuntimeError('bad token')):
+        import server
+        with pytest.raises(SystemExit):
+            server.main()
+
+
+def test_skip_token_check():
+    _run_main(_env(FIGWATCH_SKIP_TOKEN_CHECK='1'))
