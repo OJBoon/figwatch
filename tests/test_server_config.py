@@ -213,3 +213,7 @@ def test_invalid_token_exits():
         import server
         with pytest.raises(SystemExit):
             server.main()
+
+
+def test_skip_token_check():
+    _run_main(_env(FIGWATCH_SKIP_TOKEN_CHECK='1'))
