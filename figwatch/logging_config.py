@@ -45,6 +45,20 @@ class ContextFilter(logging.Filter):
         for key, value in ctx.items():
             if not hasattr(record, key):
                 setattr(record, key, value)
+
+        # Inject OTel trace/span IDs when a span is active.
+        record.trace_id = ''
+        record.span_id = ''
+        try:
+            from opentelemetry import trace
+            span = trace.get_current_span()
+            ctx = span.get_span_context()
+            if ctx and ctx.trace_id:
+                record.trace_id = format(ctx.trace_id, '032x')
+                record.span_id = format(ctx.span_id, '016x')
+        except ImportError:
+            pass
+
         return True
 
 
@@ -78,6 +92,9 @@ class TextFormatter(logging.Formatter):
         # Build inline key=value context prefix
         ctx = getattr(record, 'audit_context', {}) or {}
         ctx_parts = []
+        trace_id = getattr(record, 'trace_id', '')
+        if trace_id:
+            ctx_parts.append(f'trace={trace_id[:8]}')
         for key in _TEXT_CONTEXT_KEYS:
             if key in ctx:
                 ctx_parts.append(f'{key}={ctx[key]}')
@@ -87,7 +104,7 @@ class TextFormatter(logging.Formatter):
         # standard LogRecord attrs and our own context dict.
         extra_parts = []
         for key, value in record.__dict__.items():
-            if key in _STD_RECORD_ATTRS or key == 'audit_context':
+            if key in _STD_RECORD_ATTRS or key in ('audit_context', 'trace_id', 'span_id'):
                 continue
             if key in ctx:
                 continue
@@ -122,8 +139,14 @@ class JsonFormatter(logging.Formatter):
         ctx = getattr(record, 'audit_context', {}) or {}
         payload.update(ctx)
 
+        trace_id = getattr(record, 'trace_id', '')
+        span_id = getattr(record, 'span_id', '')
+        if trace_id:
+            payload['trace_id'] = trace_id
+            payload['span_id'] = span_id
+
         for key, value in record.__dict__.items():
-            if key in _STD_RECORD_ATTRS or key == 'audit_context':
+            if key in _STD_RECORD_ATTRS or key in ('audit_context', 'trace_id', 'span_id'):
                 continue
             if key in payload:
                 continue
