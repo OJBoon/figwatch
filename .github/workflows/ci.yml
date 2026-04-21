@@ -78,12 +78,16 @@ jobs:
       - name: Verify app bundle exists
         run: test -d macos/dist/FigWatch.app
 
-      - name: Upload app bundle
+      - name: Zip app bundle (ditto preserves permissions)
+        if: github.event_name == 'push'
+        run: ditto -c -k --keepParent macos/dist/FigWatch.app macos/dist/FigWatch.zip
+
+      - name: Upload app zip
         if: github.event_name == 'push'
         uses: actions/upload-artifact@v4
         with:
-          name: FigWatch.app
-          path: macos/dist/FigWatch.app
+          name: FigWatch.zip
+          path: macos/dist/FigWatch.zip
           retention-days: 1
 
   check-version:
@@ -171,14 +175,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Download app bundle
+      - name: Download app zip
         uses: actions/download-artifact@v4
         with:
-          name: FigWatch.app
-          path: FigWatch.app
-
-      - name: Zip app bundle
-        run: zip -r FigWatch.zip FigWatch.app
+          name: FigWatch.zip
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
