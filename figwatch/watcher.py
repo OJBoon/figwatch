@@ -14,7 +14,7 @@ from figwatch.trigger_config import load_trigger_config
 logger = logging.getLogger(__name__)
 
 _EM_DASH = '\u2014'
-_OWN_REPLY_MARKERS = (_EM_DASH + ' Claude', _EM_DASH + ' Gemini')
+_OWN_REPLY_MARKERS = (_EM_DASH + ' claude', _EM_DASH + ' gemini')
 
 _PROCESSED_MAXLEN = 500
 
@@ -98,7 +98,8 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log):
 
     replied_to = set()
     for c in comments:
-        if c.get('parent_id') and any(m in (c.get('message') or '') for m in _OWN_REPLY_MARKERS):
+        msg_lower = (c.get('message') or '').lower()
+        if c.get('parent_id') and any(m in msg_lower for m in _OWN_REPLY_MARKERS):
             replied_to.add(c['parent_id'])
             processed_ids.add(c['parent_id'])
 
@@ -110,7 +111,8 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log):
             if (c.get('client_meta') or {}).get('node_id'):
                 candidates.append(c)
         else:
-            if not any(m in (c.get('message') or '') for m in _OWN_REPLY_MARKERS):
+            msg_lower = (c.get('message') or '').lower()
+            if not any(m in msg_lower for m in _OWN_REPLY_MARKERS):
                 candidates.append(c)
 
     initial_count = len(processed_ids)

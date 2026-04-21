@@ -916,10 +916,15 @@ class FigWatch(NSObject):
             self._state["workers"].append(t)
 
     def _worker_loop(self, q):
+        seen = set()
         while True:
             audit = q.get()
             if audit is None:
                 break
+            comment_id = audit.comment.comment_id
+            if comment_id in seen:
+                continue
+            seen.add(comment_id)
             svc = self._state.get("audit_service")
             if not svc:
                 continue
