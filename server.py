@@ -390,42 +390,40 @@ def _make_handler(pat, passcode, allowed_file_keys,
                     return
                 processed_ids.add(comment_id)
 
-            audit_id = new_audit_id()
-            audit, reason = _build_audit(
-                payload, comment_id, pat, allowed_file_keys,
-                trigger_config, audit_id, limiter=limiter,
-            )
-
-            if audit is None:
-                logger.debug('skip', extra={'reason': reason})
-                self._respond(200, reason)
-                return
-
-            save_processed(processed_ids)
-
-            trigger_kw = audit.trigger_match.trigger.keyword
-
-            # Temporarily set context so the ack post + enqueue log lines
-            # carry the new audit_id. Cleared on next request.
-            set_audit_context(
-                audit=audit_id,
-                trigger=trigger_kw,
-                node=audit.comment.node_id,
-                file=file_key,
-            )
-
-            logger.info(
-                '\U0001f4ac trigger matched',
-                extra={'user': audit.comment.user_handle},
-            )
-
             tracer = get_tracer()
             with tracer.start_as_current_span('webhook.receive', attributes={
                 'figma.file_key': file_key,
                 'figma.comment_id': str(comment_id),
-                'audit.id': audit_id,
-                'audit.trigger': trigger_kw,
             }):
+                audit_id = new_audit_id()
+                audit, reason = _build_audit(
+                    payload, comment_id, pat, allowed_file_keys,
+                    trigger_config, audit_id, limiter=limiter,
+                )
+
+                if audit is None:
+                    logger.debug('skip', extra={'reason': reason})
+                    self._respond(200, reason)
+                    return
+
+                save_processed(processed_ids)
+
+                trigger_kw = audit.trigger_match.trigger.keyword
+
+                # Temporarily set context so the ack post + enqueue log lines
+                # carry the new audit_id. Cleared on next request.
+                set_audit_context(
+                    audit=audit_id,
+                    trigger=trigger_kw,
+                    node=audit.comment.node_id,
+                    file=file_key,
+                )
+
+                logger.info(
+                    '\U0001f4ac trigger matched',
+                    extra={'user': audit.comment.user_handle},
+                )
+
                 ahead = work_queue.depth
                 if ahead == 0:
                     queue_msg = (
