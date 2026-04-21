@@ -197,9 +197,8 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
         otel_token = None
         try:
             from opentelemetry import context as otel_context
-            from opentelemetry.propagators.textmap import extract
-            ctx = extract(queued.trace_context)
-            otel_token = otel_context.attach(ctx)
+            if queued.trace_context is not None:
+                otel_token = otel_context.attach(queued.trace_context)
         except ImportError:
             pass
 
@@ -439,10 +438,10 @@ def _make_handler(pat, passcode, allowed_file_keys,
 
               ack_id = audit_service.post_ack(audit, queue_msg)
 
-              trace_ctx = {}
+              trace_ctx = None
               try:
-                  from opentelemetry.propagators.textmap import inject
-                  inject(trace_ctx)
+                  from opentelemetry import context as otel_context
+                  trace_ctx = otel_context.get_current()
               except ImportError:
                   pass
 
