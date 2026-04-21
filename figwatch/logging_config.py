@@ -94,7 +94,7 @@ class TextFormatter(logging.Formatter):
         ctx_parts = []
         trace_id = getattr(record, 'trace_id', '')
         if trace_id:
-            ctx_parts.append(f'trace={trace_id[:8]}')
+            ctx_parts.append(f'trace={trace_id}')
         for key in _TEXT_CONTEXT_KEYS:
             if key in ctx:
                 ctx_parts.append(f'{key}={ctx[key]}')
