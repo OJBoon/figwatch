@@ -186,4 +186,13 @@ jobs:
           tag_name: v${{ needs.check-version.outputs.version }}
           name: FigWatch v${{ needs.check-version.outputs.version }}
           generate_release_notes: true
+          append_body: true
           files: FigWatch.zip
+          body: |
+            ## Install
+
+            1. Download **FigWatch.zip** below
+            2. Extract and move **FigWatch.app** to `/Applications`
+            3. **Right-click → Open** on first launch (required for unsigned apps)
+
+            > If macOS still blocks the app, run: `xattr -cr /Applications/FigWatch.app`
