@@ -391,73 +391,78 @@ def _make_handler(pat, passcode, allowed_file_keys,
                     return
                 processed_ids.add(comment_id)
 
-            audit_id = new_audit_id()
-            audit, reason = _build_audit(
-                payload, comment_id, pat, allowed_file_keys,
-                trigger_config, audit_id, limiter=limiter,
-            )
+            tracer = get_tracer()
+            with tracer.start_as_current_span('webhook.receive', attributes={
+                'figma.file_key': file_key,
+                'figma.comment_id': str(comment_id),
+            }):
+              audit_id = new_audit_id()
+              audit, reason = _build_audit(
+                  payload, comment_id, pat, allowed_file_keys,
+                  trigger_config, audit_id, limiter=limiter,
+              )
 
-            if audit is None:
-                logger.debug('skip', extra={'reason': reason})
-                self._respond(200, reason)
-                return
+              if audit is None:
+                  logger.debug('skip', extra={'reason': reason})
+                  self._respond(200, reason)
+                  return
 
-            save_processed(processed_ids)
+              save_processed(processed_ids)
 
-            trigger_kw = audit.trigger_match.trigger.keyword
+              trigger_kw = audit.trigger_match.trigger.keyword
 
-            # Temporarily set context so the ack post + enqueue log lines
-            # carry the new audit_id. Cleared on next request.
-            set_audit_context(
-                audit=audit_id,
-                trigger=trigger_kw,
-                node=audit.comment.node_id,
-                file=file_key,
-            )
+              # Temporarily set context so the ack post + enqueue log lines
+              # carry the new audit_id. Cleared on next request.
+              set_audit_context(
+                  audit=audit_id,
+                  trigger=trigger_kw,
+                  node=audit.comment.node_id,
+                  file=file_key,
+              )
 
-            logger.info(
-                '\U0001f4ac trigger matched',
-                extra={'user': audit.comment.user_handle},
-            )
+              logger.info(
+                  '\U0001f4ac trigger matched',
+                  extra={'user': audit.comment.user_handle},
+              )
 
-            ahead = work_queue.depth
-            if ahead == 0:
-                queue_msg = (
-                    f'\u23f3 {trigger_kw.lstrip("@")} audit queued '
-                    f'\u2014 starting shortly\u2026'
-                )
-            else:
-                queue_msg = (
-                    f'\u23f3 {trigger_kw.lstrip("@")} audit queued '
-                    f'({ahead} ahead of you)\u2026'
-                )
+              ahead = work_queue.depth
+              if ahead == 0:
+                  queue_msg = (
+                      f'\u23f3 {trigger_kw.lstrip("@")} audit queued '
+                      f'\u2014 starting shortly\u2026'
+                  )
+              else:
+                  queue_msg = (
+                      f'\u23f3 {trigger_kw.lstrip("@")} audit queued '
+                      f'({ahead} ahead of you)\u2026'
+                  )
 
-            ack_id = audit_service.post_ack(audit, queue_msg)
+              ack_id = audit_service.post_ack(audit, queue_msg)
 
-            trace_ctx = {}
-            try:
-                from opentelemetry.propagators.textmap import inject
-                inject(trace_ctx)
-            except ImportError:
-                pass
+              trace_ctx = {}
+              try:
+                  from opentelemetry.propagators.textmap import inject
+                  inject(trace_ctx)
+              except ImportError:
+                  pass
 
-            queued = QueuedItem(
-                audit=audit,
-                ack_id=ack_id,
-                audit_id=audit_id,
-                trace_context=trace_ctx,
-            )
-            work_queue.put(queued)
-            record_queue_change(1)
+              queued = QueuedItem(
+                  audit=audit,
+                  ack_id=ack_id,
+                  audit_id=audit_id,
+                  trace_context=trace_ctx,
+              )
+              work_queue.put(queued)
+              record_queue_change(1)
 
-            # Record initial displayed position so the updater only fires
-            # when the position actually changes.
-            ack_updater.track_initial(audit_id, position=ahead)
+              # Record initial displayed position so the updater only fires
+              # when the position actually changes.
+              ack_updater.track_initial(audit_id, position=ahead)
 
-            stats = work_queue.stats()
-            logger.info('queue.enqueued', extra={'depth': stats.depth})
+              stats = work_queue.stats()
+              logger.info('queue.enqueued', extra={'depth': stats.depth})
 
-            self._respond(200, 'Queued')
+              self._respond(200, 'Queued')
 
         def _respond(self, code, message):
             body = message.encode()
