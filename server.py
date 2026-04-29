@@ -32,8 +32,8 @@ Environment variables:
   FIGWATCH_LOG_FORMAT         Log format: text (default) or json
   FIGWATCH_SKILLS_DIR         Path to custom-skills directory (default: ./custom-skills)
   FIGWATCH_SKIP_TOKEN_CHECK   Skip Figma token validation at startup (for CI)
-  FIGWATCH_FIGMA_PLAN           Figma plan: starter, professional, organization, enterprise (default: professional)
-  FIGWATCH_FIGMA_SEAT           Figma seat type: dev, view (default: dev; ignored for starter)
+  FIGWATCH_FIGMA_PLAN        Figma plan: starter, professional, organization, enterprise
+  FIGWATCH_FIGMA_SEAT        Figma seat type: dev, view (default: dev; ignored for starter)
 
   Observability (optional):
   OTEL_EXPORTER_OTLP_ENDPOINT   OTel collector endpoint (metrics disabled if unset)
@@ -57,23 +57,32 @@ if _repo_root not in sys.path:
 
 from figwatch.ack_updater import AckUpdater
 from figwatch.domain import Audit, Comment, match_trigger
-from figwatch.trigger_config import load_trigger_config
 from figwatch.log_context import (
-    new_audit_id, set_audit_context, reset_audit_context, clear_audit_context,
+    clear_audit_context,
+    new_audit_id,
+    reset_audit_context,
+    set_audit_context,
 )
 from figwatch.logging_config import configure_logging
 from figwatch.metrics import (
-    init_metrics, record_queue_change, record_token_expired,
+    init_metrics,
+    record_token_expired,
     record_webhook_received,
+    set_queue_depth_source,
 )
-from figwatch.tracing import format_trace_line, get_tracer, init_tracing
 from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS
 from figwatch.providers.figma import (
-    FigmaCommentRepository, FigmaDesignDataRepository, FigmaRateLimiter,
-    FigmaTokenExpired, figma_get_retry, validate_token,
+    FigmaCommentRepository,
+    FigmaDesignDataRepository,
+    FigmaRateLimiter,
+    FigmaTokenExpired,
+    figma_get_retry,
+    validate_token,
 )
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
 from figwatch.services import AuditConfig, AuditService
+from figwatch.tracing import format_trace_line, get_tracer, init_tracing
+from figwatch.trigger_config import load_trigger_config
 from figwatch.watcher import load_processed, save_processed
 
 logger = logging.getLogger(__name__)
@@ -144,7 +153,8 @@ def _build_audit(payload, comment_id, pat, allowed_file_keys, trigger_config, au
     if not node_id:
         return None, 'no node_id'
 
-    user_handle = (comment.get('user') or payload.get('triggered_by') or {}).get('handle', 'unknown')
+    user_info = comment.get('user') or payload.get('triggered_by') or {}
+    user_handle = user_info.get('handle', 'unknown')
 
     audit = Audit(
         audit_id=audit_id,
@@ -217,7 +227,6 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
               'audit.node_id': audit.comment.node_id,
               'audit.trigger': trigger_kw,
           }) as span:
-            record_queue_change(-1)
             stats = work_queue.stats()
             logger.info(
                 'queue.dequeued',
@@ -320,7 +329,6 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
 
                     def _requeue(item=queued):
                         work_queue.put(item)
-                        record_queue_change(1)
 
                     timer = threading.Timer(backoff, _requeue)
                     timer.daemon = True
@@ -468,7 +476,6 @@ def _make_handler(pat, passcode, allowed_file_keys,
                     trace_context=trace_ctx,
                 )
                 work_queue.put(queued)
-                record_queue_change(1)
 
                 # Record initial displayed position so the updater only fires
                 # when the position actually changes.
@@ -616,6 +623,7 @@ def main():
     processed_ids = load_processed()
     processed_lock = threading.Lock()
     work_queue = InstrumentedQueue()
+    set_queue_depth_source(lambda: work_queue.depth)
     stop_event = threading.Event()
 
     ack_updater = AckUpdater(work_queue, comment_repo, rate_per_minute=queue_update_rpm)

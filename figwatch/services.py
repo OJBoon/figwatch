@@ -110,9 +110,10 @@ class AuditService:
         """Collect and dispatch domain events for metrics/logging."""
         from figwatch.metrics import record_audit_completed
 
+        user_handle = audit.comment.user_handle
         events = audit.collect_events()
         for event in events:
             if isinstance(event, AuditCompleted):
-                record_audit_completed(duration, 'success')
+                record_audit_completed(duration, 'success', user_handle)
             elif isinstance(event, AuditFailed):
-                record_audit_completed(duration, 'failed')
+                record_audit_completed(duration, 'failed', user_handle)

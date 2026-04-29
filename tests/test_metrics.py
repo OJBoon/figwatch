@@ -2,7 +2,6 @@
 
 import figwatch.metrics as m
 
-
 # ── init_metrics noop when no endpoint ────────────────────────────────
 
 
@@ -39,14 +38,19 @@ def test_record_webhook_received_noop():
 
 def test_record_audit_completed_noop():
     m._audit_duration = None
-    m._audit_total = None
     m.record_audit_completed(12.5, 'success')
 
 
-def test_record_queue_change_noop():
-    m._queue_depth = None
-    m.record_queue_change(1)
-    m.record_queue_change(-1)
+def test_record_token_expired_noop():
+    m._token_expired = None
+    m.record_token_expired()  # should not raise
+
+
+def test_set_queue_depth_source():
+    m._queue_depth_source = None
+    m.set_queue_depth_source(lambda: 42)
+    assert m._queue_depth_source() == 42
+    m._queue_depth_source = None  # cleanup
 
 
 # ── Recording helpers call instruments when initialised ───────────────
@@ -94,23 +98,28 @@ def test_record_webhook_received_calls_instruments():
 
 def test_record_audit_completed_calls_instruments():
     hist = _FakeHistogram()
-    counter = _FakeCounter()
     m._audit_duration = hist
-    m._audit_total = counter
 
     m.record_audit_completed(5.5, 'failed')
 
-    assert hist.calls == [(5.5, None)]
-    assert counter.calls == [(1, {'status': 'failed'})]
+    assert hist.calls == [(5.5, {'status': 'failed'})]
 
 
-def test_record_queue_change_calls_updown():
-    counter = _FakeCounter()  # UpDownCounter has same add() interface
-    m._queue_depth = counter
+def test_record_audit_completed_includes_user_handle():
+    hist = _FakeHistogram()
+    m._audit_duration = hist
 
-    m.record_queue_change(1)
-    m.record_queue_change(-1)
+    m.record_audit_completed(3.0, 'success', user_handle='alice')
 
-    assert counter.calls == [(1, None), (-1, None)]
+    assert hist.calls == [(3.0, {'status': 'success', 'figma.user': 'alice'})]
+
+
+def test_set_queue_depth_source_registers_callable():
+    depth = [0]
+    m.set_queue_depth_source(lambda: depth[0])
+    assert m._queue_depth_source() == 0
+    depth[0] = 3
+    assert m._queue_depth_source() == 3
+    m._queue_depth_source = None  # cleanup
 
 

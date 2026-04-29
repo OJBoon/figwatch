@@ -5,11 +5,15 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from figwatch.domain import (
-    Audit, AuditCompleted, AuditFailed, AuditResult, AuditStatus,
-    Comment, Trigger, TriggerMatch,
+    Audit,
+    AuditCompleted,
+    AuditFailed,
+    AuditStatus,
+    Comment,
+    Trigger,
+    TriggerMatch,
 )
 from figwatch.services import AuditConfig, AuditService
-
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -137,7 +141,7 @@ def test_dispatch_events_success(mock_skill, mock_record):
     service.execute(audit)
 
     service.dispatch_events(audit, duration=5.0)
-    mock_record.assert_called_once_with(5.0, 'success')
+    mock_record.assert_called_once_with(5.0, 'success', 'alice')
 
 
 @patch('figwatch.metrics.record_audit_completed')
@@ -151,7 +155,7 @@ def test_dispatch_events_failure(mock_skill, mock_record):
         service.execute(audit)
 
     service.dispatch_events(audit, duration=3.0)
-    mock_record.assert_called_once_with(3.0, 'failed')
+    mock_record.assert_called_once_with(3.0, 'failed', 'alice')
 
 
 # ── Config ───────────────────────────────────────────────────────────
