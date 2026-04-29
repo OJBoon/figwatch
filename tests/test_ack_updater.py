@@ -54,6 +54,9 @@ class FakeCommentRepo:
     def delete_comment(self, file_key, comment_id):
         self.deletes.append({'comment_id': comment_id})
 
+    def comment_exists(self, file_key, comment_id):
+        return True
+
     def fetch_comments(self, file_key):
         return []
 
@@ -66,22 +69,23 @@ def repo():
 # ── _position_message formatting ─────────────────────────────────────
 
 def test_position_message_zero():
-    msg = _position_message('@ux', 0)
+    msg = _position_message('@ux', 0, 'abc12345')
     assert 'starting shortly' in msg
     assert 'ux' in msg
+    assert 'trace id: abc12345' in msg
 
 
 def test_position_message_one():
-    assert '1 ahead of you' in _position_message('@ux', 1)
+    assert '1 ahead of you' in _position_message('@ux', 1, 'abc12345')
 
 
 def test_position_message_many():
-    assert '5 ahead of you' in _position_message('@tone', 5)
-    assert 'tone' in _position_message('@tone', 5)
+    assert '5 ahead of you' in _position_message('@tone', 5, 'abc12345')
+    assert 'tone' in _position_message('@tone', 5, 'abc12345')
 
 
 def test_position_message_strips_trigger_prefix():
-    assert '@ux' not in _position_message('@ux', 2)
+    assert '@ux' not in _position_message('@ux', 2, 'abc12345')
 
 
 # ── Public API surface ───────────────────────────────────────────────

@@ -469,6 +469,16 @@ class FigmaCommentRepository:
         except Exception:
             pass
 
+    def comment_exists(self, file_key: str, comment_id: str) -> bool:
+        comments = self.fetch_comments(file_key)
+        for c in comments:
+            if c.get('id') == comment_id:
+                return True
+            for reply in c.get('replies', []):
+                if reply.get('id') == comment_id:
+                    return True
+        return False
+
     def fetch_comments(self, file_key: str) -> list:
         data = figma_get(f'/files/{file_key}/comments', self._pat)
         return (data or {}).get('comments', [])
