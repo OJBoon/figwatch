@@ -12,7 +12,7 @@ from figwatch.providers.ai import make_provider, GEMINI_MODELS, CLAUDE_API_MODEL
 from figwatch.providers.ai.gemini import GeminiProvider
 from figwatch.providers.ai.anthropic import AnthropicProvider
 from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
-from figwatch.tracing import get_tracer
+from figwatch.tracing import format_trace_line, get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -394,14 +394,7 @@ def execute_skill(audit, *, config, design_repo):
                 if usage:
                     span.set_attribute('ai.tokens', usage)
         header = f'\U0001f5e3\ufe0f {trigger_kw} Audit \u2014 {frame_name}'
-        signoff = f'\u2014 FigWatch ({provider.model_id})'
-        try:
-            from opentelemetry import trace as otl_trace
-            ctx = otl_trace.get_current_span().get_span_context()
-            if ctx and ctx.trace_id:
-                signoff += f'\ntrace id: {format(ctx.trace_id, "032x")}'
-        except Exception:
-            pass
+        signoff = f'\u2014 FigWatch ({provider.model_id}){format_trace_line()}'
         return f'{header}\n\n{reply}\n\n{signoff}'
     finally:
         for key in ['screenshot', 'node_tree']:

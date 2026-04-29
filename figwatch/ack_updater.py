@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Dict, Optional
 
 from figwatch.log_context import set_audit_context, reset_audit_context
-from figwatch.tracing import get_trace_id
+from figwatch.tracing import format_trace_line
 from figwatch.ports import CommentRepository
 from figwatch.providers.ai.rate_limit import TokenBucket
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
@@ -37,14 +37,14 @@ class PendingUpdate:
     queued: QueuedItem  # mutable — we write new ack_id back here after posting
 
 
-def _position_message(trigger: str, position: int, trace_id: str) -> str:
+def _position_message(trigger: str, position: int, trace_line: str) -> str:
     """Build the ack body for a given position. position=0 means 'starting shortly'."""
     name = trigger.lstrip('@')
     if position <= 0:
-        return f'\u23f3 {name} audit queued \u2014 starting shortly\u2026\ntrace id: {trace_id}'
+        return f'\u23f3 {name} audit queued \u2014 starting shortly\u2026{trace_line}'
     if position == 1:
-        return f'\u23f3 {name} audit queued (1 ahead of you)\u2026\ntrace id: {trace_id}'
-    return f'\u23f3 {name} audit queued ({position} ahead of you)\u2026\ntrace id: {trace_id}'
+        return f'\u23f3 {name} audit queued (1 ahead of you)\u2026{trace_line}'
+    return f'\u23f3 {name} audit queued ({position} ahead of you)\u2026{trace_line}'
 
 
 class AckUpdater:
@@ -204,8 +204,8 @@ class AckUpdater:
             file=file_key,
         )
         try:
-            trace_id = get_trace_id(queued.trace_context)
-            new_message = _position_message(trigger_kw, update.new_position, trace_id)
+            trace_line = format_trace_line(queued.trace_context)
+            new_message = _position_message(trigger_kw, update.new_position, trace_line)
             old_ack_id = queued.ack_id
 
             # Delete old ack, post new one

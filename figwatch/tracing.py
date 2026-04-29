@@ -86,6 +86,12 @@ def get_trace_id(otel_context=None) -> str:
     return ''
 
 
+def format_trace_line(otel_context=None) -> str:
+    """Return ``'\\ntrace id: <hex>'`` if a trace ID is available, else ``''``."""
+    tid = get_trace_id(otel_context)
+    return f'\ntrace id: {tid}' if tid else ''
+
+
 class _NoopSpan:
     """Minimal stand-in when opentelemetry is not installed."""
 

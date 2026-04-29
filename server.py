@@ -66,7 +66,7 @@ from figwatch.metrics import (
     init_metrics, record_queue_change, record_token_expired,
     record_webhook_received,
 )
-from figwatch.tracing import get_trace_id, get_tracer, init_tracing
+from figwatch.tracing import format_trace_line, get_tracer, init_tracing
 from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS
 from figwatch.providers.figma import (
     FigmaCommentRepository, FigmaDesignDataRepository, FigmaRateLimiter,
@@ -224,12 +224,11 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
                 extra={'depth': stats.depth, 'waited': f'{queued.waited_seconds:.2f}s'},
             )
 
-            trace_id = get_trace_id()
             ack_id = audit_service.update_ack(
                 audit, ack_id,
                 (
                     f'\u23f3 Running {trigger_kw.lstrip("@")} audit\u2026'
-                    f'\ntrace id: {trace_id}'
+                    f'{format_trace_line()}'
                 ),
             )
 
@@ -267,8 +266,8 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
                         audit,
                         (
                             f'Something went wrong and we are not able to fulfil '
-                            f'your request.\n'
-                            f'trace id: {get_trace_id()}\n\n{_EM_DASH} FigWatch'
+                            f'your request.'
+                            f'{format_trace_line()}\n\n{_EM_DASH} FigWatch'
                         ),
                     )
                 except Exception:
@@ -312,7 +311,7 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
                         (
                             f'\u23f3 Something went wrong, trying again in {backoff}s '
                             f'(attempt {queued.attempt})\u2026'
-                            f'\ntrace id: {get_trace_id()}'
+                            f'{format_trace_line()}'
                         ),
                     )
                     audit.collect_events()  # drain stale events before retry
@@ -440,18 +439,17 @@ def _make_handler(pat, passcode, allowed_file_keys,
                 )
 
                 ahead = work_queue.depth
-                trace_id = get_trace_id()
                 if ahead == 0:
                     queue_msg = (
                         f'\u23f3 {trigger_kw.lstrip("@")} audit queued '
                         f'\u2014 starting shortly\u2026'
-                        f'\ntrace id: {trace_id}'
+                        f'{format_trace_line()}'
                     )
                 else:
                     queue_msg = (
                         f'\u23f3 {trigger_kw.lstrip("@")} audit queued '
                         f'({ahead} ahead of you)\u2026'
-                        f'\ntrace id: {trace_id}'
+                        f'{format_trace_line()}'
                     )
 
                 ack_id = audit_service.post_ack(audit, queue_msg)
