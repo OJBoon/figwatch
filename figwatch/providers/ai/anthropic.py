@@ -17,8 +17,10 @@ class AnthropicProvider:
     def call(self, prompt: str, image_path: 'str | None') -> str:
         try:
             import anthropic
-        except ImportError:
-            raise RuntimeError('anthropic package not installed — run: pip install anthropic')
+        except ImportError as err:
+            raise RuntimeError(
+                'anthropic package not installed — run: pip install anthropic',
+            ) from err
 
         if self._rate_limiter:
             self._rate_limiter.acquire()

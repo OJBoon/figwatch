@@ -1,13 +1,11 @@
 """Tests for figwatch.providers.figma — node data extraction."""
 
-import pytest
 
 from figwatch.providers.figma import (
     _extract_annotations,
     _extract_prototype_flows,
     extract_text_from_node,
 )
-
 
 # ── extract_text_from_node ────────────────────────────────────────────
 
@@ -111,7 +109,12 @@ def test_extract_prototype_flows_nested():
         "children": [
             {
                 "id": "1:2", "name": "Child",
-                "reactions": [{"trigger": {"type": "ON_HOVER"}, "action": {"type": "NODE", "destinationId": "3:1"}}],
+                "reactions": [
+                    {
+                        "trigger": {"type": "ON_HOVER"},
+                        "action": {"type": "NODE", "destinationId": "3:1"},
+                    },
+                ],
                 "children": [],
             }
         ],

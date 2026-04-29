@@ -112,9 +112,9 @@ def with_retry(call_fn, is_rate_limit_fn, label):
 
 def make_provider(model: str, claude_path: str, *, skill_dir: str = '') -> AIProvider:
     """Return the appropriate AI provider for the given model and claude_path."""
-    from figwatch.providers.ai.gemini import GeminiProvider
     from figwatch.providers.ai.anthropic import AnthropicProvider
     from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
+    from figwatch.providers.ai.gemini import GeminiProvider
 
     if (model or '').startswith('gemini'):
         model_name = GEMINI_MODELS.get(model, model)

@@ -1,10 +1,8 @@
 """Tests for fail-fast config validation in server.py:main() (ADR-001)."""
 
-import logging
 from unittest import mock
 
 import pytest
-
 
 # Minimal valid env — enough for main() to get past required-var checks.
 _VALID_ENV = {

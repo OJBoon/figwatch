@@ -3,8 +3,11 @@
 import pytest
 
 from figwatch.providers.figma import (
-    TIER_1, TIER_2, TIER_3,
-    FigmaRateLimiter, endpoint_tier,
+    TIER_1,
+    TIER_2,
+    TIER_3,
+    FigmaRateLimiter,
+    endpoint_tier,
 )
 
 

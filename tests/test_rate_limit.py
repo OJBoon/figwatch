@@ -1,6 +1,7 @@
 """Tests for figwatch.providers.ai.rate_limit — TokenBucket."""
 
 import threading
+
 import pytest
 
 from figwatch.providers.ai.rate_limit import TokenBucket

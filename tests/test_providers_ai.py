@@ -3,9 +3,9 @@
 import pytest
 
 from figwatch.providers.ai import (
-    AIProvider,
     CLAUDE_API_MODELS,
     GEMINI_MODELS,
+    AIProvider,
     make_provider,
     parse_retry_seconds,
     reset_limiters,

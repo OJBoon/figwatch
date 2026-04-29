@@ -16,6 +16,7 @@ server = [
 # pip install -e ".[dev]"  — installs test dependencies
 dev = [
     "pytest",
+    "ruff",
 ]
 
 [build-system]
@@ -31,6 +32,30 @@ include = ["figwatch*"]
 
 [tool.setuptools.package-data]
 figwatch = ["skills/**/*.md"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific rules
+]
+
+[tool.ruff.lint.per-file-ignores]
+"macos/*" = ["F403", "F405", "E402", "E501", "E701", "E702", "E741", "RUF012", "SIM115"]
+"server.py" = ["E402"]
+"tests/*" = ["SIM117"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["figwatch"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

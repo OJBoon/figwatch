@@ -10,7 +10,6 @@ _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
-import certifi
 import json
 import queue
 import re
@@ -20,6 +19,8 @@ import threading
 import time
 import urllib.request
 
+import certifi
+
 _SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 
 import objc
@@ -28,7 +29,13 @@ from Foundation import *
 from PyObjCTools import AppHelper
 
 import figwatch.handlers as handlers
-from figwatch.domain import AuditStarted, AuditCompleted, AuditFailed, AuditStatus, STATUS_LIVE
+from figwatch.domain import (
+    STATUS_LIVE,
+    AuditCompleted,
+    AuditFailed,
+    AuditStarted,
+    AuditStatus,
+)
 
 # String status values for UI state tracking
 STATUS_DETECTED = AuditStatus.DETECTED.value
@@ -38,7 +45,10 @@ STATUS_ERROR = AuditStatus.ERROR.value
 
 # ── Config ──────────────────────────────────────────────────────────
 
+import contextlib
+
 from figwatch import __version__ as VERSION
+
 RELEASES_API = "https://api.github.com/repos/OJBoon/figwatch/releases/latest"
 RELEASES_URL = "https://github.com/OJBoon/figwatch/releases/latest"
 
@@ -938,7 +948,7 @@ class FigWatch(NSObject):
                     audit,
                     f'\u23f3 {trigger_name} audit received \u2014 working on it\u2026',
                 )
-                self._write_log(f"\u2709\ufe0f  Ack posted")
+                self._write_log("\u2709\ufe0f  Ack posted")
             except Exception as e:
                 self._write_log(f"\u26a0\ufe0f Ack failed: {e}")
             try:
@@ -947,18 +957,19 @@ class FigWatch(NSObject):
                 if ack_id:
                     svc.delete_ack(audit, ack_id)
                 svc.post_reply(audit, response)
-                self._write_log(f"\u2709\ufe0f  Reply posted")
+                self._write_log("\u2709\ufe0f  Reply posted")
             except Exception as e:
                 if ack_id:
-                    try:
+                    with contextlib.suppress(Exception):
                         svc.delete_ack(audit, ack_id)
-                    except Exception:
-                        pass
                 self._write_log(f"\u26a0\ufe0f Audit failed: {e}")
 
     def _build_audit_service(self):
         """Construct AuditService for macOS polling path."""
-        from figwatch.providers.figma import FigmaCommentRepository, FigmaDesignDataRepository
+        from figwatch.providers.figma import (
+            FigmaCommentRepository,
+            FigmaDesignDataRepository,
+        )
         from figwatch.services import AuditConfig, AuditService
 
         pat = self._state["pat"]
@@ -1188,10 +1199,8 @@ class FigWatch(NSObject):
             text = "Starting\u2026"
         else:
             text = ""
-        try:
+        with contextlib.suppress(Exception):
             label.setStringValue_(text)
-        except Exception:
-            pass
 
     def _start_refresh_timer(self):
         self._state["_last_data_snap"] = self._data_snapshot()
@@ -1217,19 +1226,15 @@ class FigWatch(NSObject):
     def _close_popover(self):
         self._state["popover_open"] = False
         self._stop_refresh_timer()
-        try:
+        with contextlib.suppress(Exception):
             self._panel.orderOut_(None)
-        except Exception:
-            pass
         self._remove_event_monitor()
 
     def _remove_event_monitor(self):
         monitor = self._state.get("event_monitor")
         if monitor:
-            try:
+            with contextlib.suppress(Exception):
                 NSEvent.removeMonitor_(monitor)
-            except Exception:
-                pass
             self._state["event_monitor"] = None
 
     # ── File Actions ───────────────────────────────────────────

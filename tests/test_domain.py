@@ -16,7 +16,6 @@ from figwatch.domain import (
     match_trigger,
 )
 
-
 # ── match_trigger ─────────────────────────────────────────────────────
 
 TRIGGERS = [

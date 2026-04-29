@@ -1,8 +1,8 @@
 """Tests for figwatch.log_context and ContextFilter → LogRecord propagation."""
 
+import io
 import json
 import logging
-import io
 
 import pytest
 
@@ -72,7 +72,7 @@ def test_context_filter_attaches_fields_to_log_record(caplog):
     set_audit_context(audit='abc', trigger='@ux', node='1:2')
     logger = logging.getLogger('figwatch.test.ctx')
     # caplog auto-attaches a handler; add our filter to it
-    for handler in logging.getLogger().handlers + [caplog.handler]:
+    for handler in [*logging.getLogger().handlers, caplog.handler]:
         handler.addFilter(ContextFilter())
 
     with caplog.at_level(logging.DEBUG):
@@ -87,7 +87,7 @@ def test_context_filter_attaches_fields_to_log_record(caplog):
 
 def test_context_filter_empty_when_no_context_set(caplog):
     logger = logging.getLogger('figwatch.test.ctx.empty')
-    for handler in logging.getLogger().handlers + [caplog.handler]:
+    for handler in [*logging.getLogger().handlers, caplog.handler]:
         handler.addFilter(ContextFilter())
     with caplog.at_level(logging.DEBUG):
         logger.info('hello')

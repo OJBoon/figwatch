@@ -2,11 +2,12 @@
 FIFO mirror used by the ack updater to compute per-audit queue positions.
 """
 
+import contextlib
 import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, List, Optional
+from typing import Any, Optional
 
 
 @dataclass
@@ -50,7 +51,7 @@ class InstrumentedQueue:
         # FIFO mirror keyed by audit_id for O(1) find and O(n) position lookup.
         # Duplicate audit_ids are not supported — audit_ids are UUID-derived
         # and should always be unique per run.
-        self._ordered_ids: List[str] = []
+        self._ordered_ids: list[str] = []
         self._items_by_id: dict = {}
 
     def put(self, queued: Any) -> None:
@@ -69,10 +70,8 @@ class InstrumentedQueue:
         with self._stats_lock:
             self._stats.dequeued += 1
             if isinstance(queued, QueuedItem):
-                try:
+                with contextlib.suppress(ValueError):
                     self._ordered_ids.remove(queued.audit_id)
-                except ValueError:
-                    pass
                 self._items_by_id.pop(queued.audit_id, None)
         if isinstance(queued, QueuedItem):
             queued.waited_seconds = time.monotonic() - queued.enqueued_at
@@ -96,7 +95,7 @@ class InstrumentedQueue:
         """Pass-through to underlying queue.Queue.qsize() — approximate."""
         return self._queue.qsize()
 
-    def snapshot_order(self) -> List[QueuedItem]:
+    def snapshot_order(self) -> list[QueuedItem]:
         """Return a FIFO snapshot of currently queued items.
 
         Used by AckUpdater to compute per-audit queue positions. O(n) copy

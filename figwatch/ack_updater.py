@@ -19,13 +19,13 @@ update is popped and posted if the rate bucket has a token.
 import logging
 import threading
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Optional
 
-from figwatch.log_context import set_audit_context, reset_audit_context
-from figwatch.tracing import format_trace_line
+from figwatch.log_context import reset_audit_context, set_audit_context
 from figwatch.ports import CommentRepository
 from figwatch.providers.ai.rate_limit import TokenBucket
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
+from figwatch.tracing import format_trace_line
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +70,8 @@ class AckUpdater:
         # has never had its position displayed; when we first see it, we
         # record its initial position (from track_initial) and never fire
         # a redundant update for it.
-        self._displayed: Dict[str, int] = {}
-        self._pending: Dict[str, PendingUpdate] = {}
+        self._displayed: dict[str, int] = {}
+        self._pending: dict[str, PendingUpdate] = {}
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None

@@ -3,8 +3,6 @@
 import threading
 import time
 
-import pytest
-
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
 
 

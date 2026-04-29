@@ -8,7 +8,6 @@ from figwatch.trigger_config import (
     load_trigger_config,
 )
 
-
 # ── load_trigger_config ───────────────────────────────────────────────
 
 def test_load_trigger_config_defaults_when_no_config(tmp_path, monkeypatch):

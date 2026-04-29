@@ -1,8 +1,6 @@
 """Tests for BoundedSet and processed-comment persistence."""
 
 import json
-import os
-import tempfile
 from unittest import mock
 
 from figwatch.watcher import BoundedSet, load_processed, save_processed

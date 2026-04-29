@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 
-
 DEFAULT_TRIGGERS = [
     {"trigger": "@tone", "skill": "builtin:tone"},
     {"trigger": "@ux", "skill": "builtin:ux"},

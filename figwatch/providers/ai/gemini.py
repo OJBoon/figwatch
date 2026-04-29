@@ -16,8 +16,10 @@ class GeminiProvider:
         try:
             from google import genai
             from google.genai import types
-        except ImportError:
-            raise RuntimeError('google-genai not installed — run: pip install google-genai')
+        except ImportError as err:
+            raise RuntimeError(
+                'google-genai not installed — run: pip install google-genai',
+            ) from err
 
         if self._rate_limiter:
             self._rate_limiter.acquire()

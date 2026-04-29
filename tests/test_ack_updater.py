@@ -3,7 +3,6 @@
 These tests use a FakeCommentRepository to avoid network calls.
 """
 
-import threading
 import time
 
 import pytest
@@ -11,7 +10,6 @@ import pytest
 from figwatch.ack_updater import AckUpdater, PendingUpdate, _position_message
 from figwatch.domain import Audit, Comment, Trigger, TriggerMatch
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
-
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
