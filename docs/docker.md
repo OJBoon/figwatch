@@ -147,7 +147,6 @@ All variables are documented in [`.env.example`](../.env.example) with sensible 
 | `FIGWATCH_LOCALE` | `uk` | Locale for tone audits: `uk`, `de`, `fr`, `nl`, `benelux` |
 | `FIGWATCH_PORT` | `8080` | Port to listen on |
 | `FIGWATCH_WORKERS` | `4` | Concurrent skill executions |
-| `FIGWATCH_MAX_ATTEMPTS` | `3` | Retry attempts per audit (backoff: 30s, 2m, 5m) |
 
 ### Rate limiting
 

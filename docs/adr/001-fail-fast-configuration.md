@@ -6,14 +6,13 @@
 
 ## Context
 
-FigWatch reads all configuration from environment variables at startup in `server.py:main()`. Issue #8 revealed that setting `FIGWATCH_MAX_ATTEMPTS=0` (a misconfiguration) passed startup silently but crashed the worker thread at runtime with an `UnboundLocalError`.
+FigWatch reads all configuration from environment variables at startup in `server.py:main()`. Issue #8 revealed that setting `FIGWATCH_MAX_ATTEMPTS=0` (a misconfiguration, since removed) passed startup silently but crashed the worker thread at runtime with an `UnboundLocalError`.
 
 At the time of this decision, validation is inconsistent:
 
 | Category | Example | Current behaviour |
 |----------|---------|-------------------|
 | Required secrets | `FIGMA_PAT`, `FIGWATCH_WEBHOOK_PASSCODE` | Validated, `sys.exit(1)` on missing |
-| Numeric with constraints | `FIGWATCH_MAX_ATTEMPTS` | Silently clamped (post-fix) |
 | Numeric without constraints | `FIGWATCH_PORT`, `FIGWATCH_WORKERS` | `int()` raises on non-numeric, but no range check |
 | Enum-like | `FIGWATCH_MODEL`, `FIGWATCH_LOCALE` | No validation — invalid values pass through, fail at runtime |
 | Rate limits | `FIGWATCH_GEMINI_RPM`, `FIGWATCH_ANTHROPIC_RPM` | Validated late, inside lazy-init limiter constructors |
@@ -48,6 +47,6 @@ if model not in valid_models:
 
 - **New config vars** must include startup validation following this pattern.
 - **Existing vars** without validation (`FIGWATCH_LOCALE`, `FIGWATCH_MODEL`, RPM vars) should be brought into compliance.
-- **Silent clamping** (e.g. `max(1, ...)` for `max_attempts`) should be replaced with explicit rejection.
+- **Silent clamping** should be replaced with explicit rejection.
 - **Late validation** (e.g. rate limiter constructors) should be moved to startup.
 - **Tests** that set env vars to invalid values should expect `sys.exit(1)`, not silent fallback.

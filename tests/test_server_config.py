@@ -62,22 +62,6 @@ def test_valid_locale_accepted():
     _run_main(_env(FIGWATCH_LOCALE='de'))
 
 
-# ── FIGWATCH_MAX_ATTEMPTS ────────────────────────────────────────────
-
-
-def test_max_attempts_zero_exits():
-    with pytest.raises(SystemExit):
-        _run_main(_env(FIGWATCH_MAX_ATTEMPTS='0'))
-
-
-def test_max_attempts_negative_exits():
-    with pytest.raises(SystemExit):
-        _run_main(_env(FIGWATCH_MAX_ATTEMPTS='-1'))
-
-
-def test_max_attempts_valid():
-    _run_main(_env(FIGWATCH_MAX_ATTEMPTS='5'))
-
 
 # ── FIGWATCH_WORKERS ─────────────────────────────────────────────────
 

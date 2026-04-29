@@ -70,6 +70,36 @@ def test_fetch_comments_empty_on_none(mock_get):
     assert repo.fetch_comments('f') == []
 
 
+@patch('figwatch.providers.figma.figma_get')
+def test_comment_exists_found_top_level(mock_get):
+    mock_get.return_value = {'comments': [{'id': '100'}, {'id': '200'}]}
+    repo = FigmaCommentRepository('test-pat')
+    assert repo.comment_exists('file-1', '200') is True
+
+
+@patch('figwatch.providers.figma.figma_get')
+def test_comment_exists_found_in_replies(mock_get):
+    mock_get.return_value = {'comments': [
+        {'id': '100', 'replies': [{'id': '101'}, {'id': '102'}]},
+    ]}
+    repo = FigmaCommentRepository('test-pat')
+    assert repo.comment_exists('file-1', '102') is True
+
+
+@patch('figwatch.providers.figma.figma_get')
+def test_comment_exists_not_found(mock_get):
+    mock_get.return_value = {'comments': [{'id': '100'}]}
+    repo = FigmaCommentRepository('test-pat')
+    assert repo.comment_exists('file-1', '999') is False
+
+
+@patch('figwatch.providers.figma.figma_get')
+def test_comment_exists_empty_comments(mock_get):
+    mock_get.return_value = None
+    repo = FigmaCommentRepository('test-pat')
+    assert repo.comment_exists('file-1', '100') is False
+
+
 # ── FigmaDesignDataRepository ────────────────────────────────────────
 
 @patch('figwatch.providers.figma.fetch_figma_data')

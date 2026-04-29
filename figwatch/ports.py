@@ -18,6 +18,10 @@ class CommentRepository(Protocol):
         """Delete a comment. Silent on failure."""
         ...
 
+    def comment_exists(self, file_key: str, comment_id: str) -> bool:
+        """Check whether a comment still exists on a file."""
+        ...
+
     def fetch_comments(self, file_key: str) -> list:
         """Fetch all comments for a file."""
         ...

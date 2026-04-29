@@ -60,6 +60,38 @@ def get_tracer():
         return _NoopTracer()
 
 
+def get_trace_id(otel_context=None) -> str:
+    """Return the OTel trace ID as a hex string, or '' if unavailable.
+
+    If *otel_context* is given, extract the trace ID from that context
+    (useful when the caller runs in a different thread). Otherwise read
+    from the current span.
+    """
+    try:
+        from opentelemetry import trace
+        if otel_context is not None:
+            from opentelemetry import context
+            token = context.attach(otel_context)
+            try:
+                span = trace.get_current_span()
+            finally:
+                context.detach(token)
+        else:
+            span = trace.get_current_span()
+        ctx = span.get_span_context()
+        if ctx and ctx.trace_id:
+            return format(ctx.trace_id, '032x')
+    except (ImportError, AttributeError):
+        pass
+    return ''
+
+
+def format_trace_line(otel_context=None) -> str:
+    """Return ``'\\ntrace id: <hex>'`` if a trace ID is available, else ``''``."""
+    tid = get_trace_id(otel_context)
+    return f'\ntrace id: {tid}' if tid else ''
+
+
 class _NoopSpan:
     """Minimal stand-in when opentelemetry is not installed."""
 

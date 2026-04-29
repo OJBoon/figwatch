@@ -67,6 +67,11 @@ class AuditService:
         self.delete_ack(audit, old_ack_id)
         return self.post_ack(audit, message)
 
+    def comment_exists(self, audit: Audit) -> bool:
+        return self._comments.comment_exists(
+            audit.comment.file_key, audit.comment.comment_id,
+        )
+
     def post_reply(self, audit: Audit, message: str) -> None:
         tracer = get_tracer()
         with tracer.start_as_current_span('figma.post_reply', attributes={

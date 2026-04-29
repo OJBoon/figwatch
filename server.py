@@ -26,7 +26,6 @@ Environment variables:
   FIGWATCH_LOCALE             Locale for tone audits: uk, de, fr, nl, benelux (default: uk)
   FIGWATCH_PORT               Port to listen on (default: 8080)
   FIGWATCH_WORKERS            Number of worker threads (default: 4)
-  FIGWATCH_MAX_ATTEMPTS       Retry attempts per audit before giving up (default: 3)
   FIGWATCH_GEMINI_RPM         Requests per minute for Gemini (default: 15; 0 disables)
   FIGWATCH_ANTHROPIC_RPM      Requests per minute for Anthropic (default: 5; 0 disables)
   FIGWATCH_LOG_LEVEL          Log level: DEBUG, INFO, WARNING, ERROR (default: INFO)
@@ -67,7 +66,7 @@ from figwatch.metrics import (
     init_metrics, record_queue_change, record_token_expired,
     record_webhook_received,
 )
-from figwatch.tracing import get_tracer, init_tracing
+from figwatch.tracing import format_trace_line, get_tracer, init_tracing
 from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS
 from figwatch.providers.figma import (
     FigmaCommentRepository, FigmaDesignDataRepository, FigmaRateLimiter,
@@ -176,7 +175,8 @@ def _run_audit(audit, ack_id, audit_service):
 
 
 def _worker_loop(work_queue: InstrumentedQueue, stop_event,
-                 max_attempts, ack_updater: AckUpdater, audit_service: AuditService):
+                 ack_updater: AckUpdater, audit_service: AuditService):
+    retry_timers: list[threading.Timer] = []
     while not stop_event.is_set():
         queued = work_queue.get(timeout=1)
         if queued is None:
@@ -226,55 +226,18 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
 
             ack_id = audit_service.update_ack(
                 audit, ack_id,
-                f'\u23f3 Running {trigger_kw.lstrip("@")} audit\u2026',
+                (
+                    f'\u23f3 Running {trigger_kw.lstrip("@")} audit\u2026'
+                    f'{format_trace_line()}'
+                ),
             )
 
-            last_err = None
-            success = False
-            attempt = 0
-            for attempt in range(max_attempts):
-                if attempt > 0:
-                    set_audit_context(attempt=attempt + 1)
-                try:
-                    _run_audit(audit, ack_id, audit_service)
-                    ack_id = None
-                    success = True
-                    break
-                except FigmaTokenExpired as err:
-                    last_err = err
-                    record_token_expired()
-                    span.record_exception(err)
-                    logger.error(
-                        'Figma token expired — skipping retries',
-                        extra={'attempt': attempt + 1},
-                    )
-                    break
-                except Exception as err:
-                    last_err = err
-                    logger.warning(
-                        'audit attempt failed',
-                        extra={'attempt': attempt + 1, 'max_attempts': max_attempts,
-                               'error': str(err)},
-                    )
-                    if attempt >= max_attempts - 1:
-                        break
-                    backoff = _BACKOFFS[min(attempt, len(_BACKOFFS) - 1)]
-                    ack_id = audit_service.update_ack(
-                        audit, ack_id,
-                        (
-                            f'\u23f3 {trigger_kw.lstrip("@")} audit hit a snag '
-                            f'({err}). Retrying in {backoff}s '
-                            f'(attempt {attempt + 2}/{max_attempts})\u2026'
-                        ),
-                    )
-                    if stop_event.wait(timeout=backoff):
-                        logger.info('shutdown during backoff — aborting retry')
-                        break
+            try:
+                _run_audit(audit, ack_id, audit_service)
+                ack_id = None
 
-            running_seconds = time.monotonic() - run_started_at
-            total_seconds = time.monotonic() - queued.enqueued_at
-
-            if success:
+                running_seconds = time.monotonic() - run_started_at
+                total_seconds = time.monotonic() - queued.enqueued_at
                 audit_service.dispatch_events(audit, total_seconds)
                 logger.info(
                     '\u2705 audit.completed',
@@ -282,26 +245,35 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
                         'queued': f'{queued.waited_seconds:.2f}s',
                         'running': f'{running_seconds:.2f}s',
                         'total': f'{total_seconds:.2f}s',
-                        'attempts': attempt + 1,
+                        'attempt': queued.attempt,
                     },
                 )
-            else:
+            except FigmaTokenExpired as err:
+                record_token_expired()
+                span.record_exception(err)
                 try:
                     from opentelemetry.trace import StatusCode
-                    span.set_status(StatusCode.ERROR, str(last_err))
+                    span.set_status(StatusCode.ERROR, str(err))
                 except ImportError:
                     pass
+                logger.error(
+                    'Figma token expired — cannot retry',
+                    extra={'attempt': queued.attempt},
+                )
                 audit_service.delete_ack(audit, ack_id)
                 try:
                     audit_service.post_reply(
                         audit,
                         (
-                            f'Audit failed after {max_attempts} attempts.\n'
-                            f'Last error: {last_err}\n\n{_EM_DASH} FigWatch'
+                            f'Something went wrong and we are not able to fulfil '
+                            f'your request.'
+                            f'{format_trace_line()}\n\n{_EM_DASH} FigWatch'
                         ),
                     )
                 except Exception:
                     logger.exception('error reply post failed')
+                running_seconds = time.monotonic() - run_started_at
+                total_seconds = time.monotonic() - queued.enqueued_at
                 audit_service.dispatch_events(audit, total_seconds)
                 logger.error(
                     '\u274c audit.failed',
@@ -309,10 +281,52 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
                         'queued': f'{queued.waited_seconds:.2f}s',
                         'running': f'{running_seconds:.2f}s',
                         'total': f'{total_seconds:.2f}s',
-                        'attempts': max_attempts,
-                        'last_error': str(last_err) if last_err else 'unknown',
+                        'attempt': queued.attempt,
+                        'last_error': str(err),
                     },
                 )
+            except Exception as err:
+                span.record_exception(err)
+                logger.warning(
+                    'audit attempt failed',
+                    extra={'attempt': queued.attempt, 'error': str(err)},
+                )
+                try:
+                    comment_alive = audit_service.comment_exists(audit)
+                except Exception:
+                    logger.warning('comment_exists check failed — assuming alive')
+                    comment_alive = True
+                if not comment_alive:
+                    logger.info('trigger comment deleted — abandoning audit')
+                    audit_service.delete_ack(audit, ack_id)
+                    running_seconds = time.monotonic() - run_started_at
+                    total_seconds = time.monotonic() - queued.enqueued_at
+                    audit_service.dispatch_events(audit, total_seconds)
+                elif stop_event.is_set():
+                    logger.info('shutdown — not scheduling retry')
+                else:
+                    backoff = _BACKOFFS[min(queued.attempt - 1, len(_BACKOFFS) - 1)]
+                    ack_id = audit_service.update_ack(
+                        audit, ack_id,
+                        (
+                            f'\u23f3 Something went wrong, trying again in {backoff}s '
+                            f'(attempt {queued.attempt})\u2026'
+                            f'{format_trace_line()}'
+                        ),
+                    )
+                    audit.collect_events()  # drain stale events before retry
+                    queued.attempt += 1
+                    queued.ack_id = ack_id
+
+                    def _requeue(item=queued):
+                        work_queue.put(item)
+                        record_queue_change(1)
+
+                    timer = threading.Timer(backoff, _requeue)
+                    timer.daemon = True
+                    timer.start()
+                    retry_timers = [t for t in retry_timers if t.is_alive()]
+                    retry_timers.append(timer)
         except Exception:
             logger.exception('worker crashed unexpectedly')
         finally:
@@ -429,11 +443,13 @@ def _make_handler(pat, passcode, allowed_file_keys,
                     queue_msg = (
                         f'\u23f3 {trigger_kw.lstrip("@")} audit queued '
                         f'\u2014 starting shortly\u2026'
+                        f'{format_trace_line()}'
                     )
                 else:
                     queue_msg = (
                         f'\u23f3 {trigger_kw.lstrip("@")} audit queued '
                         f'({ahead} ahead of you)\u2026'
+                        f'{format_trace_line()}'
                     )
 
                 ack_id = audit_service.post_ack(audit, queue_msg)
@@ -540,12 +556,6 @@ def main():
                      extra={'value': worker_count, 'min': 1})
         sys.exit(1)
 
-    max_attempts = int(os.environ.get('FIGWATCH_MAX_ATTEMPTS', '3'))
-    if max_attempts < 1:
-        logger.error('invalid FIGWATCH_MAX_ATTEMPTS',
-                     extra={'value': max_attempts, 'min': 1})
-        sys.exit(1)
-
     queue_update_rpm = int(os.environ.get('FIGWATCH_QUEUE_UPDATE_RPM', '5'))
     if queue_update_rpm < 1:
         logger.error('invalid FIGWATCH_QUEUE_UPDATE_RPM',
@@ -615,7 +625,7 @@ def main():
         '\U0001f50d figwatch starting',
         extra={
             'port': port, 'workers': worker_count, 'model': model,
-            'locale': locale, 'max_attempts': max_attempts,
+            'locale': locale,
             'queue_update_rpm': queue_update_rpm,
             'triggers': triggers_str,
             'files': ','.join(sorted(allowed_file_keys)) if allowed_file_keys else 'all',
@@ -625,7 +635,7 @@ def main():
     worker_threads = [
         threading.Thread(
             target=_worker_loop,
-            args=(work_queue, stop_event, max_attempts,
+            args=(work_queue, stop_event,
                   ack_updater, audit_service),
             name=f'figwatch-worker-{i}',
             daemon=True,
