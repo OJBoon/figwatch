@@ -399,7 +399,7 @@ def execute_skill(audit, *, config, design_repo):
             from opentelemetry import trace as otl_trace
             ctx = otl_trace.get_current_span().get_span_context()
             if ctx and ctx.trace_id:
-                signoff += f' [{format(ctx.trace_id, "032x")}]'
+                signoff += f'\ntrace id: {format(ctx.trace_id, "032x")}'
         except Exception:
             pass
         return f'{header}\n\n{reply}\n\n{signoff}'
