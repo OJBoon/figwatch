@@ -9,12 +9,12 @@ the audit correlation for free.
 
 import contextvars
 import uuid
-from typing import Any, Dict
+from typing import Any
 
-AuditContext = Dict[str, Any]
+AuditContext = dict[str, Any]
 
 _audit_ctx: contextvars.ContextVar[AuditContext] = contextvars.ContextVar(
-    'audit_ctx', default={},
+    'audit_ctx',
 )
 
 
@@ -28,14 +28,14 @@ def set_audit_context(**fields: Any) -> contextvars.Token:
 
     Pass the returned token to reset_audit_context() when the scope exits.
     """
-    current = dict(_audit_ctx.get())
+    current = dict(_audit_ctx.get({}))
     current.update(fields)
     return _audit_ctx.set(current)
 
 
 def get_audit_context() -> AuditContext:
     """Return the current audit context (read-only snapshot)."""
-    return dict(_audit_ctx.get())
+    return dict(_audit_ctx.get({}))
 
 
 def reset_audit_context(token: contextvars.Token) -> None:

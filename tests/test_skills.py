@@ -1,13 +1,10 @@
 """Tests for figwatch.skills — prompt building and skill discovery."""
 
-import json
 import os
-import pytest
 
 from figwatch.domain import Audit, Comment, Trigger, TriggerMatch
 from figwatch.services import AuditConfig
-from figwatch.skills import _build_prompt, find_skills, _resolve_builtin_skill
-
+from figwatch.skills import _build_prompt, _resolve_builtin_skill, find_skills
 
 # ── Helpers ───────────────────────────────────────────────────────────
 

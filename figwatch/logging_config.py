@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import sys
-from typing import Iterable, Optional
+from typing import Optional
 
 from figwatch.log_context import get_audit_context
 

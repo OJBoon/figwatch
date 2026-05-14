@@ -16,8 +16,7 @@ _meter = None
 _webhook_received = None
 _webhook_last_received = None
 _audit_duration = None
-_audit_total = None
-_queue_depth = None
+_queue_depth_source = None
 _token_expired = None
 
 
@@ -27,7 +26,8 @@ def init_metrics(service_name='figwatch'):
     """
     global _meter
     global _webhook_received, _webhook_last_received
-    global _audit_duration, _audit_total, _queue_depth, _token_expired
+    global _audit_duration, _queue_depth_source
+    global _token_expired
 
     endpoint = os.environ.get('OTEL_EXPORTER_OTLP_ENDPOINT', '').strip()
     if not endpoint:
@@ -42,8 +42,8 @@ def init_metrics(service_name='figwatch'):
         from opentelemetry.sdk.metrics import MeterProvider
         from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
         from opentelemetry.sdk.metrics.view import (
-            View,
             ExplicitBucketHistogramAggregation,
+            View,
         )
         from opentelemetry.sdk.resources import Resource
     except ImportError:
@@ -90,12 +90,14 @@ def init_metrics(service_name='figwatch'):
         description='End-to-end audit time (queue wait + processing)',
         unit='s',
     )
-    _audit_total = _meter.create_counter(
-        'figwatch.audit.total',
-        description='Audits completed',
-    )
-    _queue_depth = _meter.create_up_down_counter(
+
+    def _observe_queue_depth(options):
+        if _queue_depth_source is not None:
+            yield metrics.Observation(value=_queue_depth_source())
+
+    _meter.create_observable_gauge(
         'figwatch.queue.depth',
+        callbacks=[_observe_queue_depth],
         description='Current queue depth',
     )
 
@@ -117,12 +119,12 @@ def record_webhook_received(event_type):
         _webhook_last_received.set(time.time())
 
 
-
-def record_audit_completed(duration_seconds, status):
+def record_audit_completed(duration_seconds, status, user_handle=None):
     if _audit_duration:
-        _audit_duration.record(duration_seconds)
-    if _audit_total:
-        _audit_total.add(1, {'status': status})
+        attrs = {'status': status}
+        if user_handle:
+            attrs['figma.user'] = user_handle
+        _audit_duration.record(duration_seconds, attrs)
 
 
 def record_token_expired():
@@ -130,7 +132,10 @@ def record_token_expired():
         _token_expired.add(1)
 
 
-def record_queue_change(delta):
-    """Call with +1 on enqueue, -1 on dequeue."""
-    if _queue_depth:
-        _queue_depth.add(delta)
+def set_queue_depth_source(fn):
+    """Register a callable that returns current queue depth.
+
+    Called by the OTel SDK on each metrics export — no manual +1/-1 needed.
+    """
+    global _queue_depth_source
+    _queue_depth_source = fn

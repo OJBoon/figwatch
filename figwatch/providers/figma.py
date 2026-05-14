@@ -1,5 +1,6 @@
 """Figma API client and design data fetching."""
 
+import contextlib
 import json
 import logging
 import os
@@ -11,6 +12,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
 from figwatch.providers.ai.rate_limit import TokenBucket
 from figwatch.tracing import TracedThreadPoolExecutor, get_tracer
 
@@ -86,10 +88,7 @@ class FigmaRateLimiter:
     """Three independent token buckets matching Figma's tiered rate limits."""
 
     def __init__(self, plan: str, seat: str = 'dev'):
-        if plan == 'starter':
-            key = 'starter'
-        else:
-            key = (plan, seat)
+        key = 'starter' if plan == 'starter' else (plan, seat)
         if key not in _RATE_LIMITS:
             raise ValueError(f'Unknown plan/seat combination: {key!r}')
         tier1_rpm, tier2_rpm, tier3_rpm = _RATE_LIMITS[key]
@@ -363,7 +362,10 @@ def fetch_screenshot(file_key, node_id, pat, limiter=None):
 
 
 def fetch_node_tree(file_key, node_id, pat, limiter=None):
-    """Fetch the full node tree for a Figma node. Returns (file_path, parsed_data) or (None, None)."""
+    """Fetch the full node tree for a Figma node.
+
+    Returns (file_path, parsed_data) or (None, None).
+    """
     tracer = get_tracer()
     with tracer.start_as_current_span('figma.node_tree', attributes={
         'figma.file_key': file_key,
@@ -371,7 +373,8 @@ def fetch_node_tree(file_key, node_id, pat, limiter=None):
     }):
         enc_id = urllib_quote(node_id)
         try:
-            data = figma_get_retry(f'/files/{file_key}/nodes?ids={enc_id}&depth=100', pat, limiter=limiter)
+            url = f'/files/{file_key}/nodes?ids={enc_id}&depth=100'
+            data = figma_get_retry(url, pat, limiter=limiter)
             node = data.get('nodes', {}).get(node_id, {}).get('document') if data else None
             if not node:
                 return None, None
@@ -403,28 +406,36 @@ def fetch_figma_data(required_data, file_key, node_id, pat, limiter=None):
         futures = {}
         with TracedThreadPoolExecutor(max_workers=3) as pool:
             if 'screenshot' in required_data:
-                futures['screenshot'] = pool.submit(fetch_screenshot, file_key, node_id, pat, limiter=limiter)
-            needs_tree = any(k in required_data for k in ('node_tree', 'text_nodes', 'annotations', 'prototype_flows'))
+                futures['screenshot'] = pool.submit(
+                    fetch_screenshot, file_key, node_id, pat, limiter=limiter,
+                )
+            tree_keys = ('node_tree', 'text_nodes', 'annotations', 'prototype_flows')
+            needs_tree = any(k in required_data for k in tree_keys)
             if needs_tree:
-                futures['_tree'] = pool.submit(fetch_node_tree, file_key, node_id, pat, limiter=limiter)
+                futures['_tree'] = pool.submit(
+                    fetch_node_tree, file_key, node_id, pat, limiter=limiter,
+                )
+            def _submit(endpoint):
+                return pool.submit(figma_get_retry, endpoint, pat, limiter=limiter)
+
             if 'dev_resources' in required_data:
-                futures['dev_resources'] = pool.submit(
-                    figma_get_retry, f'/files/{file_key}/dev_resources?node_ids={enc_id}', pat, limiter=limiter
+                futures['dev_resources'] = _submit(
+                    f'/files/{file_key}/dev_resources?node_ids={enc_id}',
                 )
             if 'variables_local' in required_data:
-                futures['variables_local'] = pool.submit(
-                    figma_get_retry, f'/files/{file_key}/variables/local', pat, limiter=limiter
+                futures['variables_local'] = _submit(
+                    f'/files/{file_key}/variables/local',
                 )
             if 'variables_published' in required_data:
-                futures['variables_published'] = pool.submit(
-                    figma_get_retry, f'/files/{file_key}/variables/published', pat, limiter=limiter
+                futures['variables_published'] = _submit(
+                    f'/files/{file_key}/variables/published',
                 )
             if 'styles' in required_data:
-                futures['styles'] = pool.submit(figma_get_retry, f'/files/{file_key}/styles', pat, limiter=limiter)
+                futures['styles'] = _submit(f'/files/{file_key}/styles')
             if 'components' in required_data:
-                futures['components'] = pool.submit(figma_get_retry, f'/files/{file_key}/components', pat, limiter=limiter)
+                futures['components'] = _submit(f'/files/{file_key}/components')
             if 'file_structure' in required_data:
-                futures['file_structure'] = pool.submit(figma_get_retry, f'/files/{file_key}?depth=2', pat, limiter=limiter)
+                futures['file_structure'] = _submit(f'/files/{file_key}?depth=2')
 
             for key, future in futures.items():
                 try:
@@ -464,10 +475,8 @@ class FigmaCommentRepository:
         return resp.get('id')
 
     def delete_comment(self, file_key: str, comment_id: str) -> None:
-        try:
+        with contextlib.suppress(Exception):
             figma_delete(f'/files/{file_key}/comments/{comment_id}', self._pat)
-        except Exception:
-            pass
 
     def comment_exists(self, file_key: str, comment_id: str) -> bool:
         comments = self.fetch_comments(file_key)

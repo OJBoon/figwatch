@@ -6,8 +6,7 @@ and the AuditStatus enum for the Comment Auditing bounded context.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional, Union
-
+from typing import Optional, Union
 
 # ── Audit status ─────────────────────────────────────────────────────
 
@@ -95,7 +94,7 @@ class Audit:
     comment: Comment
     trigger_match: TriggerMatch
     status: AuditStatus = AuditStatus.DETECTED
-    _events: List[DomainEvent] = field(default_factory=list, repr=False)
+    _events: list[DomainEvent] = field(default_factory=list, repr=False)
 
     @property
     def reply_to_id(self) -> str:

@@ -1,5 +1,6 @@
 """Skill discovery, introspection, prompt building, and execution."""
 
+import contextlib
 import importlib.resources
 import json
 import logging
@@ -8,10 +9,10 @@ import re
 import tempfile
 from pathlib import Path
 
-from figwatch.providers.ai import make_provider, GEMINI_MODELS, CLAUDE_API_MODELS
-from figwatch.providers.ai.gemini import GeminiProvider
+from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS, make_provider
 from figwatch.providers.ai.anthropic import AnthropicProvider
 from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
+from figwatch.providers.ai.gemini import GeminiProvider
 from figwatch.tracing import format_trace_line, get_tracer
 
 logger = logging.getLogger(__name__)
@@ -133,7 +134,8 @@ def _resolve_builtin_skill(skill_ref):
 
 # ── Skill introspection ──────────────────────────────────────────────
 
-_INTROSPECTION_PROMPT = """You are analysing a skill definition file for compatibility with a Figma comment bot.
+_INTROSPECTION_PROMPT = """\
+You are analysing a skill definition file for compatibility with a Figma comment bot.
 The bot can provide these data points to the skill:
 
 Frame-scoped: screenshot, node_tree, text_nodes, prototype_flows, dev_resources, annotations
@@ -201,9 +203,13 @@ def introspect_skill(skill_path, claude_path, model=None):
 
     # Always use the cheapest model for introspection.
     if (model or '').startswith('gemini'):
-        provider = GeminiProvider(GEMINI_MODELS['gemini-flash'], os.environ.get('GOOGLE_API_KEY', ''))
+        provider = GeminiProvider(
+            GEMINI_MODELS['gemini-flash'], os.environ.get('GOOGLE_API_KEY', ''),
+        )
     elif claude_path == 'api':
-        provider = AnthropicProvider(CLAUDE_API_MODELS['haiku'], os.environ.get('ANTHROPIC_API_KEY', ''))
+        provider = AnthropicProvider(
+            CLAUDE_API_MODELS['haiku'], os.environ.get('ANTHROPIC_API_KEY', ''),
+        )
     else:
         provider = ClaudeCLIProvider('haiku', claude_path)
 
@@ -240,7 +246,10 @@ def _get_introspection(skill_ref, skill_path, claude_path, model):
 
 # ── Prompt builder ────────────────────────────────────────────────────
 
-def _build_prompt(audit, skill_content, refs_section, data, tree_data, frame_name, *, inline_files, config=None):
+def _build_prompt(
+    audit, skill_content, refs_section, data, tree_data, frame_name,
+    *, inline_files, config=None,
+):
     """Build the skill execution prompt.
 
     inline_files=True: node tree JSON is embedded directly (for API providers).
@@ -400,7 +409,5 @@ def execute_skill(audit, *, config, design_repo):
         for key in ['screenshot', 'node_tree']:
             p = data.get(key)
             if p and isinstance(p, str):
-                try:
+                with contextlib.suppress(Exception):
                     os.unlink(p)
-                except Exception:
-                    pass

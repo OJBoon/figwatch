@@ -7,13 +7,14 @@ Usage:
 The built app will be at macos/dist/FigWatch.app.
 """
 
-import sys
 import os
+import sys
 
 # Add repo root to sys.path so py2app can find the figwatch package
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from setuptools import setup
+
 from figwatch import __version__
 
 APP = ['FigWatch.py']

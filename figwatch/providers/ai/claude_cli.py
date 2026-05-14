@@ -19,7 +19,7 @@ class ClaudeCLIProvider:
     def call(self, prompt: str, image_path: 'str | None') -> str:
         # image_path is unused — the path is embedded in the prompt text and
         # Claude reads it directly via the Read tool (--add-dir /tmp).
-        from figwatch.handlers import subprocess_env, parse_claude_output
+        from figwatch.handlers import parse_claude_output, subprocess_env
 
         cmd = [
             self._claude_path, '-p', prompt,

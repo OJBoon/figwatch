@@ -7,7 +7,6 @@ import pytest
 from figwatch.ports import CommentRepository, DesignDataRepository
 from figwatch.providers.figma import FigmaCommentRepository, FigmaDesignDataRepository
 
-
 # ── Protocol conformance ─────────────────────────────────────────────
 
 def test_figma_comment_repo_satisfies_protocol():

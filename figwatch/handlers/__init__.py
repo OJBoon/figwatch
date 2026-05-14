@@ -2,7 +2,6 @@
 
 import os
 import re
-import subprocess
 
 
 def strip_markdown(text):
@@ -43,4 +42,5 @@ def parse_claude_output(result, fallback_msg='Unable to generate evaluation.'):
     err = result.stderr.decode('utf-8', errors='replace').strip()
     if len(err) > 400:
         err = err[:400] + '\u2026'
-    return fallback_msg + '\n\n' + (f'Error: {err}' if err else f'claude exited with code {result.returncode}')
+    detail = f'Error: {err}' if err else f'claude exited with code {result.returncode}'
+    return fallback_msg + '\n\n' + detail

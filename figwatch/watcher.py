@@ -6,7 +6,7 @@ import os
 import threading
 from collections import OrderedDict
 
-from figwatch.domain import Audit, AuditStatus, Comment, match_trigger
+from figwatch.domain import Audit, Comment, match_trigger
 from figwatch.log_context import new_audit_id
 from figwatch.providers.figma import figma_get
 from figwatch.trigger_config import load_trigger_config
@@ -128,11 +128,12 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log):
             continue
 
         node_id = (comment.get('client_meta') or {}).get('node_id')
-        reply_to_id = comment['id']
+        comment['id']
         parent_id = None
         if comment.get('parent_id'):
             parent = comment_map.get(comment['parent_id'])
-            node_id = node_id or ((parent.get('client_meta') or {}).get('node_id') if parent else None)
+            if parent:
+                node_id = node_id or (parent.get('client_meta') or {}).get('node_id')
             parent_id = comment['parent_id']
 
         if not node_id:
@@ -155,7 +156,10 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log):
             trigger_match=trigger_match,
         )
         audits.append(audit)
-        log(f'\U0001f4ac {trigger_match.trigger.keyword} comment by {user_handle} on node {node_id}')
+        log(
+            f'\U0001f4ac {trigger_match.trigger.keyword} comment'
+            f' by {user_handle} on node {node_id}',
+        )
 
     if len(processed_ids) > initial_count:
         save_processed(processed_ids)
@@ -258,7 +262,10 @@ class FigmaWatcher:
 if __name__ == '__main__':
     import sys
 
-    from figwatch.providers.figma import FigmaCommentRepository, FigmaDesignDataRepository
+    from figwatch.providers.figma import (
+        FigmaCommentRepository,
+        FigmaDesignDataRepository,
+    )
     from figwatch.services import AuditConfig, AuditService
 
     args = sys.argv[1:]
@@ -270,7 +277,8 @@ if __name__ == '__main__':
     locale_idx = args.index('-l') if '-l' in args else -1
     locale = args[locale_idx + 1] if locale_idx >= 0 and locale_idx + 1 < len(args) else 'uk'
     interval_idx = args.index('-i') if '-i' in args else -1
-    interval = int(args[interval_idx + 1]) if interval_idx >= 0 and interval_idx + 1 < len(args) else 30
+    has_interval = interval_idx >= 0 and interval_idx + 1 < len(args)
+    interval = int(args[interval_idx + 1]) if has_interval else 30
 
     home = os.path.expanduser('~')
     pat = None

@@ -10,11 +10,10 @@ import pytest
 from figwatch.providers.figma import (
     FigmaTokenExpired,
     _check_token_expired,
-    _make_request,
+    figma_delete,
     figma_get,
     figma_get_retry,
     figma_post,
-    figma_delete,
     validate_token,
 )
 
