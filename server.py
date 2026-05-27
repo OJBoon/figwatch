@@ -22,6 +22,8 @@ Environment variables:
   GOOGLE_API_KEY              Google AI API key (for Gemini models)
 
   FIGWATCH_MODEL              Model to use (default: gemini-flash)
+  FIGWATCH_GEMINI_MODEL_ID    Override underlying Gemini model ID (optional)
+  FIGWATCH_ANTHROPIC_MODEL_ID Override underlying Claude model ID (optional)
   FIGWATCH_FILES              Optional — comma-separated Figma file URLs or keys
   FIGWATCH_LOCALE             Locale for tone audits: uk, de, fr, nl, benelux (default: uk)
   FIGWATCH_PORT               Port to listen on (default: 8080)
