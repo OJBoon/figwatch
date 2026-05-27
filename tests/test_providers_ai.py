@@ -107,6 +107,7 @@ def test_gemini_model_aliases():
 def test_gemini_model_id_override(monkeypatch):
     monkeypatch.setenv("FIGWATCH_GEMINI_MODEL_ID", "gemini-custom-model")
     import importlib
+
     import figwatch.providers.ai as ai_mod
     importlib.reload(ai_mod)
     try:
@@ -120,6 +121,7 @@ def test_gemini_model_id_override(monkeypatch):
 def test_anthropic_model_id_override(monkeypatch):
     monkeypatch.setenv("FIGWATCH_ANTHROPIC_MODEL_ID", "claude-custom-model")
     import importlib
+
     import figwatch.providers.ai as ai_mod
     importlib.reload(ai_mod)
     try:
