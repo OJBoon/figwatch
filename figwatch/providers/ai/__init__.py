@@ -18,19 +18,30 @@ from figwatch.providers.ai.rate_limit import TokenBucket
 logger = logging.getLogger(__name__)
 
 # Friendly aliases → full Anthropic API model IDs
+# Override individual models with FIGWATCH_ANTHROPIC_MODEL_ID env var.
 CLAUDE_API_MODELS = {
     'sonnet': 'claude-sonnet-4-6',
     'opus':   'claude-opus-4-6',
     'haiku':  'claude-haiku-4-5-20251001',
 }
+_anthropic_override = os.environ.get('FIGWATCH_ANTHROPIC_MODEL_ID', '').strip()
+if _anthropic_override:
+    for _k in CLAUDE_API_MODELS:
+        CLAUDE_API_MODELS[_k] = _anthropic_override
 
 # Friendly aliases → full Google AI model IDs
 # Values not listed here are passed through as-is.
+# Override with FIGWATCH_GEMINI_MODEL_ID env var (no redeploy needed).
+_GEMINI_DEFAULT = 'gemini-3.1-flash-lite'
 GEMINI_MODELS = {
-    'gemini':            'gemini-3.1-flash-lite-preview',
-    'gemini-flash':      'gemini-3.1-flash-lite-preview',
-    'gemini-flash-lite': 'gemini-3.1-flash-lite-preview',
+    'gemini':            _GEMINI_DEFAULT,
+    'gemini-flash':      _GEMINI_DEFAULT,
+    'gemini-flash-lite': _GEMINI_DEFAULT,
 }
+_gemini_override = os.environ.get('FIGWATCH_GEMINI_MODEL_ID', '').strip()
+if _gemini_override:
+    for _k in GEMINI_MODELS:
+        GEMINI_MODELS[_k] = _gemini_override
 
 # Shared rate limiters, lazy-initialized from env vars.
 # Set FIGWATCH_{PROVIDER}_RPM=0 to disable rate limiting for that provider.

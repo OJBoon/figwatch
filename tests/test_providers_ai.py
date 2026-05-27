@@ -36,7 +36,7 @@ def test_make_provider_gemini_alias():
 
 
 def test_make_provider_gemini_full_model_id():
-    p = make_provider("gemini-3.1-flash-lite-preview", "claude")
+    p = make_provider("gemini-3.1-flash-lite", "claude")
     assert isinstance(p, GeminiProvider)
 
 
@@ -102,6 +102,34 @@ def test_claude_api_model_aliases():
 def test_gemini_model_aliases():
     assert "gemini-flash" in GEMINI_MODELS
     assert "gemini-flash-lite" in GEMINI_MODELS
+
+
+def test_gemini_model_id_override(monkeypatch):
+    monkeypatch.setenv("FIGWATCH_GEMINI_MODEL_ID", "gemini-custom-model")
+    import importlib
+
+    import figwatch.providers.ai as ai_mod
+    importlib.reload(ai_mod)
+    try:
+        assert ai_mod.GEMINI_MODELS["gemini-flash"] == "gemini-custom-model"
+        assert ai_mod.GEMINI_MODELS["gemini"] == "gemini-custom-model"
+    finally:
+        monkeypatch.delenv("FIGWATCH_GEMINI_MODEL_ID")
+        importlib.reload(ai_mod)
+
+
+def test_anthropic_model_id_override(monkeypatch):
+    monkeypatch.setenv("FIGWATCH_ANTHROPIC_MODEL_ID", "claude-custom-model")
+    import importlib
+
+    import figwatch.providers.ai as ai_mod
+    importlib.reload(ai_mod)
+    try:
+        assert ai_mod.CLAUDE_API_MODELS["sonnet"] == "claude-custom-model"
+        assert ai_mod.CLAUDE_API_MODELS["opus"] == "claude-custom-model"
+    finally:
+        monkeypatch.delenv("FIGWATCH_ANTHROPIC_MODEL_ID")
+        importlib.reload(ai_mod)
 
 
 # ── parse_retry_seconds ───────────────────────────────────────────────
