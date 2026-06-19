@@ -100,7 +100,7 @@ jobs:
 
       - name: Upload app zip
         if: github.event_name == 'push'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: FigWatch.zip
           path: macos/dist/FigWatch.zip
