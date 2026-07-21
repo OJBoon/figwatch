@@ -130,61 +130,47 @@ class PgAuditQueueRepository:
     def enqueue(self, audit: Audit, ack_id: Optional[str]) -> int:
         with self._pool.connection() as conn:
             trace_id = get_trace_id() or None
-            with conn.transaction():
-                with conn.cursor() as cur:
-                    cur.execute("""
-                        INSERT INTO audit_queue
-                            (audit_id, audit_payload, ack_id,
-                             user_handle, trigger_keyword, file_key, trace_id)
-                        VALUES (%(audit_id)s, %(payload)s, %(ack_id)s,
-                                %(user_handle)s, %(trigger)s, %(file_key)s,
-                                %(trace_id)s)
-                    """, {
-                        'audit_id': audit.audit_id,
-                        'payload': Jsonb(_serialize_audit(audit)),
-                        'ack_id': ack_id,
-                        'user_handle': audit.comment.user_handle,
-                        'trigger': audit.trigger_match.trigger.keyword,
-                        'file_key': audit.comment.file_key,
-                        'trace_id': trace_id,
-                    })
+            with conn.transaction(), conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO audit_queue
+                        (audit_id, audit_payload, ack_id,
+                         user_handle, trigger_keyword, file_key, trace_id)
+                    VALUES (%(audit_id)s, %(payload)s, %(ack_id)s,
+                            %(user_handle)s, %(trigger)s, %(file_key)s,
+                            %(trace_id)s)
+                """, {
+                    'audit_id': audit.audit_id,
+                    'payload': Jsonb(_serialize_audit(audit)),
+                    'ack_id': ack_id,
+                    'user_handle': audit.comment.user_handle,
+                    'trigger': audit.trigger_match.trigger.keyword,
+                    'file_key': audit.comment.file_key,
+                    'trace_id': trace_id,
+                })
 
-                    cur.execute("""
-                        SELECT count(*) AS ahead FROM audit_queue
-                        WHERE status = 'queued'
-                          AND enqueued_at < (
-                              SELECT enqueued_at FROM audit_queue
-                              WHERE audit_id = %(audit_id)s
-                          )
-                    """, {'audit_id': audit.audit_id})
-                    position = cur.fetchone()['ahead']
+                cur.execute("""
+                    SELECT count(*) AS ahead FROM audit_queue
+                    WHERE status = 'queued'
+                      AND enqueued_at < (
+                          SELECT enqueued_at FROM audit_queue
+                          WHERE audit_id = %(audit_id)s
+                      )
+                """, {'audit_id': audit.audit_id})
+                position = cur.fetchone()['ahead']
 
-                conn.execute("NOTIFY audit_queue")
         return position
 
     def dequeue(self, worker_id: str, timeout: float = 30.0) -> Optional[QueueRow]:
-        conn = self._pool.getconn()
-        try:
-            row = self._try_dequeue(conn, worker_id)
-            if row:
-                return row
-
-            conn.execute("LISTEN audit_queue")
-            try:
-                deadline = time.monotonic() + timeout
-                for _notify in conn.notifies(timeout=timeout):
-                    row = self._try_dequeue(conn, worker_id)
-                    if row:
-                        return row
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
-                # Timeout expired — one final attempt (retry timer may have matured)
-                return self._try_dequeue(conn, worker_id)
-            finally:
-                conn.execute("UNLISTEN audit_queue")
-        finally:
-            self._pool.putconn(conn)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._pool.connection() as conn:
+                row = self._try_dequeue(conn, worker_id)
+                if row:
+                    return row
+            # Poll interval — short enough for responsive dequeue,
+            # long enough to avoid hammering the database.
+            time.sleep(1.0)
+        return None
 
     def _try_dequeue(self, conn, worker_id: str) -> Optional[QueueRow]:
         with conn.cursor() as cur:
@@ -238,7 +224,6 @@ class PgAuditQueueRepository:
                         locked_at = NULL
                     WHERE audit_id = %(id)s
                 """, {'id': audit_id, 'secs': retry_after_seconds})
-                conn.execute("NOTIFY audit_queue")
             else:
                 conn.execute("""
                     UPDATE audit_queue
