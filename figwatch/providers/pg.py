@@ -67,7 +67,7 @@ def run_migrations(conn, migrations_dir: str) -> int:
             )
         """)
         cur.execute("SELECT version FROM schema_version ORDER BY version")
-        applied = {row[0] for row in cur.fetchall()}
+        applied = {row['version'] for row in cur.fetchall()}
 
     pattern = os.path.join(migrations_dir, '*.sql')
     files = sorted(glob.glob(pattern))
