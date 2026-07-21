@@ -1,8 +1,8 @@
 """Feedback collection — storage and HTML form serving."""
 
+import contextlib
 import json
 import logging
-import os
 import threading
 import time
 from pathlib import Path
@@ -35,10 +35,8 @@ def save_feedback(audit_id: str, skill: str, attempt: str,
     with _lock:
         existing = []
         if _FEEDBACK_FILE.exists():
-            try:
+            with contextlib.suppress(json.JSONDecodeError, OSError):
                 existing = json.loads(_FEEDBACK_FILE.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
         existing.append(entry)
         _FEEDBACK_FILE.write_text(json.dumps(existing, indent=2))
     logger.info('feedback saved', extra={'audit_id': audit_id, 'rating': rating})
@@ -111,7 +109,7 @@ def render_form(params: dict) -> str:
     <span>Audit: {audit_id or 'N/A'}</span>
     <span>Skill: {skill or 'N/A'}</span>
     {f'<span>Attempt: {attempt}</span>' if attempt else ''}
-    {f'<span>Trace: {trace_id[:12]}...</span>' if len(trace_id) > 12 else (f'<span>Trace: {trace_id}</span>' if trace_id else '')}
+    {_trace_span(trace_id)}
   </div>
   <form method="POST" action="/feedback">
     <input type="hidden" name="audit_id" value="{audit_id}">
@@ -167,3 +165,11 @@ def _esc(s: str) -> str:
     """Escape HTML special characters."""
     return (s.replace('&', '&amp;').replace('<', '&lt;')
              .replace('>', '&gt;').replace('"', '&quot;'))
+
+
+def _trace_span(trace_id: str) -> str:
+    """Render a trace ID badge, truncating long IDs."""
+    if not trace_id:
+        return ''
+    label = f'{trace_id[:12]}...' if len(trace_id) > 12 else trace_id
+    return f'<span>Trace: {label}</span>'

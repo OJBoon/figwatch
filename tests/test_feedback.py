@@ -1,11 +1,7 @@
 """Tests for the feedback module."""
 
 import json
-import os
-import tempfile
 from unittest import mock
-
-import pytest
 
 from figwatch.feedback import (
     build_feedback_url,

@@ -59,13 +59,13 @@ if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from figwatch.ack_updater import AckUpdater
+from figwatch.domain import Audit, Comment, match_trigger
 from figwatch.feedback import (
     THANK_YOU_HTML,
     parse_feedback_params,
     render_form,
     save_feedback,
 )
-from figwatch.domain import Audit, Comment, match_trigger
 from figwatch.log_context import (
     clear_audit_context,
     new_audit_id,
