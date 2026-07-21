@@ -39,6 +39,10 @@ class FigmaTokenExpired(Exception):
 # Base64 adds ~33% overhead; cap raw bytes at 3.75 MB to stay under the 5 MB API limit.
 _MAX_IMAGE_BYTES = int(3.75 * 1024 * 1024)
 
+# Cap how long a worker will sleep on a 429 Retry-After. Figma can send
+# multi-day values for starter-tier files; sleeping that long blocks the worker.
+_MAX_RETRY_WAIT = 60
+
 
 def urllib_quote(s):
     return urllib.parse.quote(s, safe='')
@@ -216,6 +220,13 @@ def figma_get_retry(path, pat, retries=1, timeout=15, limiter=None):
                     except Exception:
                         wait = 0
                     wait = max(wait, 2)
+                    if wait > _MAX_RETRY_WAIT:
+                        logger.error(
+                            'figma 429 — Retry-After too large, not retrying',
+                            extra={'path': path, 'retry_after': wait,
+                                   'max': _MAX_RETRY_WAIT},
+                        )
+                        return None
                     if limiter:
                         limiter.backoff(path, wait)
                     logger.warning(
