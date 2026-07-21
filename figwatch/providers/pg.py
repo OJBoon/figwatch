@@ -157,20 +157,35 @@ class PgAuditQueueRepository:
                       )
                 """, {'audit_id': audit.audit_id})
                 position = cur.fetchone()['ahead']
-
+            conn.execute("NOTIFY audit_queue")
         return position
 
     def dequeue(self, worker_id: str, timeout: float = 30.0) -> Optional[QueueRow]:
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
+        # Try immediate dequeue first.
+        with self._pool.connection() as conn:
+            row = self._try_dequeue(conn, worker_id)
+            if row:
+                return row
+
+        # Block on NOTIFY using a dedicated connection, then dequeue
+        # on a separate connection to avoid interfering with LISTEN.
+        listen_conn = self._pool.getconn()
+        try:
+            listen_conn.execute("LISTEN audit_queue")
+            deadline = time.monotonic() + timeout
+            for _notify in listen_conn.notifies(timeout=timeout):
+                with self._pool.connection() as conn:
+                    row = self._try_dequeue(conn, worker_id)
+                    if row:
+                        return row
+                if time.monotonic() >= deadline:
+                    break
+            # Final attempt after timeout (retry_after may have matured).
             with self._pool.connection() as conn:
-                row = self._try_dequeue(conn, worker_id)
-                if row:
-                    return row
-            # Poll interval — short enough for responsive dequeue,
-            # long enough to avoid hammering the database.
-            time.sleep(1.0)
-        return None
+                return self._try_dequeue(conn, worker_id)
+        finally:
+            listen_conn.execute("UNLISTEN audit_queue")
+            self._pool.putconn(listen_conn)
 
     def _try_dequeue(self, conn, worker_id: str) -> Optional[QueueRow]:
         with conn.cursor() as cur:
@@ -224,6 +239,7 @@ class PgAuditQueueRepository:
                         locked_at = NULL
                     WHERE audit_id = %(id)s
                 """, {'id': audit_id, 'secs': retry_after_seconds})
+                conn.execute("NOTIFY audit_queue")
             else:
                 conn.execute("""
                     UPDATE audit_queue
