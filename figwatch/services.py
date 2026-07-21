@@ -19,6 +19,7 @@ class AuditConfig:
     claude_path: str
     reply_lang: str
     locale: str
+    base_url: str = ''
 
 
 class AuditService:
