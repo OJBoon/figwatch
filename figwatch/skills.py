@@ -9,13 +9,11 @@ import re
 import tempfile
 from pathlib import Path
 
-from figwatch.feedback import build_feedback_url
-from figwatch.log_context import get_audit_context
 from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS, make_provider
 from figwatch.providers.ai.anthropic import AnthropicProvider
 from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
 from figwatch.providers.ai.gemini import GeminiProvider
-from figwatch.tracing import format_trace_line, get_trace_id, get_tracer
+from figwatch.tracing import format_trace_line, get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -326,23 +324,6 @@ CRITICAL RULES:
 {lang_instruction}"""
 
 
-# ── Feedback link ────────────────────────────────────────────────────
-
-def _build_feedback_line(config, audit, skill_ref):
-    """Return a feedback URL line if base_url is configured, else ''."""
-    if not config.base_url:
-        return ''
-    ctx = get_audit_context()
-    url = build_feedback_url(
-        config.base_url,
-        audit_id=audit.audit_id,
-        skill=skill_ref,
-        attempt=ctx.get('attempt', 1),
-        trace_id=get_trace_id(),
-    )
-    return f'\nRate this response: {url}'
-
-
 # ── Skill execution ───────────────────────────────────────────────────
 
 def execute_skill(audit, *, config, design_repo):
@@ -422,9 +403,9 @@ def execute_skill(audit, *, config, design_repo):
                 if usage:
                     span.set_attribute('ai.tokens', usage)
         header = f'\U0001f5e3\ufe0f {trigger_kw} Audit \u2014 {frame_name}'
-        signoff = f'\u2014 FigWatch ({provider.model_id}){format_trace_line()}'
-        feedback_line = _build_feedback_line(config, audit, skill_ref)
-        return f'{header}\n\n{reply}\n\n{signoff}{feedback_line}'
+        trace = '' if config.base_url else format_trace_line()
+        signoff = f'\u2014 FigWatch ({provider.model_id}){trace}'
+        return f'{header}\n\n{reply}\n\n{signoff}'
     finally:
         for key in ['screenshot', 'node_tree']:
             p = data.get(key)
