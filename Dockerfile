@@ -7,6 +7,7 @@ WORKDIR /app
 
 COPY pyproject.toml .
 COPY figwatch/ ./figwatch/
+COPY migrations/ ./migrations/
 COPY server.py .
 RUN pip install --no-cache-dir ".[server]"
 
