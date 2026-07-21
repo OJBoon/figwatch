@@ -65,12 +65,12 @@ jobs:
       - name: Start PostgreSQL for smoke test
         run: |
           docker run -d --name postgres-ci \
-            -e POSTGRES_DB=figwatch \
-            -e POSTGRES_USER=figwatch \
-            -e POSTGRES_PASSWORD=figwatch \
+            -e POSTGRES_DB=figwatch_ci \
+            -e POSTGRES_USER=ci_user \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
             -p 5432:5432 \
             postgres:18-alpine
-          until docker exec postgres-ci pg_isready -U figwatch; do sleep 1; done
+          until docker exec postgres-ci pg_isready -U ci_user; do sleep 1; done
 
       - name: Smoke test — health endpoint
         run: |
@@ -79,7 +79,7 @@ jobs:
             -e FIGMA_PAT=figd_placeholder \
             -e FIGWATCH_WEBHOOK_PASSCODE=placeholder \
             -e FIGWATCH_SKIP_TOKEN_CHECK=1 \
-            -e DATABASE_URL=postgresql://figwatch:figwatch@postgres:5432/figwatch \
+            -e DATABASE_URL=postgresql://ci_user@postgres:5432/figwatch_ci \
             -p 8080:8080 \
             figwatch:ci
           sleep 5
