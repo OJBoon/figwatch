@@ -50,7 +50,6 @@ class QueueRow:
     ack_id: Optional[str]
     attempt: int
     enqueued_at: float    # Unix timestamp
-    trace_context: Optional[dict]
 
 
 @dataclass(frozen=True)
@@ -70,8 +69,7 @@ class AckUpdateRow:
 class AuditQueueRepository(Protocol):
     """Port for the durable work queue backed by PostgreSQL."""
 
-    def enqueue(self, audit: Any, ack_id: Optional[str],
-                trace_context: Optional[dict]) -> int:
+    def enqueue(self, audit: Any, ack_id: Optional[str]) -> int:
         """Insert an audit into the queue. Returns queue position (items ahead)."""
         ...
 

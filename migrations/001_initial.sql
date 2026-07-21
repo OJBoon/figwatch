@@ -11,7 +11,6 @@ CREATE TABLE audit_queue (
     ack_id          TEXT,
     ack_position    INTEGER,
     retry_after     TIMESTAMPTZ,
-    trace_context   JSONB,
     locked_by       TEXT,
     locked_at       TIMESTAMPTZ,
     -- Denormalized for direct querying without digging into JSONB

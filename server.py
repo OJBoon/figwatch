@@ -200,15 +200,6 @@ def _worker_loop(queue_repo, stop_event, audit_service: AuditService, worker_id:
         run_started_at = time.monotonic()
         waited_seconds = time.time() - row.enqueued_at
 
-        # Restore trace context propagated from the webhook handler thread.
-        otel_token = None
-        try:
-            from opentelemetry import context as otel_context
-            if row.trace_context is not None:
-                otel_token = otel_context.attach(row.trace_context)
-        except ImportError:
-            pass
-
         token = set_audit_context(
             audit=row.audit_id,
             trigger=trigger_kw,
@@ -328,12 +319,6 @@ def _worker_loop(queue_repo, stop_event, audit_service: AuditService, worker_id:
             logger.exception('worker crashed unexpectedly')
         finally:
             reset_audit_context(token)
-            if otel_token is not None:
-                try:
-                    from opentelemetry import context as otel_context
-                    otel_context.detach(otel_token)
-                except ImportError:
-                    pass
 
 
 # ── HTTP handler ───────────────────────────────────────────────────────
@@ -477,14 +462,7 @@ def _make_handler(pat, passcode, allowed_file_keys,
 
                 ack_id = audit_service.post_ack(audit, queue_msg)
 
-                trace_ctx = None
-                try:
-                    from opentelemetry import context as otel_context
-                    trace_ctx = otel_context.get_current()
-                except ImportError:
-                    pass
-
-                queue_repo.enqueue(audit, ack_id, trace_ctx)
+                queue_repo.enqueue(audit, ack_id)
                 depth = queue_repo.queue_depth()
                 logger.info('queue.enqueued', extra={'depth': depth})
 

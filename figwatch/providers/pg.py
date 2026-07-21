@@ -127,24 +127,22 @@ class PgAuditQueueRepository:
 
     # ── Queue operations ──────────────────────────────────────────
 
-    def enqueue(self, audit: Audit, ack_id: Optional[str],
-                trace_context: Optional[dict]) -> int:
+    def enqueue(self, audit: Audit, ack_id: Optional[str]) -> int:
         with self._pool.connection() as conn:
-            trace_id = get_trace_id(trace_context) or None
+            trace_id = get_trace_id() or None
             with conn.transaction():
                 with conn.cursor() as cur:
                     cur.execute("""
                         INSERT INTO audit_queue
-                            (audit_id, audit_payload, ack_id, trace_context,
+                            (audit_id, audit_payload, ack_id,
                              user_handle, trigger_keyword, file_key, trace_id)
-                        VALUES (%(audit_id)s, %(payload)s, %(ack_id)s, %(trace)s,
+                        VALUES (%(audit_id)s, %(payload)s, %(ack_id)s,
                                 %(user_handle)s, %(trigger)s, %(file_key)s,
                                 %(trace_id)s)
                     """, {
                         'audit_id': audit.audit_id,
                         'payload': Jsonb(_serialize_audit(audit)),
                         'ack_id': ack_id,
-                        'trace': Jsonb(trace_context) if trace_context else None,
                         'user_handle': audit.comment.user_handle,
                         'trigger': audit.trigger_match.trigger.keyword,
                         'file_key': audit.comment.file_key,
@@ -218,7 +216,6 @@ class PgAuditQueueRepository:
             ack_id=row['ack_id'],
             attempt=row['attempt'],
             enqueued_at=row['enqueued_at'].timestamp(),
-            trace_context=row['trace_context'],
         )
 
     def complete(self, audit_id: str) -> None:
