@@ -15,6 +15,7 @@ from typing import Optional
 
 from psycopg import sql
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
 from figwatch.domain import Audit, Comment, Trigger, TriggerMatch
@@ -141,9 +142,9 @@ class PgAuditQueueRepository:
                                 %(trace_id)s)
                     """, {
                         'audit_id': audit.audit_id,
-                        'payload': _serialize_audit(audit),
+                        'payload': Jsonb(_serialize_audit(audit)),
                         'ack_id': ack_id,
-                        'trace': trace_context,
+                        'trace': Jsonb(trace_context) if trace_context else None,
                         'user_handle': audit.comment.user_handle,
                         'trigger': audit.trigger_match.trigger.keyword,
                         'file_key': audit.comment.file_key,
