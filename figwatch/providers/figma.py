@@ -471,6 +471,10 @@ def fetch_figma_data(required_data, file_key, node_id, pat, limiter=None):
             for key, future in futures.items():
                 try:
                     result[key] = future.result()
+                except FigmaRateLimited:
+                    raise
+                except FigmaTokenExpired:
+                    raise
                 except Exception:
                     result[key] = None
 
