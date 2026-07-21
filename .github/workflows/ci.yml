@@ -82,7 +82,8 @@ jobs:
             -e DATABASE_URL=postgresql://ci_user@postgres:5432/figwatch_ci \
             -p 8080:8080 \
             figwatch:ci
-          sleep 5
+          sleep 10
+          docker logs figwatch-ci
           curl -sf http://localhost:8080/health
           docker rm -f figwatch-ci
           docker rm -f postgres-ci
