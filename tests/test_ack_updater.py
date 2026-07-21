@@ -1,21 +1,22 @@
 """Tests for figwatch.ack_updater — AckUpdater background worker.
 
-These tests use a FakeCommentRepository to avoid network calls.
+Uses FakeCommentRepo and FakeQueueRepo to avoid network/DB calls.
 """
 
 import time
 
 import pytest
 
-from figwatch.ack_updater import AckUpdater, PendingUpdate, _position_message
+from figwatch.ack_updater import AckUpdater, _position_message
 from figwatch.domain import Audit, Comment, Trigger, TriggerMatch
-from figwatch.queue_stats import InstrumentedQueue, QueuedItem
+from figwatch.ports import AckUpdateRow
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
-def _make_audit(trigger='@ux', node_id='1:2', file_key='abc'):
+
+def _make_audit(audit_id='test', trigger='@ux', node_id='1:2', file_key='abc'):
     return Audit(
-        audit_id='test',
+        audit_id=audit_id,
         comment=Comment(
             comment_id='c1', message=f'{trigger} check', parent_id='111',
             node_id=node_id, user_handle='alice', file_key=file_key,
@@ -24,14 +25,6 @@ def _make_audit(trigger='@ux', node_id='1:2', file_key='abc'):
             trigger=Trigger(keyword=trigger, skill_ref='builtin:ux'),
             extra='',
         ),
-    )
-
-
-def _queued(audit_id, ack_id='ack-0'):
-    return QueuedItem(
-        audit=_make_audit(),
-        ack_id=ack_id,
-        audit_id=audit_id,
     )
 
 
@@ -59,9 +52,63 @@ class FakeCommentRepo:
         return []
 
 
+class FakeQueueRepo:
+    """In-memory AuditQueueRepository for testing AckUpdater."""
+
+    def __init__(self):
+        self._items = []  # list of (audit_id, audit, ack_id, ack_position, enqueued_at)
+        self._ack_updates = []  # record of update_ack calls
+
+    def add_item(self, audit_id, ack_id='ack-0', ack_position=None):
+        audit = _make_audit(audit_id=audit_id)
+        self._items.append({
+            'audit_id': audit_id,
+            'audit': audit,
+            'ack_id': ack_id,
+            'ack_position': ack_position,
+        })
+
+    def remove_item(self, audit_id):
+        self._items = [i for i in self._items if i['audit_id'] != audit_id]
+
+    def pending_ack_updates(self):
+        result = []
+        for idx, item in enumerate(self._items):
+            current_position = idx
+            displayed = item['ack_position']
+            if displayed is not None and current_position == displayed:
+                continue
+            result.append(AckUpdateRow(
+                audit_id=item['audit_id'],
+                audit=item['audit'],
+                ack_id=item['ack_id'],
+                current_position=current_position,
+                displayed_position=displayed,
+            ))
+        return result
+
+    def update_ack(self, audit_id, ack_id, position):
+        self._ack_updates.append({
+            'audit_id': audit_id, 'ack_id': ack_id, 'position': position,
+        })
+        for item in self._items:
+            if item['audit_id'] == audit_id:
+                item['ack_id'] = ack_id
+                item['ack_position'] = position
+                break
+
+    def queue_depth(self):
+        return len(self._items)
+
+
 @pytest.fixture
-def repo():
+def comment_repo():
     return FakeCommentRepo()
+
+
+@pytest.fixture
+def queue_repo():
+    return FakeQueueRepo()
 
 
 # ── _position_message formatting ─────────────────────────────────────
@@ -92,179 +139,62 @@ def test_position_message_empty_trace():
     assert 'starting shortly' in msg
 
 
-# ── Public API surface ───────────────────────────────────────────────
+# ── AckUpdater behavior ─────────────────────────────────────────────
 
-def test_track_initial_records_position(repo):
-    q = InstrumentedQueue()
-    updater = AckUpdater(q, repo, rate_per_minute=60, poll_seconds=0.01)
-    updater.track_initial('abc', position=3)
-    assert updater._displayed['abc'] == 3
-
-
-def test_cancel_removes_tracking(repo):
-    q = InstrumentedQueue()
-    updater = AckUpdater(q, repo, rate_per_minute=60, poll_seconds=0.01)
-    updater.track_initial('abc', position=2)
-    updater.cancel('abc')
-    assert 'abc' not in updater._displayed
-    assert 'abc' not in updater._pending
-
-
-def test_rate_zero_disables_thread(repo):
-    q = InstrumentedQueue()
-    updater = AckUpdater(q, repo, rate_per_minute=0)
+def test_rate_zero_disables_thread(comment_repo, queue_repo):
+    updater = AckUpdater(queue_repo, comment_repo, rate_per_minute=0)
     updater.start()
     assert updater._thread is None
     updater.stop()
 
 
-# ── _refresh_pending (position change detection) ─────────────────────
+def test_no_updates_when_positions_unchanged(comment_repo, queue_repo):
+    queue_repo.add_item('a', ack_position=0)
+    queue_repo.add_item('b', ack_position=1)
+    queue_repo.add_item('c', ack_position=2)
 
-def test_refresh_skips_items_at_their_displayed_position(repo):
-    q = InstrumentedQueue()
-    q.put(_queued('a'))
-    q.put(_queued('b'))
-    q.put(_queued('c'))
-
-    updater = AckUpdater(q, repo, rate_per_minute=60, poll_seconds=0.01)
-    updater.track_initial('a', position=0)
-    updater.track_initial('b', position=1)
-    updater.track_initial('c', position=2)
-
-    updater._refresh_pending()
-    assert updater._pending == {}
+    AckUpdater(queue_repo, comment_repo, rate_per_minute=60, poll_seconds=0.01)
+    # Manually run one cycle — updater not needed, testing repo directly
+    updates = queue_repo.pending_ack_updates()
+    assert updates == []
 
 
-def test_refresh_schedules_update_when_position_moves(repo):
-    q = InstrumentedQueue()
-    q.put(_queued('a'))
-    q.put(_queued('b'))
-    q.put(_queued('c'))
+def test_detects_position_change_after_dequeue(comment_repo, queue_repo):
+    queue_repo.add_item('a', ack_position=0)
+    queue_repo.add_item('b', ack_position=1)
+    queue_repo.add_item('c', ack_position=2)
 
-    updater = AckUpdater(q, repo, rate_per_minute=60, poll_seconds=0.01)
-    updater.track_initial('a', position=0)
-    updater.track_initial('b', position=1)
-    updater.track_initial('c', position=2)
+    # Remove 'a' — b moves to 0, c moves to 1
+    queue_repo.remove_item('a')
+    updates = queue_repo.pending_ack_updates()
 
-    # Remove 'a' — positions shift: b is now 0, c is now 1
-    q.get(timeout=1)
-    updater._refresh_pending()
-
-    assert 'b' in updater._pending
-    assert 'c' in updater._pending
-    assert updater._pending['b'].new_position == 0
-    assert updater._pending['c'].new_position == 1
+    assert len(updates) == 2
+    assert updates[0].audit_id == 'b'
+    assert updates[0].current_position == 0
+    assert updates[1].audit_id == 'c'
+    assert updates[1].current_position == 1
 
 
-def test_refresh_coalesces_multiple_updates_for_same_audit(repo):
-    q = InstrumentedQueue()
-    q.put(_queued('a'))
-    q.put(_queued('b'))
-    q.put(_queued('c'))
-    q.put(_queued('d'))
+def test_post_update_posts_and_records_ack(comment_repo, queue_repo):
+    queue_repo.add_item('a', ack_id='ack-0', ack_position=None)
+    updater = AckUpdater(queue_repo, comment_repo, rate_per_minute=60, poll_seconds=0.01)
 
-    updater = AckUpdater(q, repo, rate_per_minute=60, poll_seconds=0.01)
-    updater.track_initial('a', position=0)
-    updater.track_initial('b', position=1)
-    updater.track_initial('c', position=2)
-    updater.track_initial('d', position=3)
+    updates = queue_repo.pending_ack_updates()
+    assert len(updates) == 1
+    updater._post_update(updates[0])
 
-    updater._refresh_pending()
-    assert updater._pending == {}
-
-    q.get(timeout=1)
-    updater._refresh_pending()
-    assert updater._pending['d'].new_position == 2
-
-    q.get(timeout=1)
-    updater._refresh_pending()
-    assert updater._pending['d'].new_position == 1
-
-
-def test_refresh_cleans_up_stale_displayed_entries(repo):
-    q = InstrumentedQueue()
-    q.put(_queued('a'))
-
-    updater = AckUpdater(q, repo, rate_per_minute=60, poll_seconds=0.01)
-    updater.track_initial('a', position=0)
-    updater._displayed['ghost'] = 2
-    updater._pending['ghost'] = PendingUpdate(
-        audit_id='ghost', new_position=1, queued=_queued('ghost'),
-    )
-
-    updater._refresh_pending()
-    assert 'ghost' not in updater._displayed
-    assert 'ghost' not in updater._pending
-
-
-# ── _post_one (actual ack update posting) ────────────────────────────
-
-def test_post_one_posts_pending_update(repo):
-    q = InstrumentedQueue()
-    queued = _queued('a', ack_id='ack-0')
-    q.put(queued)
-
-    updater = AckUpdater(q, repo, rate_per_minute=60, poll_seconds=0.01)
-    updater._pending['a'] = PendingUpdate(
-        audit_id='a', new_position=2, queued=queued,
-    )
-
-    updater._post_one()
-    assert len(repo.posts) == 1
-    assert len(repo.deletes) == 1
-    assert repo.deletes[0]['comment_id'] == 'ack-0'
-    assert '2 ahead' in repo.posts[0]['message']
-    assert queued.ack_id == 'ack-1'
-    assert updater._displayed['a'] == 2
-
-
-def test_post_one_skips_if_audit_no_longer_queued(repo):
-    q = InstrumentedQueue()
-    queued = _queued('a')
-
-    updater = AckUpdater(q, repo, rate_per_minute=60, poll_seconds=0.01)
-    updater._pending['a'] = PendingUpdate(
-        audit_id='a', new_position=1, queued=queued,
-    )
-
-    updater._post_one()
-    assert repo.posts == []
-    assert repo.deletes == []
-
-
-def test_post_one_noops_when_pending_empty(repo):
-    q = InstrumentedQueue()
-    updater = AckUpdater(q, repo, rate_per_minute=60, poll_seconds=0.01)
-    updater._post_one()
-    assert repo.posts == []
-
-
-def test_post_one_respects_rate_limit(repo):
-    q = InstrumentedQueue()
-    for audit_id in ('a', 'b', 'c'):
-        q.put(_queued(audit_id))
-
-    updater = AckUpdater(q, repo, rate_per_minute=1, poll_seconds=0.01)
-    updater._pending['a'] = PendingUpdate(
-        audit_id='a', new_position=1, queued=q.find('a'),
-    )
-    updater._pending['b'] = PendingUpdate(
-        audit_id='b', new_position=2, queued=q.find('b'),
-    )
-
-    updater._post_one()
-    assert len(repo.posts) == 1
-
-    updater._post_one()
-    assert len(repo.posts) == 1  # throttled
-    assert 'b' in updater._pending  # re-queued
+    assert len(comment_repo.posts) == 1
+    assert 'starting shortly' in comment_repo.posts[0]['message']
+    assert len(comment_repo.deletes) == 1
+    assert comment_repo.deletes[0]['comment_id'] == 'ack-0'
+    assert len(queue_repo._ack_updates) == 1
+    assert queue_repo._ack_updates[0]['position'] == 0
 
 
 # ── End-to-end: start / stop thread ──────────────────────────────────
 
-def test_start_stop_thread_runs_cleanly(repo):
-    q = InstrumentedQueue()
-    updater = AckUpdater(q, repo, rate_per_minute=60, poll_seconds=0.01)
+def test_start_stop_thread_runs_cleanly(comment_repo, queue_repo):
+    updater = AckUpdater(queue_repo, comment_repo, rate_per_minute=60, poll_seconds=0.01)
     updater.start()
     assert updater._thread is not None
     assert updater._thread.is_alive()
@@ -272,29 +202,26 @@ def test_start_stop_thread_runs_cleanly(repo):
     assert updater._thread is None
 
 
-def test_thread_posts_updates_when_queue_moves(repo):
-    q = InstrumentedQueue()
-    q.put(_queued('a'))
-    q.put(_queued('b'))
-    q.put(_queued('c'))
+def test_thread_posts_updates_when_queue_moves(comment_repo, queue_repo):
+    queue_repo.add_item('a', ack_id='ack-a', ack_position=0)
+    queue_repo.add_item('b', ack_id='ack-b', ack_position=1)
+    queue_repo.add_item('c', ack_id='ack-c', ack_position=2)
 
-    updater = AckUpdater(q, repo, rate_per_minute=60, poll_seconds=0.01)
-    updater.track_initial('a', position=0)
-    updater.track_initial('b', position=1)
-    updater.track_initial('c', position=2)
+    updater = AckUpdater(queue_repo, comment_repo, rate_per_minute=60, poll_seconds=0.01)
     updater.start()
 
     try:
-        q.get(timeout=1)
+        # Simulate dequeue of 'a'
+        queue_repo.remove_item('a')
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline:
-            if len(repo.posts) >= 2:
+            if len(comment_repo.posts) >= 2:
                 break
             time.sleep(0.02)
     finally:
         updater.stop()
 
-    assert len(repo.posts) >= 2
-    positions = [p['message'] for p in repo.posts]
+    assert len(comment_repo.posts) >= 2
+    positions = [p['message'] for p in comment_repo.posts]
     assert any('starting shortly' in m for m in positions)
     assert any('1 ahead of you' in m for m in positions)

@@ -1,12 +1,32 @@
 services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: figwatch
+      POSTGRES_USER: figwatch
+      POSTGRES_PASSWORD: figwatch
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U figwatch"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
   figwatch:
     build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${FIGWATCH_PORT:-8080}:${FIGWATCH_PORT:-8080}"
     environment:
       # Required
       - FIGMA_PAT=${FIGMA_PAT}
       - FIGWATCH_WEBHOOK_PASSCODE=${FIGWATCH_WEBHOOK_PASSCODE}
+      - DATABASE_URL=postgresql://figwatch:figwatch@postgres:5432/figwatch
       # AI provider — set one (or both if you switch models)
       - ANTHROPIC_API_KEY
       - GOOGLE_API_KEY
@@ -22,3 +42,6 @@ services:
       # Optional: mount custom skill files
       - ./custom-skills:/app/custom-skills
     restart: unless-stopped
+
+volumes:
+  pgdata:

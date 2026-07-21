@@ -11,7 +11,7 @@ FigWatch has a single bounded context — **Comment Auditing** — with a clear 
 - `WorkItem` namedtuple acts as an entity carrying audit identity
 - `match_trigger()` is a pure domain function
 - `AIProvider` Protocol defines a port for AI infrastructure
-- `QueuedItem` dataclass wraps `WorkItem` with queue metadata
+- `QueuedItem` dataclass wraps `WorkItem` with queue metadata (since replaced by `AuditQueueRepository`)
 - Status constants (`STATUS_LIVE`, `STATUS_DETECTED`, etc.) represent an implicit state machine
 
 However, several concerns are mixed across layers:
@@ -58,7 +58,7 @@ This is appropriate because:
 
 **What stays out of the aggregate:**
 - Infrastructure credentials (`pat`, API keys) — passed to repositories, never stored on domain objects
-- Queue metadata (enqueued_at, wait time) — stays in `QueuedItem`, which wraps an `Audit` reference
+- Queue metadata (enqueued_at, wait time) — managed by `AuditQueueRepository` (PostgreSQL)
 - AI provider selection (model name, claude_path) — application-layer configuration
 - Locale and reply language — runtime config passed to services, not domain state
 
@@ -207,7 +207,7 @@ Implementations live in `figwatch/providers/figma.py`, wrapping existing functio
 
 **What does NOT get a repository:**
 - AI providers — already behind the `AIProvider` Protocol. No change needed.
-- Work queue — application infrastructure, not a domain concept. `InstrumentedQueue` stays as-is.
+- Work queue — now a PostgreSQL-backed `AuditQueueRepository`, replacing the in-memory `InstrumentedQueue`.
 
 ### 7. Layer Rules
 
@@ -217,7 +217,6 @@ Implementations live in `figwatch/providers/figma.py`, wrapping existing functio
 ├──────────────────────────────────────────┤
 │  figwatch/services.py                    │  ← Application services (orchestration)
 │  figwatch/ack_updater.py                 │     Coordinates domain + infrastructure
-│  figwatch/queue_stats.py                 │
 ├──────────────────────────────────────────┤
 │  figwatch/domain.py                      │  ← Domain layer (pure, no I/O)
 │  figwatch/ports.py                       │     Aggregates, VOs, events, pure fns,
@@ -265,7 +264,7 @@ Incremental adoption in four phases. Each phase is a standalone PR that leaves t
 - Delete `WorkItem` namedtuple
 - Remove free-function fallbacks from `processor.py`
 - Remove `pat` threading through domain objects — repositories hold credentials
-- Update `QueuedItem` to wrap `Audit` instead of `WorkItem`
+- Replace `QueuedItem` with PostgreSQL-backed `AuditQueueRepository`
 - Update `watcher.py` (macOS path) to use `AuditService`
 
 ### Pattern: Before and After
