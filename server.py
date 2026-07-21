@@ -630,7 +630,8 @@ def main():
         )
         queue_repo.check_health()
     except Exception as e:
-        logger.error('database connection failed', extra={'error': str(e)})
+        logger.error('database connection failed',
+                     extra={'error': repr(e), 'type': type(e).__name__})
         sys.exit(1)
 
     comment_repo = FigmaCommentRepository(pat)
