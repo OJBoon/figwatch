@@ -83,6 +83,7 @@ from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS
 from figwatch.providers.figma import (
     FigmaCommentRepository,
     FigmaDesignDataRepository,
+    FigmaRateLimited,
     FigmaRateLimiter,
     FigmaTokenExpired,
     figma_get_retry,
@@ -264,6 +265,44 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
                         'running': f'{running_seconds:.2f}s',
                         'total': f'{total_seconds:.2f}s',
                         'attempt': queued.attempt,
+                    },
+                )
+            except FigmaRateLimited as err:
+                span.record_exception(err)
+                try:
+                    from opentelemetry.trace import StatusCode
+                    span.set_status(StatusCode.ERROR, str(err))
+                except ImportError:
+                    pass
+                logger.error(
+                    'Figma rate limited — not retrying',
+                    extra={'attempt': queued.attempt,
+                           'retry_after': err.retry_after},
+                )
+                audit_service.delete_ack(audit, ack_id)
+                try:
+                    audit_service.post_reply(
+                        audit,
+                        (
+                            f'Unable to complete this audit — the Figma API '
+                            f'rate limit has been reached. '
+                            f'Please try again later.'
+                            f'\n\n{_EM_DASH} FigWatch'
+                        ),
+                    )
+                except Exception:
+                    logger.exception('error reply post failed')
+                running_seconds = time.monotonic() - run_started_at
+                total_seconds = time.monotonic() - queued.enqueued_at
+                audit_service.dispatch_events(audit, total_seconds)
+                logger.error(
+                    '\u274c audit.failed.rate_limited',
+                    extra={
+                        'queued': f'{queued.waited_seconds:.2f}s',
+                        'running': f'{running_seconds:.2f}s',
+                        'total': f'{total_seconds:.2f}s',
+                        'attempt': queued.attempt,
+                        'retry_after': err.retry_after,
                     },
                 )
             except FigmaTokenExpired as err:

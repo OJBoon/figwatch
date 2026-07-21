@@ -36,6 +36,16 @@ _SSL_CTX = _ssl_context()
 class FigmaTokenExpired(Exception):
     """Raised when Figma returns 403 with 'Token expired'."""
 
+
+class FigmaRateLimited(Exception):
+    """Raised when Figma returns 429 with a Retry-After too large to wait."""
+
+    def __init__(self, retry_after: int):
+        self.retry_after = retry_after
+        super().__init__(
+            f'Figma API rate limited — retry after {retry_after}s'
+        )
+
 # Base64 adds ~33% overhead; cap raw bytes at 3.75 MB to stay under the 5 MB API limit.
 _MAX_IMAGE_BYTES = int(3.75 * 1024 * 1024)
 
@@ -226,7 +236,7 @@ def figma_get_retry(path, pat, retries=1, timeout=15, limiter=None):
                             extra={'path': path, 'retry_after': wait,
                                    'max': _MAX_RETRY_WAIT},
                         )
-                        return None
+                        raise FigmaRateLimited(wait) from None
                     if limiter:
                         limiter.backoff(path, wait)
                     logger.warning(
@@ -235,6 +245,16 @@ def figma_get_retry(path, pat, retries=1, timeout=15, limiter=None):
                     )
                     time.sleep(wait)
                     continue
+                if e.code == 429:
+                    try:
+                        wait = int(e.headers.get('Retry-After', '0') or 0)
+                    except Exception:
+                        wait = 0
+                    logger.error(
+                        'figma 429 — retries exhausted',
+                        extra={'path': path, 'retry_after': wait},
+                    )
+                    raise FigmaRateLimited(wait) from None
                 logger.warning('figma API error',
                                extra={'path': path, 'status': e.code})
                 return None
