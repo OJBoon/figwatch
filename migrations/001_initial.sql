@@ -21,11 +21,8 @@ CREATE TABLE audit_queue (
     trace_id        TEXT
 );
 
--- Partial index: matches the exact WHERE clause used by workers to dequeue.
-CREATE INDEX idx_audit_queue_dequeue ON audit_queue (enqueued_at)
-    WHERE status = 'queued' AND (retry_after IS NULL OR retry_after <= now());
-
--- Index for ack updater: find queued items to compute positions.
+-- Partial index for dequeue and ack updater: covers queued items ordered by enqueued_at.
+-- The retry_after filter is applied at query time (now() is not IMMUTABLE).
 CREATE INDEX idx_audit_queue_queued ON audit_queue (enqueued_at)
     WHERE status = 'queued';
 
