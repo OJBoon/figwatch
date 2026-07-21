@@ -110,13 +110,16 @@ class PgAuditQueueRepository:
             database_url,
             min_size=1,
             max_size=pool_size,
-            kwargs={'row_factory': dict_row},
+            kwargs={'row_factory': dict_row, 'autocommit': True},
         )
         if migrations_dir:
             with self._pool.connection() as conn:
+                # Migrations need explicit transaction control.
+                conn.autocommit = False
                 applied = run_migrations(conn, migrations_dir)
                 if applied:
                     logger.info('migrations applied', extra={'count': applied})
+                conn.autocommit = True
 
     def close(self) -> None:
         self._pool.close()
@@ -126,38 +129,38 @@ class PgAuditQueueRepository:
     def enqueue(self, audit: Audit, ack_id: Optional[str],
                 trace_context: Optional[dict]) -> int:
         with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                trace_id = get_trace_id(trace_context) or None
-                cur.execute("""
-                    INSERT INTO audit_queue
-                        (audit_id, audit_payload, ack_id, trace_context,
-                         user_handle, trigger_keyword, file_key, trace_id)
-                    VALUES (%(audit_id)s, %(payload)s, %(ack_id)s, %(trace)s,
-                            %(user_handle)s, %(trigger)s, %(file_key)s,
-                            %(trace_id)s)
-                """, {
-                    'audit_id': audit.audit_id,
-                    'payload': _serialize_audit(audit),
-                    'ack_id': ack_id,
-                    'trace': trace_context,
-                    'user_handle': audit.comment.user_handle,
-                    'trigger': audit.trigger_match.trigger.keyword,
-                    'file_key': audit.comment.file_key,
-                    'trace_id': trace_id,
-                })
+            trace_id = get_trace_id(trace_context) or None
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO audit_queue
+                            (audit_id, audit_payload, ack_id, trace_context,
+                             user_handle, trigger_keyword, file_key, trace_id)
+                        VALUES (%(audit_id)s, %(payload)s, %(ack_id)s, %(trace)s,
+                                %(user_handle)s, %(trigger)s, %(file_key)s,
+                                %(trace_id)s)
+                    """, {
+                        'audit_id': audit.audit_id,
+                        'payload': _serialize_audit(audit),
+                        'ack_id': ack_id,
+                        'trace': trace_context,
+                        'user_handle': audit.comment.user_handle,
+                        'trigger': audit.trigger_match.trigger.keyword,
+                        'file_key': audit.comment.file_key,
+                        'trace_id': trace_id,
+                    })
 
-                cur.execute("""
-                    SELECT count(*) AS ahead FROM audit_queue
-                    WHERE status = 'queued'
-                      AND enqueued_at < (
-                          SELECT enqueued_at FROM audit_queue
-                          WHERE audit_id = %(audit_id)s
-                      )
-                """, {'audit_id': audit.audit_id})
-                position = cur.fetchone()['ahead']
+                    cur.execute("""
+                        SELECT count(*) AS ahead FROM audit_queue
+                        WHERE status = 'queued'
+                          AND enqueued_at < (
+                              SELECT enqueued_at FROM audit_queue
+                              WHERE audit_id = %(audit_id)s
+                          )
+                    """, {'audit_id': audit.audit_id})
+                    position = cur.fetchone()['ahead']
 
                 conn.execute("NOTIFY audit_queue")
-            conn.commit()
         return position
 
     def dequeue(self, worker_id: str, timeout: float = 30.0) -> Optional[QueueRow]:
@@ -204,7 +207,6 @@ class PgAuditQueueRepository:
                 RETURNING audit_queue.*
             """, {'worker_id': worker_id})
             row = cur.fetchone()
-            conn.commit()
 
         if row is None:
             return None
@@ -225,7 +227,6 @@ class PgAuditQueueRepository:
                 SET status = 'completed', completed_at = now()
                 WHERE audit_id = %s
             """, (audit_id,))
-            conn.commit()
 
     def fail(self, audit_id: str, retry_after_seconds: Optional[int] = None) -> None:
         with self._pool.connection() as conn:
@@ -246,7 +247,6 @@ class PgAuditQueueRepository:
                     SET status = 'failed', completed_at = now()
                     WHERE audit_id = %s
                 """, (audit_id,))
-            conn.commit()
 
     # ── Ack tracking ──────────────────────────────────────────────
 
@@ -257,7 +257,6 @@ class PgAuditQueueRepository:
                 SET ack_id = %s, ack_position = %s
                 WHERE audit_id = %s
             """, (ack_id, position, audit_id))
-            conn.commit()
 
     def pending_ack_updates(self) -> list:
         with self._pool.connection() as conn, conn.cursor() as cur:
@@ -302,17 +301,14 @@ class PgAuditQueueRepository:
             return cur.fetchone() is not None
 
     def mark_comment_processed(self, comment_id: str) -> bool:
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO processed_comments (comment_id)
-                    VALUES (%s)
-                    ON CONFLICT (comment_id) DO NOTHING
-                    RETURNING comment_id
-                """, (comment_id,))
-                inserted = cur.fetchone() is not None
-            conn.commit()
-        return inserted
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO processed_comments (comment_id)
+                VALUES (%s)
+                ON CONFLICT (comment_id) DO NOTHING
+                RETURNING comment_id
+            """, (comment_id,))
+            return cur.fetchone() is not None
 
     # ── Audit history queries ────────────────────────────────────
 
@@ -345,27 +341,21 @@ class PgAuditQueueRepository:
     # ── Cleanup ───────────────────────────────────────────────────
 
     def cleanup_old_comments(self, max_age_days: int = 7) -> int:
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    DELETE FROM processed_comments
-                    WHERE processed_at < now() - make_interval(days => %s)
-                """, (max_age_days,))
-                count = cur.rowcount
-            conn.commit()
-        return count
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM processed_comments
+                WHERE processed_at < now() - make_interval(days => %s)
+            """, (max_age_days,))
+            return cur.rowcount
 
     def cleanup_old_audits(self, max_age_days: int = 7) -> int:
-        with self._pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    DELETE FROM audit_queue
-                    WHERE status IN ('completed', 'failed')
-                      AND enqueued_at < now() - make_interval(days => %s)
-                """, (max_age_days,))
-                count = cur.rowcount
-            conn.commit()
-        return count
+        with self._pool.connection() as conn, conn.cursor() as cur:
+            cur.execute("""
+                DELETE FROM audit_queue
+                WHERE status IN ('completed', 'failed')
+                  AND enqueued_at < now() - make_interval(days => %s)
+            """, (max_age_days,))
+            return cur.rowcount
 
     # ── Health check ──────────────────────────────────────────────
 
