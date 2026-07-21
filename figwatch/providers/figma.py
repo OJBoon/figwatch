@@ -51,7 +51,7 @@ _MAX_IMAGE_BYTES = int(3.75 * 1024 * 1024)
 
 # Cap how long a worker will sleep on a 429 Retry-After. Figma can send
 # multi-day values for starter-tier files; sleeping that long blocks the worker.
-_MAX_RETRY_WAIT = 60
+_MAX_RETRY_WAIT = 86400  # 24 hours
 
 
 def urllib_quote(s):
