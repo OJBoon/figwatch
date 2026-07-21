@@ -52,15 +52,24 @@ FIGWATCH_TEAM_ID=1234567890
 GOOGLE_API_KEY=your_google_ai_key_here
 ```
 
+> **Note:** `DATABASE_URL` is set automatically by `docker-compose.yml` — you don't need to add it to `.env` unless overriding the bundled PostgreSQL instance.
+
 ### 2. Start the server
 
 ```bash
 docker compose up -d --build
 ```
 
-The server listens on port `8080` and exposes two endpoints:
+This starts two containers:
+- **PostgreSQL 18** — stores the work queue, processed comment deduplication, and audit history
+- **FigWatch** — the webhook server (waits for PostgreSQL to be healthy before starting)
+
+Database migrations are applied automatically on startup. No manual schema setup required.
+
+The server listens on port `8080` and exposes three endpoints:
 - `POST /webhook` — receives Figma webhook events
 - `GET /health` — returns `ok` (used by Docker healthcheck)
+- `GET /audits` — query audit history (see [Audit history](#audit-history) below)
 
 ### 3. Expose the server to the internet
 
@@ -133,6 +142,7 @@ All variables are documented in [`.env.example`](../.env.example) with sensible 
 | `FIGMA_PAT` | Figma Personal Access Token |
 | `FIGWATCH_WEBHOOK_PASSCODE` | Secret passphrase set when registering the webhook |
 | `FIGWATCH_TEAM_ID` | Figma team ID — needed for webhook registration |
+| `DATABASE_URL` | PostgreSQL connection string (e.g. `postgresql://user:pass@host:5432/dbname`). Set automatically by `docker-compose.yml` — only needed when using an external database. |
 | `GOOGLE_API_KEY` | Google AI API key — required when `FIGWATCH_MODEL` starts with `gemini` |
 | `ANTHROPIC_API_KEY` | Anthropic API key — required when `FIGWATCH_MODEL` is `sonnet`, `opus`, or `haiku` |
 
@@ -230,6 +240,52 @@ Key metrics:
 
 Metrics are disabled (zero overhead) when `OTEL_EXPORTER_OTLP_ENDPOINT` is not set.
 
+## Audit history
+
+FigWatch stores completed and failed audits in PostgreSQL for 7 days. Query them via the `/audits` endpoint:
+
+```bash
+# All recent audits
+curl http://localhost:8080/audits
+
+# Filter by user
+curl http://localhost:8080/audits?user=alice
+
+# Filter by status
+curl http://localhost:8080/audits?status=completed
+
+# Combine filters
+curl http://localhost:8080/audits?user=bob&status=failed&limit=10
+```
+
+Each audit includes the OTel `trace_id` for correlating with your tracing backend (Grafana, Jaeger, etc.):
+
+```json
+{
+  "audit_id": "a3f9e2d1",
+  "status": "completed",
+  "user_handle": "alice",
+  "trigger_keyword": "@ux",
+  "file_key": "abc123",
+  "enqueued_at": "2026-07-21T14:30:00+00:00",
+  "completed_at": "2026-07-21T14:30:45+00:00",
+  "attempt": 1,
+  "trace_id": "0af7651916cd43dd8448eb211c80319c"
+}
+```
+
+You can also query the database directly:
+
+```sql
+-- Audits per user in the last 24 hours
+SELECT user_handle, count(*) AS total,
+       count(*) FILTER (WHERE status = 'completed') AS succeeded
+FROM audit_queue
+WHERE enqueued_at > now() - interval '1 day'
+GROUP BY user_handle
+ORDER BY total DESC;
+```
+
 ## Troubleshooting
 
 **`skip: no node_id`**
@@ -242,7 +298,7 @@ The comment text doesn't contain a recognised trigger word. The server logs show
 `FIGWATCH_FILES` is set and the comment came from a different file. Either add the file to the allowlist or clear `FIGWATCH_FILES` to handle all team files.
 
 **`skip: already processed`**
-Figma retries webhook delivery if your server doesn't respond quickly enough. FigWatch deduplicates by comment ID, so this is harmless.
+Figma retries webhook delivery if your server doesn't respond quickly enough. FigWatch deduplicates by comment ID in PostgreSQL, so this is harmless.
 
 **`403 Forbidden` on webhook delivery**
 The passcode in the registered webhook doesn't match `FIGWATCH_WEBHOOK_PASSCODE`. Re-register the webhook (see below) with the correct passcode.
@@ -263,7 +319,8 @@ The free tier has a token-per-minute limit. FigWatch retries once after the sugg
 
 **Container exits immediately**
 - Check logs: `docker compose logs figwatch`
-- Most common cause: missing required env vars (`FIGMA_PAT`, `FIGWATCH_WEBHOOK_PASSCODE`, `FIGWATCH_TEAM_ID`, AI key)
+- Most common cause: missing required env vars (`FIGMA_PAT`, `FIGWATCH_WEBHOOK_PASSCODE`, `DATABASE_URL`, AI key)
+- If `database connection failed`: ensure PostgreSQL is running and reachable at the `DATABASE_URL`
 
 ## Example production deployment
 
@@ -296,4 +353,10 @@ curl -X DELETE https://api.figma.com/v2/webhooks/WEBHOOK_ID \
 
 ```bash
 docker compose down
+```
+
+PostgreSQL data is stored in the `pgdata` Docker volume and persists across restarts. To fully reset the database:
+
+```bash
+docker compose down -v
 ```
