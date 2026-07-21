@@ -36,6 +36,7 @@ Environment variables:
   FIGWATCH_SKIP_TOKEN_CHECK   Skip Figma token validation at startup (for CI)
   FIGWATCH_FIGMA_PLAN        Figma plan: starter, professional, organization, enterprise
   FIGWATCH_FIGMA_SEAT        Figma seat type: dev, view (default: dev; ignored for starter)
+  FIGWATCH_BASE_URL          Public base URL for feedback links (optional; omit to disable)
 
   Observability (optional):
   OTEL_EXPORTER_OTLP_ENDPOINT   OTel collector endpoint (metrics disabled if unset)
@@ -59,6 +60,12 @@ if _repo_root not in sys.path:
 
 from figwatch.ack_updater import AckUpdater
 from figwatch.domain import Audit, Comment, match_trigger
+from figwatch.feedback import (
+    THANK_YOU_HTML,
+    parse_feedback_params,
+    render_form,
+    save_feedback,
+)
 from figwatch.log_context import (
     clear_audit_context,
     new_audit_id,
@@ -76,6 +83,7 @@ from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS
 from figwatch.providers.figma import (
     FigmaCommentRepository,
     FigmaDesignDataRepository,
+    FigmaRateLimited,
     FigmaRateLimiter,
     FigmaTokenExpired,
     figma_get_retry,
@@ -259,6 +267,44 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
                         'attempt': queued.attempt,
                     },
                 )
+            except FigmaRateLimited as err:
+                span.record_exception(err)
+                try:
+                    from opentelemetry.trace import StatusCode
+                    span.set_status(StatusCode.ERROR, str(err))
+                except ImportError:
+                    pass
+                logger.error(
+                    'Figma rate limited — not retrying',
+                    extra={'attempt': queued.attempt,
+                           'retry_after': err.retry_after},
+                )
+                audit_service.delete_ack(audit, ack_id)
+                try:
+                    audit_service.post_reply(
+                        audit,
+                        (
+                            f'Unable to complete this audit — the Figma API '
+                            f'rate limit has been reached. '
+                            f'Please try again later.'
+                            f'\n\n{_EM_DASH} FigWatch'
+                        ),
+                    )
+                except Exception:
+                    logger.exception('error reply post failed')
+                running_seconds = time.monotonic() - run_started_at
+                total_seconds = time.monotonic() - queued.enqueued_at
+                audit_service.dispatch_events(audit, total_seconds)
+                logger.error(
+                    '\u274c audit.failed.rate_limited',
+                    extra={
+                        'queued': f'{queued.waited_seconds:.2f}s',
+                        'running': f'{running_seconds:.2f}s',
+                        'total': f'{total_seconds:.2f}s',
+                        'attempt': queued.attempt,
+                        'retry_after': err.retry_after,
+                    },
+                )
             except FigmaTokenExpired as err:
                 record_token_expired()
                 span.record_exception(err)
@@ -360,6 +406,9 @@ def _make_handler(pat, passcode, allowed_file_keys,
         def do_GET(self):
             if self.path == '/health':
                 self._respond(200, 'ok')
+            elif self.path.startswith('/feedback'):
+                params = parse_feedback_params(self.path)
+                self._respond_html(200, render_form(params))
             else:
                 self._respond(404, 'Not found')
 
@@ -367,6 +416,10 @@ def _make_handler(pat, passcode, allowed_file_keys,
             # Each request starts with a fresh context — worker threads will
             # re-set their own when they pick up the work item.
             clear_audit_context()
+
+            if self.path == '/feedback':
+                self._handle_feedback()
+                return
 
             if self.path != '/webhook':
                 self._respond(404, 'Not found')
@@ -488,10 +541,45 @@ def _make_handler(pat, passcode, allowed_file_keys,
 
                 self._respond(200, 'Queued')
 
+        def _handle_feedback(self):
+            from urllib.parse import parse_qs
+            try:
+                length = int(self.headers.get('Content-Length', 0))
+                body = self.rfile.read(length).decode()
+                fields = parse_qs(body)
+                rating_raw = fields.get('rating', [''])[0]
+                if not rating_raw or not rating_raw.isdigit():
+                    self._respond(400, 'Rating is required')
+                    return
+                rating = int(rating_raw)
+                if rating < 1 or rating > 5:
+                    self._respond(400, 'Rating must be 1-5')
+                    return
+                save_feedback(
+                    audit_id=fields.get('audit_id', [''])[0],
+                    skill=fields.get('skill', [''])[0],
+                    attempt=fields.get('attempt', [''])[0],
+                    trace_id=fields.get('trace_id', [''])[0],
+                    rating=rating,
+                    comment=fields.get('comment', [''])[0],
+                )
+                self._respond_html(200, THANK_YOU_HTML)
+            except Exception:
+                logger.exception('feedback submission failed')
+                self._respond(500, 'Internal error')
+
         def _respond(self, code, message):
             body = message.encode()
             self.send_response(code)
             self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _respond_html(self, code, html):
+            body = html.encode()
+            self.send_response(code)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -607,6 +695,12 @@ def main():
                       extra={'path': skills_dir})
         sys.exit(1)
 
+    base_url = os.environ.get('FIGWATCH_BASE_URL', '').strip()
+    if base_url and not base_url.startswith(('http://', 'https://')):
+        logger.error('FIGWATCH_BASE_URL must start with http:// or https://',
+                     extra={'value': base_url})
+        sys.exit(1)
+
     init_metrics()
     init_tracing()
 
@@ -619,6 +713,7 @@ def main():
     audit_config = AuditConfig(
         model=model, claude_path=claude_path,
         reply_lang='en', locale=locale,
+        base_url=base_url,
     )
     audit_service = AuditService(comment_repo, design_repo, audit_config, trigger_config)
 

@@ -403,7 +403,8 @@ def execute_skill(audit, *, config, design_repo):
                 if usage:
                     span.set_attribute('ai.tokens', usage)
         header = f'\U0001f5e3\ufe0f {trigger_kw} Audit \u2014 {frame_name}'
-        signoff = f'\u2014 FigWatch ({provider.model_id}){format_trace_line()}'
+        trace = '' if config.base_url else format_trace_line()
+        signoff = f'\u2014 FigWatch ({provider.model_id}){trace}'
         return f'{header}\n\n{reply}\n\n{signoff}'
     finally:
         for key in ['screenshot', 'node_tree']:

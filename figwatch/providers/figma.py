@@ -36,8 +36,22 @@ _SSL_CTX = _ssl_context()
 class FigmaTokenExpired(Exception):
     """Raised when Figma returns 403 with 'Token expired'."""
 
+
+class FigmaRateLimited(Exception):
+    """Raised when Figma returns 429 with a Retry-After too large to wait."""
+
+    def __init__(self, retry_after: int):
+        self.retry_after = retry_after
+        super().__init__(
+            f'Figma API rate limited — retry after {retry_after}s'
+        )
+
 # Base64 adds ~33% overhead; cap raw bytes at 3.75 MB to stay under the 5 MB API limit.
 _MAX_IMAGE_BYTES = int(3.75 * 1024 * 1024)
+
+# Cap how long a worker will sleep on a 429 Retry-After. Figma can send
+# multi-day values for starter-tier files; sleeping that long blocks the worker.
+_MAX_RETRY_WAIT = 86400  # 24 hours
 
 
 def urllib_quote(s):
@@ -179,6 +193,22 @@ def figma_delete(path, pat):
     _make_request(f'{FIGMA_API}{path}', pat, method='DELETE')
 
 
+def _parse_rate_limit_headers(headers):
+    """Extract rate-limit info from Figma 429 response headers."""
+    def _int(key):
+        try:
+            return int(headers.get(key, '') or 0)
+        except (ValueError, TypeError):
+            return 0
+    return {
+        'retry_after': _int('Retry-After'),
+        'rate_limit_type': headers.get('X-Figma-Rate-Limit-Type', ''),
+        'rate_limit': _int('X-RateLimit-Limit'),
+        'rate_limit_remaining': _int('X-RateLimit-Remaining'),
+        'rate_limit_reset': _int('X-RateLimit-Reset'),
+    }
+
+
 def figma_get_retry(path, pat, retries=1, timeout=15, limiter=None):
     """GET a Figma API endpoint with retry on 429. Returns parsed JSON or None.
 
@@ -210,17 +240,23 @@ def figma_get_retry(path, pat, retries=1, timeout=15, limiter=None):
                 span.set_attribute('figma.status_code', e.code)
                 span.set_attribute('figma.retry_count', attempt)
                 _check_token_expired(e)
-                if e.code == 429 and attempt < retries:
-                    try:
-                        wait = int(e.headers.get('Retry-After', '0') or 0)
-                    except Exception:
-                        wait = 0
-                    wait = max(wait, 2)
+                if e.code == 429:
+                    rl = _parse_rate_limit_headers(e.headers)
+                    wait = max(rl['retry_after'], 2)
+                    if wait > _MAX_RETRY_WAIT or attempt >= retries:
+                        reason = ('Retry-After too large'
+                                  if wait > _MAX_RETRY_WAIT
+                                  else 'retries exhausted')
+                        logger.error(
+                            f'figma 429 — {reason}',
+                            extra={'path': path, **rl},
+                        )
+                        raise FigmaRateLimited(wait) from None
                     if limiter:
                         limiter.backoff(path, wait)
                     logger.warning(
                         'figma 429 — retrying',
-                        extra={'path': path, 'retry_in_seconds': wait},
+                        extra={'path': path, **rl},
                     )
                     time.sleep(wait)
                     continue
@@ -440,6 +476,10 @@ def fetch_figma_data(required_data, file_key, node_id, pat, limiter=None):
             for key, future in futures.items():
                 try:
                     result[key] = future.result()
+                except FigmaRateLimited:
+                    raise
+                except FigmaTokenExpired:
+                    raise
                 except Exception:
                     result[key] = None
 

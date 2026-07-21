@@ -5,9 +5,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 from figwatch.domain import Audit, AuditCompleted, AuditFailed, AuditResult
+from figwatch.feedback import build_feedback_url
+from figwatch.log_context import get_audit_context
 from figwatch.ports import CommentRepository, DesignDataRepository
 from figwatch.processor import clean_reply
-from figwatch.tracing import get_tracer
+from figwatch.tracing import get_trace_id, get_tracer
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +21,7 @@ class AuditConfig:
     claude_path: str
     reply_lang: str
     locale: str
+    base_url: str = ''
 
 
 class AuditService:
@@ -100,11 +103,38 @@ class AuditService:
                 design_repo=self._design,
             )
             cleaned = clean_reply(response, self._trigger_config)
+            feedback_line = self._build_feedback_line(audit)
+            if feedback_line:
+                cleaned = cleaned + feedback_line
             audit.complete(AuditResult(reply_text=cleaned))
             return cleaned
         except Exception as err:
             audit.fail(str(err))
             raise
+
+    def _build_feedback_line(self, audit: Audit) -> str:
+        """Build feedback URL line, appended after truncation to avoid being cut."""
+        base_url = self._config.base_url
+        if not base_url:
+            logger.debug('feedback link skipped — FIGWATCH_BASE_URL not set')
+            return ''
+        ctx = get_audit_context()
+        skill = audit.trigger_match.trigger.skill_ref
+        attempt = ctx.get('attempt', 1)
+        trace_id = get_trace_id()
+        url = build_feedback_url(
+            base_url,
+            audit_id=audit.audit_id,
+            skill=skill,
+            attempt=attempt,
+            trace_id=trace_id,
+        )
+        logger.debug(
+            'feedback link built',
+            extra={'url': url, 'audit_id': audit.audit_id,
+                   'skill': skill, 'attempt': attempt},
+        )
+        return f'\nRate this response: {url}'
 
     def dispatch_events(self, audit: Audit, duration: float) -> None:
         """Collect and dispatch domain events for metrics/logging."""
