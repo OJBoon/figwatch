@@ -12,6 +12,7 @@ server = [
     "opentelemetry-api",
     "opentelemetry-sdk",
     "opentelemetry-exporter-otlp-proto-grpc",
+    "psycopg[binary,pool]",
 ]
 # pip install -e ".[dev]"  — installs test dependencies
 dev = [

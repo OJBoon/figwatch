@@ -37,6 +37,9 @@ Environment variables:
   FIGWATCH_FIGMA_PLAN        Figma plan: starter, professional, organization, enterprise
   FIGWATCH_FIGMA_SEAT        Figma seat type: dev, view (default: dev; ignored for starter)
 
+  Database:
+  DATABASE_URL                PostgreSQL connection string (required)
+
   Observability (optional):
   OTEL_EXPORTER_OTLP_ENDPOINT   OTel collector endpoint (metrics disabled if unset)
 """
@@ -81,11 +84,10 @@ from figwatch.providers.figma import (
     figma_get_retry,
     validate_token,
 )
-from figwatch.queue_stats import InstrumentedQueue, QueuedItem
+from figwatch.providers.pg import PgAuditQueueRepository
 from figwatch.services import AuditConfig, AuditService
 from figwatch.tracing import format_trace_line, get_tracer, init_tracing
 from figwatch.trigger_config import load_trigger_config
-from figwatch.watcher import load_processed, save_processed
 
 logger = logging.getLogger(__name__)
 
@@ -186,182 +188,177 @@ def _run_audit(audit, ack_id, audit_service):
     logger.info('reply posted', extra={'reply_to': audit.reply_to_id})
 
 
-def _worker_loop(work_queue: InstrumentedQueue, stop_event,
-                 ack_updater: AckUpdater, audit_service: AuditService):
-    retry_timers: list[threading.Timer] = []
+def _worker_loop(queue_repo, stop_event, audit_service: AuditService, worker_id: str):
     while not stop_event.is_set():
-        queued = work_queue.get(timeout=1)
-        if queued is None:
-            if stop_event.is_set():
-                break
+        row = queue_repo.dequeue(worker_id, timeout=5.0)
+        if row is None:
             continue
 
-        # Stop the ack updater from touching this item's ack. Do this
-        # BEFORE reading ack_id so we can't race with an in-flight update.
-        ack_updater.cancel(queued.audit_id)
-
-        audit = queued.audit
+        audit = row.audit
         trigger_kw = audit.trigger_match.trigger.keyword
-        ack_id = queued.ack_id
+        ack_id = row.ack_id
         run_started_at = time.monotonic()
-
-        # Restore trace context propagated from the webhook handler thread.
-        otel_token = None
-        try:
-            from opentelemetry import context as otel_context
-            if queued.trace_context is not None:
-                otel_token = otel_context.attach(queued.trace_context)
-        except ImportError:
-            pass
+        waited_seconds = time.time() - row.enqueued_at
 
         token = set_audit_context(
-            audit=queued.audit_id,
+            audit=row.audit_id,
             trigger=trigger_kw,
             node=audit.comment.node_id,
             file=audit.comment.file_key,
-            attempt=queued.attempt,
+            attempt=row.attempt,
         )
         tracer = get_tracer()
         try:
-          with tracer.start_as_current_span('audit', attributes={
-              'audit.id': queued.audit_id,
-              'audit.file_key': audit.comment.file_key,
-              'audit.node_id': audit.comment.node_id,
-              'audit.trigger': trigger_kw,
-          }) as span:
-            stats = work_queue.stats()
-            logger.info(
-                'queue.dequeued',
-                extra={'depth': stats.depth, 'waited': f'{queued.waited_seconds:.2f}s'},
-            )
-
-            ack_id = audit_service.update_ack(
-                audit, ack_id,
-                (
-                    f'\u23f3 Running {trigger_kw.lstrip("@")} audit\u2026'
-                    f'{format_trace_line()}'
-                ),
-            )
-
-            try:
-                _run_audit(audit, ack_id, audit_service)
-                ack_id = None
-
-                running_seconds = time.monotonic() - run_started_at
-                total_seconds = time.monotonic() - queued.enqueued_at
-                audit_service.dispatch_events(audit, total_seconds)
+            with tracer.start_as_current_span('audit', attributes={
+                'audit.id': row.audit_id,
+                'audit.file_key': audit.comment.file_key,
+                'audit.node_id': audit.comment.node_id,
+                'audit.trigger': trigger_kw,
+            }) as span:
+                depth = queue_repo.queue_depth()
                 logger.info(
-                    '\u2705 audit.completed',
-                    extra={
-                        'queued': f'{queued.waited_seconds:.2f}s',
-                        'running': f'{running_seconds:.2f}s',
-                        'total': f'{total_seconds:.2f}s',
-                        'attempt': queued.attempt,
-                    },
+                    'queue.dequeued',
+                    extra={'depth': depth, 'waited': f'{waited_seconds:.2f}s'},
                 )
-            except FigmaTokenExpired as err:
-                record_token_expired()
-                span.record_exception(err)
+
+                ack_id = audit_service.update_ack(
+                    audit, ack_id,
+                    (
+                        f'\u23f3 Running {trigger_kw.lstrip("@")} audit\u2026'
+                        f'{format_trace_line()}'
+                    ),
+                )
+
                 try:
-                    from opentelemetry.trace import StatusCode
-                    span.set_status(StatusCode.ERROR, str(err))
-                except ImportError:
-                    pass
-                logger.error(
-                    'Figma token expired — cannot retry',
-                    extra={'attempt': queued.attempt},
-                )
-                audit_service.delete_ack(audit, ack_id)
-                try:
-                    audit_service.post_reply(
-                        audit,
-                        (
-                            f'Something went wrong and we are not able to fulfil '
-                            f'your request.'
-                            f'{format_trace_line()}\n\n{_EM_DASH} FigWatch'
-                        ),
-                    )
-                except Exception:
-                    logger.exception('error reply post failed')
-                running_seconds = time.monotonic() - run_started_at
-                total_seconds = time.monotonic() - queued.enqueued_at
-                audit_service.dispatch_events(audit, total_seconds)
-                logger.error(
-                    '\u274c audit.failed',
-                    extra={
-                        'queued': f'{queued.waited_seconds:.2f}s',
-                        'running': f'{running_seconds:.2f}s',
-                        'total': f'{total_seconds:.2f}s',
-                        'attempt': queued.attempt,
-                        'last_error': str(err),
-                    },
-                )
-            except Exception as err:
-                span.record_exception(err)
-                logger.warning(
-                    'audit attempt failed',
-                    extra={'attempt': queued.attempt, 'error': str(err)},
-                )
-                try:
-                    comment_alive = audit_service.comment_exists(audit)
-                except Exception:
-                    logger.warning('comment_exists check failed — assuming alive')
-                    comment_alive = True
-                if not comment_alive:
-                    logger.info('trigger comment deleted — abandoning audit')
-                    audit_service.delete_ack(audit, ack_id)
+                    _run_audit(audit, ack_id, audit_service)
+                    ack_id = None
+
                     running_seconds = time.monotonic() - run_started_at
-                    total_seconds = time.monotonic() - queued.enqueued_at
+                    total_seconds = waited_seconds + running_seconds
+                    queue_repo.complete(row.audit_id)
                     audit_service.dispatch_events(audit, total_seconds)
-                elif stop_event.is_set():
-                    logger.info('shutdown — not scheduling retry')
-                else:
-                    backoff = _BACKOFFS[min(queued.attempt - 1, len(_BACKOFFS) - 1)]
-                    ack_id = audit_service.update_ack(
-                        audit, ack_id,
-                        (
-                            f'\u23f3 Something went wrong, trying again in {backoff}s '
-                            f'(attempt {queued.attempt})\u2026'
-                            f'{format_trace_line()}'
-                        ),
+                    logger.info(
+                        '\u2705 audit.completed',
+                        extra={
+                            'queued': f'{waited_seconds:.2f}s',
+                            'running': f'{running_seconds:.2f}s',
+                            'total': f'{total_seconds:.2f}s',
+                            'attempt': row.attempt,
+                        },
                     )
-                    audit.collect_events()  # drain stale events before retry
-                    queued.attempt += 1
-                    queued.ack_id = ack_id
-
-                    def _requeue(item=queued):
-                        work_queue.put(item)
-
-                    timer = threading.Timer(backoff, _requeue)
-                    timer.daemon = True
-                    timer.start()
-                    retry_timers = [t for t in retry_timers if t.is_alive()]
-                    retry_timers.append(timer)
+                except FigmaTokenExpired as err:
+                    record_token_expired()
+                    span.record_exception(err)
+                    try:
+                        from opentelemetry.trace import StatusCode
+                        span.set_status(StatusCode.ERROR, str(err))
+                    except ImportError:
+                        pass
+                    logger.error(
+                        'Figma token expired — cannot retry',
+                        extra={'attempt': row.attempt},
+                    )
+                    audit_service.delete_ack(audit, ack_id)
+                    try:
+                        audit_service.post_reply(
+                            audit,
+                            (
+                                f'Something went wrong and we are not able to fulfil '
+                                f'your request.'
+                                f'{format_trace_line()}\n\n{_EM_DASH} FigWatch'
+                            ),
+                        )
+                    except Exception:
+                        logger.exception('error reply post failed')
+                    running_seconds = time.monotonic() - run_started_at
+                    total_seconds = waited_seconds + running_seconds
+                    queue_repo.fail(row.audit_id)
+                    audit_service.dispatch_events(audit, total_seconds)
+                    logger.error(
+                        '\u274c audit.failed',
+                        extra={
+                            'queued': f'{waited_seconds:.2f}s',
+                            'running': f'{running_seconds:.2f}s',
+                            'total': f'{total_seconds:.2f}s',
+                            'attempt': row.attempt,
+                            'last_error': str(err),
+                        },
+                    )
+                except Exception as err:
+                    span.record_exception(err)
+                    logger.warning(
+                        'audit attempt failed',
+                        extra={'attempt': row.attempt, 'error': str(err)},
+                    )
+                    try:
+                        comment_alive = audit_service.comment_exists(audit)
+                    except Exception:
+                        logger.warning('comment_exists check failed — assuming alive')
+                        comment_alive = True
+                    if not comment_alive:
+                        logger.info('trigger comment deleted — abandoning audit')
+                        audit_service.delete_ack(audit, ack_id)
+                        running_seconds = time.monotonic() - run_started_at
+                        total_seconds = waited_seconds + running_seconds
+                        queue_repo.fail(row.audit_id)
+                        audit_service.dispatch_events(audit, total_seconds)
+                    elif stop_event.is_set():
+                        logger.info('shutdown — not scheduling retry')
+                    else:
+                        backoff = _BACKOFFS[min(row.attempt - 1, len(_BACKOFFS) - 1)]
+                        ack_id = audit_service.update_ack(
+                            audit, ack_id,
+                            (
+                                f'\u23f3 Something went wrong, trying again in {backoff}s '
+                                f'(attempt {row.attempt})\u2026'
+                                f'{format_trace_line()}'
+                            ),
+                        )
+                        queue_repo.fail(row.audit_id, retry_after_seconds=backoff)
         except Exception:
             logger.exception('worker crashed unexpectedly')
         finally:
-            work_queue.task_done()
             reset_audit_context(token)
-            if otel_token is not None:
-                try:
-                    from opentelemetry import context as otel_context
-                    otel_context.detach(otel_token)
-                except ImportError:
-                    pass
 
 
 # ── HTTP handler ───────────────────────────────────────────────────────
 
 def _make_handler(pat, passcode, allowed_file_keys,
-                  trigger_config, processed_ids, processed_lock, work_queue,
-                  ack_updater: AckUpdater,
+                  trigger_config, queue_repo,
                   audit_service: AuditService, limiter=None):
     class WebhookHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == '/health':
                 self._respond(200, 'ok')
+            elif self.path.startswith('/audits'):
+                self._handle_audits()
             else:
                 self._respond(404, 'Not found')
+
+        def _handle_audits(self):
+            from urllib.parse import parse_qs, urlparse
+            params = parse_qs(urlparse(self.path).query)
+            status = params.get('status', [None])[0]
+            user = params.get('user', [None])[0]
+            limit = min(int(params.get('limit', ['50'])[0]), 200)
+
+            rows = queue_repo.query_audits(
+                status=status, user_handle=user, limit=limit,
+            )
+            result = []
+            for row in rows:
+                entry = dict(row)
+                for key in ('enqueued_at', 'completed_at'):
+                    if entry.get(key):
+                        entry[key] = entry[key].isoformat()
+                result.append(entry)
+
+            body = json.dumps(result, indent=2).encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def do_POST(self):
             # Each request starts with a fresh context — worker threads will
@@ -407,12 +404,10 @@ def _make_handler(pat, passcode, allowed_file_keys,
                 extra={'file': file_key, 'comment': comment_id},
             )
 
-            with processed_lock:
-                if comment_id in processed_ids:
-                    logger.debug('skip — already processed')
-                    self._respond(200, 'Already processed')
-                    return
-                processed_ids.add(comment_id)
+            if queue_repo.is_comment_processed(str(comment_id)):
+                logger.debug('skip — already processed')
+                self._respond(200, 'Already processed')
+                return
 
             tracer = get_tracer()
             with tracer.start_as_current_span('webhook.receive', attributes={
@@ -430,7 +425,10 @@ def _make_handler(pat, passcode, allowed_file_keys,
                     self._respond(200, reason)
                     return
 
-                save_processed(processed_ids)
+                if not queue_repo.mark_comment_processed(str(comment_id)):
+                    logger.debug('skip — already processed (race)')
+                    self._respond(200, 'Already processed')
+                    return
 
                 trigger_kw = audit.trigger_match.trigger.keyword
 
@@ -448,7 +446,7 @@ def _make_handler(pat, passcode, allowed_file_keys,
                     extra={'user': audit.comment.user_handle},
                 )
 
-                ahead = work_queue.depth
+                ahead = queue_repo.queue_depth()
                 if ahead == 0:
                     queue_msg = (
                         f'\u23f3 {trigger_kw.lstrip("@")} audit queued '
@@ -464,27 +462,9 @@ def _make_handler(pat, passcode, allowed_file_keys,
 
                 ack_id = audit_service.post_ack(audit, queue_msg)
 
-                trace_ctx = None
-                try:
-                    from opentelemetry import context as otel_context
-                    trace_ctx = otel_context.get_current()
-                except ImportError:
-                    pass
-
-                queued = QueuedItem(
-                    audit=audit,
-                    ack_id=ack_id,
-                    audit_id=audit_id,
-                    trace_context=trace_ctx,
-                )
-                work_queue.put(queued)
-
-                # Record initial displayed position so the updater only fires
-                # when the position actually changes.
-                ack_updater.track_initial(audit_id, position=ahead)
-
-                stats = work_queue.stats()
-                logger.info('queue.enqueued', extra={'depth': stats.depth})
+                queue_repo.enqueue(audit, ack_id)
+                depth = queue_repo.queue_depth()
+                logger.info('queue.enqueued', extra={'depth': depth})
 
                 self._respond(200, 'Queued')
 
@@ -607,6 +587,11 @@ def main():
                       extra={'path': skills_dir})
         sys.exit(1)
 
+    database_url = os.environ.get('DATABASE_URL', '').strip()
+    if not database_url:
+        logger.error('DATABASE_URL is required')
+        sys.exit(1)
+
     init_metrics()
     init_tracing()
 
@@ -614,6 +599,19 @@ def main():
     triggers_str = ', '.join(t.get('trigger', '') for t in trigger_config)
 
     # Construct repositories and application service
+    migrations_dir = os.path.join(_repo_root, 'migrations')
+    try:
+        queue_repo = PgAuditQueueRepository(
+            database_url,
+            pool_size=worker_count + 2,
+            migrations_dir=migrations_dir,
+        )
+        queue_repo.check_health()
+    except Exception as e:
+        logger.error('database connection failed',
+                     extra={'error': repr(e), 'type': type(e).__name__})
+        sys.exit(1)
+
     comment_repo = FigmaCommentRepository(pat)
     design_repo = FigmaDesignDataRepository(pat, limiter=figma_limiter)
     audit_config = AuditConfig(
@@ -622,14 +620,30 @@ def main():
     )
     audit_service = AuditService(comment_repo, design_repo, audit_config, trigger_config)
 
-    processed_ids = load_processed()
-    processed_lock = threading.Lock()
-    work_queue = InstrumentedQueue()
-    set_queue_depth_source(lambda: work_queue.depth)
+    set_queue_depth_source(queue_repo.queue_depth)
     stop_event = threading.Event()
 
-    ack_updater = AckUpdater(work_queue, comment_repo, rate_per_minute=queue_update_rpm)
+    ack_updater = AckUpdater(queue_repo, comment_repo, rate_per_minute=queue_update_rpm)
     ack_updater.start()
+
+    # Periodic cleanup of old processed comments and completed/failed audits.
+    def _cleanup_loop():
+        while not stop_event.wait(timeout=3600):
+            try:
+                n_comments = queue_repo.cleanup_old_comments()
+                n_audits = queue_repo.cleanup_old_audits()
+                if n_comments or n_audits:
+                    logger.info('cleanup', extra={
+                        'comments_deleted': n_comments,
+                        'audits_deleted': n_audits,
+                    })
+            except Exception:
+                logger.exception('cleanup failed')
+
+    cleanup_thread = threading.Thread(
+        target=_cleanup_loop, name='figwatch-cleanup', daemon=True,
+    )
+    cleanup_thread.start()
 
     logger.info(
         '\U0001f50d figwatch starting',
@@ -645,8 +659,8 @@ def main():
     worker_threads = [
         threading.Thread(
             target=_worker_loop,
-            args=(work_queue, stop_event,
-                  ack_updater, audit_service),
+            args=(queue_repo, stop_event, audit_service,
+                  f'worker-{i}'),
             name=f'figwatch-worker-{i}',
             daemon=True,
         )
@@ -657,8 +671,7 @@ def main():
 
     handler = _make_handler(
         pat, passcode, allowed_file_keys,
-        trigger_config, processed_ids, processed_lock, work_queue,
-        ack_updater,
+        trigger_config, queue_repo,
         audit_service, limiter=figma_limiter,
     )
     server = HTTPServer(('', port), handler)
@@ -666,7 +679,7 @@ def main():
     def _shutdown(sig, frame):
         logger.info('\u23f9 shutting down — draining in-flight audits')
         stop_event.set()
-        # Workers wake via get(timeout=1) and break on stop_event — no pills needed.
+        # Workers wake via dequeue timeout and break on stop_event.
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, _shutdown)
@@ -678,6 +691,7 @@ def main():
         ack_updater.stop()
         for t in worker_threads:
             t.join(timeout=5)
+        queue_repo.close()
         logger.info('\u23f9 all workers stopped — exiting')
 
 

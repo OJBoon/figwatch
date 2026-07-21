@@ -8,6 +8,7 @@ import pytest
 _VALID_ENV = {
     'FIGMA_PAT': 'test-pat',
     'FIGWATCH_WEBHOOK_PASSCODE': 'test-passcode',
+    'DATABASE_URL': 'postgresql://test:test@localhost:5432/test',
 }
 
 
@@ -22,12 +23,14 @@ def _run_main(env):
 
     Patches everything after validation so we never bind a port or start threads.
     """
+    mock_repo = mock.MagicMock()
+    mock_repo.queue_depth.return_value = 0
     with mock.patch.dict('os.environ', env, clear=True), \
          mock.patch('server.configure_logging'), \
          mock.patch('server.init_metrics'), \
          mock.patch('server.validate_token', return_value='testuser'), \
          mock.patch('server.load_trigger_config', return_value=[]), \
-         mock.patch('server.load_processed', return_value=set()), \
+         mock.patch('server.PgAuditQueueRepository', return_value=mock_repo), \
          mock.patch('server.AckUpdater'), \
          mock.patch('server.HTTPServer'), \
          mock.patch('server.threading.Thread'), \
@@ -167,3 +170,17 @@ def test_invalid_token_exits():
 
 def test_skip_token_check():
     _run_main(_env(FIGWATCH_SKIP_TOKEN_CHECK='1'))
+
+
+# ── DATABASE_URL ────────────────────────────────────────────────────
+
+
+def test_missing_database_url_exits():
+    with pytest.raises(SystemExit):
+        _run_main(_env(DATABASE_URL=''))
+
+
+def test_database_url_required():
+    env = {k: v for k, v in _VALID_ENV.items() if k != 'DATABASE_URL'}
+    with pytest.raises(SystemExit):
+        _run_main(env)

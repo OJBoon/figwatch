@@ -62,17 +62,31 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Start PostgreSQL for smoke test
+        run: |
+          docker run -d --name postgres-ci \
+            -e POSTGRES_DB=figwatch_ci \
+            -e POSTGRES_USER=ci_user \
+            -e POSTGRES_HOST_AUTH_METHOD=trust \
+            -p 5432:5432 \
+            postgres:18-alpine
+          until docker exec postgres-ci pg_isready -U ci_user; do sleep 1; done
+
       - name: Smoke test — health endpoint
         run: |
           docker run -d --name figwatch-ci \
+            --link postgres-ci:postgres \
             -e FIGMA_PAT=figd_placeholder \
             -e FIGWATCH_WEBHOOK_PASSCODE=placeholder \
             -e FIGWATCH_SKIP_TOKEN_CHECK=1 \
+            -e DATABASE_URL=postgresql://ci_user@postgres:5432/figwatch_ci \
             -p 8080:8080 \
             figwatch:ci
-          sleep 5
+          sleep 10
+          docker logs figwatch-ci
           curl -sf http://localhost:8080/health
           docker rm -f figwatch-ci
+          docker rm -f postgres-ci
 
   macos:
     name: macOS app build
