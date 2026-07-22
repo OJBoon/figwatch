@@ -457,7 +457,7 @@ def build_onboarding_view(app, deps):
     auth = deps["claude_auth"]
     if auth["ok"] and auth.get("mode") == "gateway":
         auth_name = "Claude Access"
-        auth_desc = "Connected via company account (%s)" % (auth.get("host") or "gateway")
+        auth_desc = f"Connected via gateway ({auth.get('host') or 'gateway'})"
     elif auth["ok"]:
         auth_name = "Claude Login"
         auth_desc = "Signed in to your Claude account"
