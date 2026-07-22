@@ -1531,7 +1531,7 @@ class FigWatch(NSObject):
             y += 28
 
         y += 4
-        add_lbl = _label("Add new trigger", size=11, color=NSColor.secondaryLabelColor())
+        add_lbl = _label("Add your own skill", size=11, color=NSColor.secondaryLabelColor())
         add_lbl.setFrameOrigin_((0, y))
         acc.addSubview_(add_lbl)
         y += 16
@@ -1554,14 +1554,10 @@ class FigWatch(NSObject):
         acc.addSubview_(sk_popup)
         y += 28
 
-        add_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, y, SW, 24))
-        add_btn.setTitle_("Add Trigger")
-        add_btn.setBezelStyle_(NSBezelStyleRecessed)
-        add_btn.setControlSize_(1)
-        add_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-        add_btn.setTarget_(self); add_btn.setAction_(b"doAddTriggerInline:")
+        add_btn = _pill("Add", b"doAddTriggerInline:", width=SW, height=28)
+        add_btn.setFrameOrigin_((0, y))
         acc.addSubview_(add_btn)
-        y += 28
+        y += 32
 
         self._add_trigger_kw = kw_field
         self._add_trigger_sk = sk_popup
