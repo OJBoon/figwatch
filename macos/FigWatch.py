@@ -463,7 +463,7 @@ def build_onboarding_view(app, deps):
         auth_desc = "Signed in to your Claude account"
     else:
         auth_name = "Claude Access"
-        auth_desc = "Company account or personal Claude"
+        auth_desc = "Gateway profile or personal Claude"
 
     items = [
         {
@@ -483,7 +483,7 @@ def build_onboarding_view(app, deps):
             "action": b"doClaudeAuth:",
             # When not signed in, offer both paths: company gateway (cc-switch)
             # and personal Claude login.
-            "actions": [("Company", b"doConnectGateway:"), ("Personal", b"doClaudeAuth:")],
+            "actions": [("Gateway", b"doConnectGateway:"), ("Personal", b"doClaudeAuth:")],
         },
         {
             "key": "pat",
@@ -496,60 +496,68 @@ def build_onboarding_view(app, deps):
     ]
 
     for item in items:
-        row = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 44))
+        has_actions = bool(item.get("actions")) and not item["ok"] and not item["installing"]
+        # A two-button auth row is taller so the buttons get their own line and
+        # never overlap the (long) description text.
+        row_h = 68 if has_actions else 44
+        row = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, row_h))
+
+        # desc sits above name (matching the other rows)
+        name_y, desc_y = (30, 46) if has_actions else (6, 24)
 
         if item["installing"]:
             icon = _label("\u23F3", size=14)
-            icon.setFrameOrigin_((6, 12))
+            icon.setFrameOrigin_((6, name_y + 6))
         elif item["ok"]:
             icon = _sf_symbol("checkmark.circle.fill", size=14, color=NSColor.systemGreenColor())
-            if icon: icon.setFrameOrigin_((4, 10))
+            if icon: icon.setFrameOrigin_((4, name_y + 4))
         else:
             icon = _sf_symbol("xmark.circle.fill", size=14, color=NSColor.systemRedColor())
-            if icon: icon.setFrameOrigin_((4, 10))
+            if icon: icon.setFrameOrigin_((4, name_y + 4))
 
         if icon:
             row.addSubview_(icon)
 
         nl = _label(item["name"], size=13, weight=NSFontWeightMedium)
-        nl.setFrameOrigin_((26, 6))
+        nl.setFrameOrigin_((26, name_y))
         row.addSubview_(nl)
 
         dl = _label(item["desc"], size=11, color=NSColor.secondaryLabelColor())
-        dl.setFrameOrigin_((26, 24))
+        dl.setFrameOrigin_((26, desc_y))
         row.addSubview_(dl)
 
-        if not item["ok"] and not item["installing"]:
-            actions = item.get("actions")
-            if actions:
-                # Right-aligned choice buttons (e.g. Company / Personal).
-                bw = 76
-                bx = cw - 8
-                for title, selector in reversed(actions):
-                    bx -= bw
-                    b = NSButton.alloc().initWithFrame_(NSMakeRect(bx, 8, bw, 24))
-                    b.setTitle_(title)
-                    b.setBezelStyle_(NSBezelStyleRecessed)
-                    b.setControlSize_(1)
-                    b.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-                    b.setTarget_(app)
-                    b.setAction_(selector)
-                    row.addSubview_(b)
-                    bx -= 6
-            else:
-                btn_title = "Set Up" if item["key"] == "pat" else "Install"
-                btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 70, 8, 62, 24))
-                btn.setTitle_(btn_title)
-                btn.setBezelStyle_(NSBezelStyleRecessed)
-                btn.setControlSize_(1)
-                btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-                btn.setTarget_(app)
-                btn.setAction_(item["action"])
-                row.addSubview_(btn)
+        if has_actions:
+            # Buttons on their own line along the bottom, right-aligned.
+            bw = 76
+            bx = cw - 8
+            for title, selector in reversed(item["actions"]):
+                bx -= bw
+                b = NSButton.alloc().initWithFrame_(NSMakeRect(bx, 8, bw, 24))
+                b.setTitle_(title)
+                b.setBezelStyle_(NSBezelStyleRecessed)
+                b.setControlSize_(1)
+                b.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+                b.setTarget_(app)
+                b.setAction_(selector)
+                row.addSubview_(b)
+                bx -= 6
+        elif not item["ok"] and not item["installing"]:
+            btn_title = "Set Up" if item["key"] == "pat" else "Install"
+            btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 70, name_y + 2, 62, 24))
+            btn.setTitle_(btn_title)
+            btn.setBezelStyle_(NSBezelStyleRecessed)
+            btn.setControlSize_(1)
+            btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+            btn.setTarget_(app)
+            btn.setAction_(item["action"])
+            row.addSubview_(btn)
         elif item["installing"]:
             il = _label("Installing\u2026", size=11, color=NSColor.secondaryLabelColor())
             il.setFrameOrigin_((cw - 75, 13))
             row.addSubview_(il)
+
+        root.addSubview_(row)
+        y += row_h
 
         root.addSubview_(row)
         y += 44
