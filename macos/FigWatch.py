@@ -1396,38 +1396,51 @@ class FigWatch(NSObject):
         while True:
             alert = NSAlert.alloc().init()
             alert.setMessageText_("Connect to Figma")
-            alert.setInformativeText_(
-                "Paste your Personal Access Token.\n\n"
-                "Figma \u2192 Settings \u2192 Security \u2192 Personal Access Tokens")
+            alert.setInformativeText_("Paste your Personal Access Token.")
             alert.addButtonWithTitle_("Connect")
             alert.addButtonWithTitle_("Cancel")
 
-            # Accessory (left edge aligns with the text above): a "see details
-            # here" link right under the settings path, then the token input.
-            acc_w = 340
-            acc = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 52))
+            # Accessory: the Figma settings path and a docs link as two tight,
+            # left-aligned lines (one text view keeps their left edges identical),
+            # then the token input below.
+            acc_w = 360
+            acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 80))
 
-            inp = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 24))
-            inp.setPlaceholderString_("figd_...")
-            if self._state["pat"]: inp.setStringValue_(self._state["pat"])
-            acc.addSubview_(inp)
-
-            link = NSButton.alloc().initWithFrame_(NSMakeRect(0, 30, 200, 18))
-            link.setBordered_(False)
-            link.setAttributedTitle_(
+            info = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 40))
+            info.setDrawsBackground_(False)
+            info.setEditable_(False)
+            info.setSelectable_(True)
+            info.setTextContainerInset_(NSMakeSize(0, 0))
+            info.textContainer().setLineFragmentPadding_(0)
+            body = NSMutableAttributedString.alloc().initWithString_attributes_(
+                "Figma \u2192 Settings \u2192 Security \u2192 Personal Access Tokens\n",
+                {
+                    NSFontAttributeName: NSFont.systemFontOfSize_(11),
+                    NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
+                })
+            body.appendAttributedString_(
                 NSAttributedString.alloc().initWithString_attributes_(
                     "see details here \u2197",
                     {
-                        NSForegroundColorAttributeName: NSColor.linkColor(),
                         NSFontAttributeName: NSFont.systemFontOfSize_(11),
+                        NSForegroundColorAttributeName: NSColor.linkColor(),
+                        NSLinkAttributeName: NSURL.URLWithString_(
+                            "https://developers.figma.com/docs/rest-api/"
+                            "personal-access-tokens/"),
                         NSUnderlineStyleAttributeName: 1,
-                    },
-                ))
-            link.sizeToFit()
-            link.setFrameOrigin_((-2, 30))
-            link.setTarget_(self)
-            link.setAction_(b"doOpenFigmaTokenDocs:")
-            acc.addSubview_(link)
+                    }))
+            info.textStorage().setAttributedString_(body)
+            lm = info.layoutManager(); tc = info.textContainer()
+            lm.ensureLayoutForTextContainer_(tc)
+            text_h = lm.usedRectForTextContainer_(tc).size.height
+            info.setFrame_(NSMakeRect(0, 0, acc_w, text_h))
+            acc.addSubview_(info)
+
+            inp = NSTextField.alloc().initWithFrame_(NSMakeRect(0, text_h + 10, acc_w, 24))
+            inp.setPlaceholderString_("figd_...")
+            if self._state["pat"]: inp.setStringValue_(self._state["pat"])
+            acc.addSubview_(inp)
+            acc.setFrameSize_(NSMakeSize(acc_w, text_h + 34))
 
             alert.setAccessoryView_(acc); alert.window().setInitialFirstResponder_(inp)
             r = alert.runModal()
@@ -1459,12 +1472,6 @@ class FigWatch(NSObject):
                         break
             else:
                 break
-
-    @objc.typedSelector(b"v@:@")
-    def doOpenFigmaTokenDocs_(self, sender):
-        NSWorkspace.sharedWorkspace().openURL_(
-            NSURL.URLWithString_(
-                "https://developers.figma.com/docs/rest-api/personal-access-tokens/"))
 
     @objc.typedSelector(b"v@:@")
     def doSettings_(self, sender):
