@@ -1399,16 +1399,54 @@ class FigWatch(NSObject):
         while True:
             alert = NSAlert.alloc().init()
             alert.setMessageText_("Connect to Figma")
-            alert.setInformativeText_(
-                "Paste your Personal Access Token.\n\n"
-                "Figma \u2192 Settings \u2192 Security \u2192 Personal Access Tokens")
+            alert.setInformativeText_("Paste your Personal Access Token.")
             alert.addButtonWithTitle_("Connect")
-            alert.addButtonWithTitle_("Get Token \u2197")
             alert.addButtonWithTitle_("Cancel")
-            inp = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 340, 24))
+
+            # Accessory: the settings path with an inline "see details here" link,
+            # then the token input.
+            acc_w = 340
+            acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 100))
+            ay = 0
+            path_lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(0, ay, acc_w, 32))
+            path_lbl.setStringValue_(
+                "Figma \u2192 Settings \u2192 Security \u2192 Personal Access Tokens")
+            path_lbl.setEditable_(False)
+            path_lbl.setSelectable_(False)
+            path_lbl.setBordered_(False)
+            path_lbl.setDrawsBackground_(False)
+            path_lbl.setFont_(NSFont.systemFontOfSize_(11))
+            path_lbl.setTextColor_(NSColor.secondaryLabelColor())
+            path_lbl.cell().setWraps_(True)
+            acc.addSubview_(path_lbl)
+            ay += 34
+
+            link = NSButton.alloc().initWithFrame_(NSMakeRect(0, ay, 200, 18))
+            link.setBordered_(False)
+            link.setAttributedTitle_(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    "see details here \u2197",
+                    {
+                        NSForegroundColorAttributeName: NSColor.linkColor(),
+                        NSFontAttributeName: NSFont.systemFontOfSize_(11),
+                        NSUnderlineStyleAttributeName: 1,
+                    },
+                ))
+            link.sizeToFit()
+            link.setFrameOrigin_((0, ay))
+            link.setTarget_(self)
+            link.setAction_(b"doOpenFigmaTokenDocs:")
+            acc.addSubview_(link)
+            ay += 26
+
+            inp = NSTextField.alloc().initWithFrame_(NSMakeRect(0, ay, acc_w, 24))
             inp.setPlaceholderString_("figd_...")
             if self._state["pat"]: inp.setStringValue_(self._state["pat"])
-            alert.setAccessoryView_(inp); alert.window().setInitialFirstResponder_(inp)
+            acc.addSubview_(inp)
+            ay += 24
+
+            acc.setFrameSize_(NSMakeSize(acc_w, ay))
+            alert.setAccessoryView_(acc); alert.window().setInitialFirstResponder_(inp)
             r = alert.runModal()
             if r == NSAlertFirstButtonReturn:
                 tok = inp.stringValue().strip()
@@ -1436,11 +1474,14 @@ class FigWatch(NSObject):
                     err.addButtonWithTitle_("Cancel")
                     if err.runModal() != NSAlertFirstButtonReturn:
                         break
-            elif r == NSAlertSecondButtonReturn:
-                NSWorkspace.sharedWorkspace().openURL_(
-                    NSURL.URLWithString_("https://www.figma.com/developers/api#access-tokens"))
             else:
                 break
+
+    @objc.typedSelector(b"v@:@")
+    def doOpenFigmaTokenDocs_(self, sender):
+        NSWorkspace.sharedWorkspace().openURL_(
+            NSURL.URLWithString_(
+                "https://developers.figma.com/docs/rest-api/personal-access-tokens/"))
 
     @objc.typedSelector(b"v@:@")
     def doSettings_(self, sender):
