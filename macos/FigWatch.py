@@ -425,6 +425,18 @@ def _sf_symbol(name, size=13, color=None):
     return iv
 
 
+def _emoji_icon(emoji, size=64):
+    """Render an emoji as an NSImage (used for the Settings dialog icon)."""
+    img = NSImage.alloc().initWithSize_(NSMakeSize(size, size))
+    img.lockFocus()
+    attrs = {NSFontAttributeName: NSFont.systemFontOfSize_(int(size * 0.78))}
+    text = NSAttributedString.alloc().initWithString_attributes_(emoji, attrs)
+    ts = text.size()
+    text.drawAtPoint_(NSMakePoint((size - ts.width) / 2.0, (size - ts.height) / 2.0))
+    img.unlockFocus()
+    return img
+
+
 def build_onboarding_view(app, deps):
     """Build the onboarding/setup checklist. Returns (view, height)."""
     cw = W - PAD * 2
@@ -1666,6 +1678,7 @@ class FigWatch(NSObject):
         alert = NSAlert.alloc().init()
         alert.setMessageText_("FigWatch Settings")
         alert.setInformativeText_("")
+        alert.setIcon_(_emoji_icon("📺"))
         alert.addButtonWithTitle_("Save")
         alert.addButtonWithTitle_("Cancel")
         alert.setAccessoryView_(acc)
