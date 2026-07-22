@@ -559,9 +559,6 @@ def build_onboarding_view(app, deps):
         root.addSubview_(row)
         y += row_h
 
-        root.addSubview_(row)
-        y += 44
-
     y += 4
     sep = NSBox.alloc().initWithFrame_(NSMakeRect(PAD + 4, y, cw - 8, 1))
     sep.setBoxType_(2)
