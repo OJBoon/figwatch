@@ -1588,15 +1588,44 @@ class FigWatch(NSObject):
         acc.addSubview_(tok_input)
 
         # ── AI ────────────────────────────────────────────────
-        _section("AI", "cpu")
+        gw = gateway_info()
+        conn_btn = _pill("Switch…" if gw else "Sign in…",
+                         b"doConnectGateway:" if gw else b"doClaudeAuth:",
+                         width=92, height=22)
+        conn_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+        _section("AI", "cpu", trailing_btn=conn_btn)
 
-        model_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 180, 24), False)
-        model_popup.addItemWithTitle_("Sonnet (recommended)")
-        model_popup.addItemWithTitle_("Opus (most capable)")
-        model_popup.addItemWithTitle_("Haiku (cheapest)")
-        model_map = {"sonnet": 0, "opus": 1, "haiku": 2}
-        model_popup.selectItemAtIndex_(model_map.get(self._state.get("model", "sonnet"), 0))
-        _row("Model", model_popup)
+        # Claude access status — company gateway (cc-switch) vs personal login.
+        claude_text = f"Company gateway · {gw['host']}" if gw else "Personal Claude login"
+        crh = 20
+        cr = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, crh))
+        cic = _sf_symbol("checkmark.circle.fill", size=12, color=NSColor.secondaryLabelColor())
+        if cic:
+            cic.setFrameOrigin_((0, (crh - cic.frame().size.height) / 2))
+            cr.addSubview_(cic)
+        cl = _label(claude_text, size=13)
+        cl.sizeToFit()
+        cl.setFrameOrigin_((20, (crh - cl.frame().size.height) / 2))
+        cr.addSubview_(cl)
+        acc.addSubview_(cr)
+        y += 22
+
+        if gw:
+            # The model is dictated by the gateway (cc-switch); show it read-only
+            # so the picker can't imply an override that the gateway would reject.
+            model_popup = None
+            mval = _label((gw.get("model") or "gateway default") + "  (set in cc-switch)",
+                          size=12, color=NSColor.secondaryLabelColor())
+            mval.sizeToFit()
+            _row("Model", mval)
+        else:
+            model_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 180, 24), False)
+            model_popup.addItemWithTitle_("Sonnet (recommended)")
+            model_popup.addItemWithTitle_("Opus (most capable)")
+            model_popup.addItemWithTitle_("Haiku (cheapest)")
+            model_map = {"sonnet": 0, "opus": 1, "haiku": 2}
+            model_popup.selectItemAtIndex_(model_map.get(self._state.get("model", "sonnet"), 0))
+            _row("Model", model_popup)
 
         lang_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 180, 24), False)
         lang_popup.addItemWithTitle_("English")
@@ -1647,7 +1676,11 @@ class FigWatch(NSObject):
 
         if alert.runModal() == NSAlertFirstButtonReturn:
             rmap = {0: "sonnet", 1: "opus", 2: "haiku"}
-            new_model = rmap.get(model_popup.indexOfSelectedItem(), "sonnet")
+            if model_popup is not None:
+                new_model = rmap.get(model_popup.indexOfSelectedItem(), "sonnet")
+            else:
+                # Gateway mode: model is fixed by cc-switch, leave it unchanged.
+                new_model = self._state.get("model", "sonnet")
             lrmap = {0: "en", 1: "cn"}
             new_lang = lrmap.get(lang_popup.indexOfSelectedItem(), "en")
             new_tone_workers = tone_popup.indexOfSelectedItem() + 1
