@@ -7,8 +7,10 @@ import logging
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 
+from figwatch.gateway import gateway_info
 from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS, make_provider
 from figwatch.providers.ai.anthropic import AnthropicProvider
 from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
@@ -211,7 +213,7 @@ def introspect_skill(skill_path, claude_path, model=None):
             CLAUDE_API_MODELS['haiku'], os.environ.get('ANTHROPIC_API_KEY', ''),
         )
     else:
-        provider = ClaudeCLIProvider('haiku', claude_path)
+        provider = ClaudeCLIProvider('haiku', claude_path, gateway=gateway_info())
 
     try:
         stdout = provider.call(prompt, None)
@@ -328,6 +330,7 @@ CRITICAL RULES:
 
 def execute_skill(audit, *, config, design_repo):
     """Execute any skill (builtin or custom) for an Audit. Returns the reply string."""
+    started = time.monotonic()
     skill_ref = audit.trigger_match.trigger.skill_ref
     file_key = audit.comment.file_key
     node_id = audit.comment.node_id
@@ -379,7 +382,7 @@ def execute_skill(audit, *, config, design_repo):
             refs_section = '\n\nReference files:\n' + '\n\n'.join(ref_parts)
 
     frame_name = tree_data.get('name', 'Unknown frame') if tree_data else 'Unknown frame'
-    provider = make_provider(model, claude_path, skill_dir=skill_dir)
+    provider = make_provider(model, claude_path, skill_dir=skill_dir, gateway=gateway_info())
     logger.debug(
         'calling ai provider',
         extra={'provider': provider.model_id, 'frame': frame_name},
@@ -403,7 +406,20 @@ def execute_skill(audit, *, config, design_repo):
                 if usage:
                     span.set_attribute('ai.tokens', usage)
         header = f'\U0001f5e3\ufe0f {trigger_kw} Audit \u2014 {frame_name}'
-        signoff = f'\u2014 FigWatch ({provider.model_id}){format_trace_line()}'
+        # Sign-off includes the skill that ran and how long the audit took.
+        skill_label = (
+            skill_ref.split('builtin:', 1)[1] if skill_ref.startswith('builtin:')
+            else os.path.splitext(os.path.basename(skill_ref))[0]
+        )
+        elapsed = time.monotonic() - started
+        duration = (
+            f'{elapsed:.0f}s' if elapsed < 60
+            else f'{int(elapsed) // 60}m{int(elapsed) % 60:02d}s'
+        )
+        signoff = (
+            f'\u2014 FigWatch \u00b7 {skill_label} skill \u00b7 {duration} '
+            f'\u00b7 {provider.model_id}{format_trace_line()}'
+        )
         return f'{header}\n\n{reply}\n\n{signoff}'
     finally:
         for key in ['screenshot', 'node_tree']:

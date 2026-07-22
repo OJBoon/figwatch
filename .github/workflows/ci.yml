@@ -95,11 +95,11 @@ jobs:
         run: test -d macos/dist/FigWatch.app
 
       - name: Zip app bundle (ditto preserves permissions)
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
         run: ditto -c -k --keepParent macos/dist/FigWatch.app macos/dist/FigWatch.zip
 
       - name: Upload app zip
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: FigWatch.zip
@@ -155,7 +155,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push — new version (main)
-        if: github.event_name == 'push' && needs.check-version.outputs.is_new == 'true'
+        if: github.event_name == 'push' || github.event_name == 'pull_request' && needs.check-version.outputs.is_new == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -168,7 +168,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build and push — same version (main)
-        if: github.event_name == 'push' && needs.check-version.outputs.is_new == 'false'
+        if: github.event_name == 'push' || github.event_name == 'pull_request' && needs.check-version.outputs.is_new == 'false'
         uses: docker/build-push-action@v6
         with:
           context: .

@@ -215,7 +215,7 @@ def figma_get_retry(path, pat, retries=1, timeout=15, limiter=None):
                         wait = int(e.headers.get('Retry-After', '0') or 0)
                     except Exception:
                         wait = 0
-                    wait = max(wait, 2)
+                    wait = min(max(wait, 2), 10)  # cap so a large Retry-After can't stall a worker
                     if limiter:
                         limiter.backoff(path, wait)
                     logger.warning(
@@ -334,7 +334,7 @@ def fetch_screenshot(file_key, node_id, pat, limiter=None):
                 data = figma_get_retry(
                     f'/images/{file_key}?ids={enc_id}&scale={scale}&format={fmt}',
                     pat,
-                    timeout=45,
+                    timeout=20,
                     limiter=limiter,
                 )
                 if not data or data.get('err') or data.get('status') == 400:
@@ -342,7 +342,7 @@ def fetch_screenshot(file_key, node_id, pat, limiter=None):
                 url = (data.get('images') or {}).get(node_id)
                 if not url:
                     continue
-                with urllib.request.urlopen(url, timeout=30, context=_SSL_CTX) as r:
+                with urllib.request.urlopen(url, timeout=20, context=_SSL_CTX) as r:
                     img_bytes = r.read()
                 if len(img_bytes) > _MAX_IMAGE_BYTES:
                     continue

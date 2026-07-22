@@ -121,8 +121,15 @@ def with_retry(call_fn, is_rate_limit_fn, label):
                 raise
 
 
-def make_provider(model: str, claude_path: str, *, skill_dir: str = '') -> AIProvider:
-    """Return the appropriate AI provider for the given model and claude_path."""
+def make_provider(
+    model: str, claude_path: str, *, skill_dir: str = '', gateway: 'dict | None' = None,
+) -> AIProvider:
+    """Return the appropriate AI provider for the given model and claude_path.
+
+    `gateway` is the figwatch.gateway.gateway_info() dict when a custom
+    Claude-CLI gateway (e.g. a cc-switch company profile) is active, else None.
+    It is only meaningful for the Claude CLI provider.
+    """
     from figwatch.providers.ai.anthropic import AnthropicProvider
     from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
     from figwatch.providers.ai.gemini import GeminiProvider
@@ -142,4 +149,4 @@ def make_provider(model: str, claude_path: str, *, skill_dir: str = '') -> AIPro
             rate_limiter=get_anthropic_limiter(),
         )
     display_name = CLAUDE_API_MODELS.get(model, model)
-    return ClaudeCLIProvider(display_name, claude_path, skill_dir)
+    return ClaudeCLIProvider(display_name, claude_path, skill_dir, gateway=gateway)

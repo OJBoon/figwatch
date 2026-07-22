@@ -48,6 +48,7 @@ STATUS_ERROR = AuditStatus.ERROR.value
 import contextlib
 
 from figwatch import __version__ as VERSION
+from figwatch.gateway import gateway_info
 
 RELEASES_API = "https://api.github.com/repos/OJBoon/figwatch/releases/latest"
 RELEASES_URL = "https://github.com/OJBoon/figwatch/releases/latest"
@@ -283,7 +284,16 @@ def check_deps():
     claude_ok = claude_path != "claude" and os.path.exists(claude_path)
     deps["claude"] = {"ok": claude_ok, "path": claude_path if claude_ok else None}
 
-    if claude_ok:
+    # Gateway-first: if a company/custom gateway is configured for the Claude CLI
+    # (e.g. an active cc-switch profile writes ANTHROPIC_BASE_URL + token into
+    # ~/.claude/settings.json), auth is satisfied by the gateway token. The
+    # OAuth-only `claude auth status` check reports loggedIn:false under token
+    # auth, so we must not fall through to it. Personal `claude login` remains
+    # the fallback when no gateway is configured.
+    gw = gateway_info()
+    if gw:
+        deps["claude_auth"] = {"ok": True, "mode": "gateway", "host": gw["host"]}
+    elif claude_ok:
         try:
             result = subprocess.run(
                 [claude_path, 'auth', 'status', '--json'],
@@ -299,11 +309,11 @@ def check_deps():
                 except Exception:
                     low = stdout.lower()
                     logged_in = result.returncode == 0 and "not logged" not in low and "not authenticated" not in low
-            deps["claude_auth"] = {"ok": logged_in}
+            deps["claude_auth"] = {"ok": logged_in, "mode": "personal"}
         except Exception:
-            deps["claude_auth"] = {"ok": False}
+            deps["claude_auth"] = {"ok": False, "mode": "personal"}
     else:
-        deps["claude_auth"] = {"ok": False}
+        deps["claude_auth"] = {"ok": False, "mode": "personal"}
 
     config = _load_config()
     deps["pat"] = {"ok": bool(config.get("figmaPat"))}
@@ -415,6 +425,18 @@ def _sf_symbol(name, size=13, color=None):
     return iv
 
 
+def _emoji_icon(emoji, size=64):
+    """Render an emoji as an NSImage (used for the Settings dialog icon)."""
+    img = NSImage.alloc().initWithSize_(NSMakeSize(size, size))
+    img.lockFocus()
+    attrs = {NSFontAttributeName: NSFont.systemFontOfSize_(int(size * 0.78))}
+    text = NSAttributedString.alloc().initWithString_attributes_(emoji, attrs)
+    ts = text.size()
+    text.drawAtPoint_(NSMakePoint((size - ts.width) / 2.0, (size - ts.height) / 2.0))
+    img.unlockFocus()
+    return img
+
+
 def build_onboarding_view(app, deps):
     """Build the onboarding/setup checklist. Returns (view, height)."""
     cw = W - PAD * 2
@@ -432,6 +454,17 @@ def build_onboarding_view(app, deps):
     root.addSubview_(subtitle)
     y += 24
 
+    auth = deps["claude_auth"]
+    if auth["ok"] and auth.get("mode") == "gateway":
+        auth_name = "Claude Access"
+        auth_desc = "Connected via company account (%s)" % (auth.get("host") or "gateway")
+    elif auth["ok"]:
+        auth_name = "Claude Login"
+        auth_desc = "Signed in to your Claude account"
+    else:
+        auth_name = "Claude Access"
+        auth_desc = "Company account or personal Claude"
+
     items = [
         {
             "key": "claude",
@@ -443,11 +476,14 @@ def build_onboarding_view(app, deps):
         },
         {
             "key": "claude_auth",
-            "name": "Claude Login",
-            "desc": "Sign in to your Claude account",
-            "ok": deps["claude_auth"]["ok"],
+            "name": auth_name,
+            "desc": auth_desc,
+            "ok": auth["ok"],
             "installing": False,
             "action": b"doClaudeAuth:",
+            # When not signed in, offer both paths: company gateway (cc-switch)
+            # and personal Claude login.
+            "actions": [("Company", b"doConnectGateway:"), ("Personal", b"doClaudeAuth:")],
         },
         {
             "key": "pat",
@@ -484,15 +520,32 @@ def build_onboarding_view(app, deps):
         row.addSubview_(dl)
 
         if not item["ok"] and not item["installing"]:
-            btn_title = "Set Up" if item["key"] == "pat" else "Install"
-            btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 70, 8, 62, 24))
-            btn.setTitle_(btn_title)
-            btn.setBezelStyle_(NSBezelStyleRecessed)
-            btn.setControlSize_(1)
-            btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-            btn.setTarget_(app)
-            btn.setAction_(item["action"])
-            row.addSubview_(btn)
+            actions = item.get("actions")
+            if actions:
+                # Right-aligned choice buttons (e.g. Company / Personal).
+                bw = 76
+                bx = cw - 8
+                for title, selector in reversed(actions):
+                    bx -= bw
+                    b = NSButton.alloc().initWithFrame_(NSMakeRect(bx, 8, bw, 24))
+                    b.setTitle_(title)
+                    b.setBezelStyle_(NSBezelStyleRecessed)
+                    b.setControlSize_(1)
+                    b.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+                    b.setTarget_(app)
+                    b.setAction_(selector)
+                    row.addSubview_(b)
+                    bx -= 6
+            else:
+                btn_title = "Set Up" if item["key"] == "pat" else "Install"
+                btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 70, 8, 62, 24))
+                btn.setTitle_(btn_title)
+                btn.setBezelStyle_(NSBezelStyleRecessed)
+                btn.setControlSize_(1)
+                btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+                btn.setTarget_(app)
+                btn.setAction_(item["action"])
+                row.addSubview_(btn)
         elif item["installing"]:
             il = _label("Installing\u2026", size=11, color=NSColor.secondaryLabelColor())
             il.setFrameOrigin_((cw - 75, 13))
@@ -959,10 +1012,20 @@ class FigWatch(NSObject):
                 svc.post_reply(audit, response)
                 self._write_log("\u2709\ufe0f  Reply posted")
             except Exception as e:
-                if ack_id:
-                    with contextlib.suppress(Exception):
-                        svc.delete_ack(audit, ack_id)
                 self._write_log(f"\u26a0\ufe0f Audit failed: {e}")
+                # Post a short reply instead of going silent: the reviewer gets
+                # feedback, and because the trigger now has a reply it won't be
+                # re-audited on the next poll (avoids a bad frame clogging the worker).
+                with contextlib.suppress(Exception):
+                    if ack_id:
+                        svc.delete_ack(audit, ack_id)
+                    svc.post_reply(
+                        audit,
+                        f"\u26a0\ufe0f Couldn\u2019t complete the {trigger_name} audit right now. "
+                        f"This frame\u2019s design data may be unavailable, or the service was "
+                        f"busy. Re-trigger to retry.\n\n\u2014 FigWatch",
+                    )
+                    self._write_log("\u2709\ufe0f  Error reply posted")
 
     def _build_audit_service(self):
         """Construct AuditService for macOS polling path."""
@@ -1479,11 +1542,11 @@ class FigWatch(NSObject):
             acc.addSubview_(row)
             y += 28
 
-        y += 4
-        add_lbl = _label("Add new trigger", size=11, color=NSColor.secondaryLabelColor())
+        y += 10
+        add_lbl = _label("Add your own skill", size=11, color=NSColor.secondaryLabelColor())
         add_lbl.setFrameOrigin_((0, y))
         acc.addSubview_(add_lbl)
-        y += 16
+        y += 20
 
         kw_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, y, 80, 24))
         kw_field.setPlaceholderString_("@keyword")
@@ -1501,16 +1564,13 @@ class FigWatch(NSObject):
             skill_paths.append(s["path"])
         sk_popup.addItemWithTitle_("Browse for file\u2026")
         acc.addSubview_(sk_popup)
-        y += 28
+        y += 34
 
-        add_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, y, SW, 24))
-        add_btn.setTitle_("Add Trigger")
-        add_btn.setBezelStyle_(NSBezelStyleRecessed)
-        add_btn.setControlSize_(1)
+        add_btn = _pill("Add", b"doAddTriggerInline:", width=SW, height=22)
         add_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-        add_btn.setTarget_(self); add_btn.setAction_(b"doAddTriggerInline:")
+        add_btn.setFrameOrigin_((0, y))
         acc.addSubview_(add_btn)
-        y += 28
+        y += 30
 
         self._add_trigger_kw = kw_field
         self._add_trigger_sk = sk_popup
@@ -1547,15 +1607,44 @@ class FigWatch(NSObject):
         acc.addSubview_(tok_input)
 
         # ── AI ────────────────────────────────────────────────
-        _section("AI", "cpu")
+        gw = gateway_info()
+        conn_btn = _pill("Switch…" if gw else "Sign in…",
+                         b"doConnectGateway:" if gw else b"doClaudeAuth:",
+                         width=92, height=22)
+        conn_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+        _section("AI", "cpu", trailing_btn=conn_btn)
 
-        model_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 180, 24), False)
-        model_popup.addItemWithTitle_("Sonnet (recommended)")
-        model_popup.addItemWithTitle_("Opus (most capable)")
-        model_popup.addItemWithTitle_("Haiku (cheapest)")
-        model_map = {"sonnet": 0, "opus": 1, "haiku": 2}
-        model_popup.selectItemAtIndex_(model_map.get(self._state.get("model", "sonnet"), 0))
-        _row("Model", model_popup)
+        # Claude access status — company gateway (cc-switch) vs personal login.
+        claude_text = f"Gateway · {gw['host']}" if gw else "Personal Claude login"
+        crh = 20
+        cr = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, crh))
+        cic = _sf_symbol("checkmark.circle.fill", size=12, color=NSColor.secondaryLabelColor())
+        if cic:
+            cic.setFrameOrigin_((0, (crh - cic.frame().size.height) / 2))
+            cr.addSubview_(cic)
+        cl = _label(claude_text, size=13)
+        cl.sizeToFit()
+        cl.setFrameOrigin_((20, (crh - cl.frame().size.height) / 2))
+        cr.addSubview_(cl)
+        acc.addSubview_(cr)
+        y += 22
+
+        if gw:
+            # The model is dictated by the gateway (cc-switch); show it read-only
+            # so the picker can't imply an override that the gateway would reject.
+            model_popup = None
+            mval = _label((gw.get("model") or "gateway default") + "  (set in cc-switch)",
+                          size=12, color=NSColor.secondaryLabelColor())
+            mval.sizeToFit()
+            _row("Model", mval)
+        else:
+            model_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 180, 24), False)
+            model_popup.addItemWithTitle_("Sonnet (recommended)")
+            model_popup.addItemWithTitle_("Opus (most capable)")
+            model_popup.addItemWithTitle_("Haiku (cheapest)")
+            model_map = {"sonnet": 0, "opus": 1, "haiku": 2}
+            model_popup.selectItemAtIndex_(model_map.get(self._state.get("model", "sonnet"), 0))
+            _row("Model", model_popup)
 
         lang_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 180, 24), False)
         lang_popup.addItemWithTitle_("English")
@@ -1589,6 +1678,7 @@ class FigWatch(NSObject):
         alert = NSAlert.alloc().init()
         alert.setMessageText_("FigWatch Settings")
         alert.setInformativeText_("")
+        alert.setIcon_(_emoji_icon("📺"))
         alert.addButtonWithTitle_("Save")
         alert.addButtonWithTitle_("Cancel")
         alert.setAccessoryView_(acc)
@@ -1606,7 +1696,11 @@ class FigWatch(NSObject):
 
         if alert.runModal() == NSAlertFirstButtonReturn:
             rmap = {0: "sonnet", 1: "opus", 2: "haiku"}
-            new_model = rmap.get(model_popup.indexOfSelectedItem(), "sonnet")
+            if model_popup is not None:
+                new_model = rmap.get(model_popup.indexOfSelectedItem(), "sonnet")
+            else:
+                # Gateway mode: model is fixed by cc-switch, leave it unchanged.
+                new_model = self._state.get("model", "sonnet")
             lrmap = {0: "en", 1: "cn"}
             new_lang = lrmap.get(lang_popup.indexOfSelectedItem(), "en")
             new_tone_workers = tone_popup.indexOfSelectedItem() + 1
@@ -1960,6 +2054,24 @@ class FigWatch(NSObject):
             'osascript', '-e',
             'tell application "Terminal" to do script "claude login"'
         ], capture_output=True)
+
+    @objc.typedSelector(b"v@:@")
+    def doConnectGateway_(self, sender):
+        # Open cc-switch so the user can activate their company gateway profile;
+        # they then tap "Check Again". Falls back to the project page if the app
+        # isn't found under a common name.
+        launched = False
+        for app_name in ("CC Switch", "cc-switch", "CCSwitch"):
+            try:
+                r = subprocess.run(['open', '-a', app_name], capture_output=True)
+                if r.returncode == 0:
+                    launched = True
+                    break
+            except Exception:
+                pass
+        if not launched:
+            NSWorkspace.sharedWorkspace().openURL_(
+                NSURL.URLWithString_("https://github.com/farion1231/cc-switch"))
 
     @objc.typedSelector(b"v@:@")
     def doCheckDeps_(self, sender):
