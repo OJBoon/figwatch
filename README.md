@@ -159,7 +159,7 @@ figwatch/skills/                 bundled skill definitions (.md) + reference fil
 - **Fast path / slow path split** — `detect_triggers()` is a single API call (<1s); `process_work_item()` runs on worker threads and can take 30–120s
 - **Multi-file, multi-worker** — each watched file gets its own `FigmaWatcher` thread; work items are dispatched to shared queues processed by configurable worker pools
 
-## What's new (macOS app)
+## What's new in v1.4.0 (macOS app)
 
 - **Company / custom gateway support** — the macOS app now defers to whatever the Claude CLI is configured with. If `~/.claude/settings.json` defines an `ANTHROPIC_BASE_URL` + token (e.g. an active [cc-switch](https://github.com/farion1231/cc-switch) company profile), FigWatch detects it, authenticates via the gateway (no personal `claude login` needed), and uses the gateway's own model. Onboarding offers both **Company** (opens cc-switch) and **Personal** login paths.
 - **Gateway visible & switchable in Settings** — the AI section shows `Gateway · <host>` (or `Personal Claude login`) with a **Switch…** / **Sign in…** button; in gateway mode the model is shown read-only (set in cc-switch).
