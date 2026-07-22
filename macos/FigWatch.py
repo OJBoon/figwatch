@@ -1530,11 +1530,11 @@ class FigWatch(NSObject):
             acc.addSubview_(row)
             y += 28
 
-        y += 4
+        y += 10
         add_lbl = _label("Add your own skill", size=11, color=NSColor.secondaryLabelColor())
         add_lbl.setFrameOrigin_((0, y))
         acc.addSubview_(add_lbl)
-        y += 16
+        y += 20
 
         kw_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, y, 80, 24))
         kw_field.setPlaceholderString_("@keyword")
@@ -1552,12 +1552,13 @@ class FigWatch(NSObject):
             skill_paths.append(s["path"])
         sk_popup.addItemWithTitle_("Browse for file\u2026")
         acc.addSubview_(sk_popup)
-        y += 28
+        y += 34
 
-        add_btn = _pill("Add", b"doAddTriggerInline:", width=SW, height=28)
+        add_btn = _pill("Add", b"doAddTriggerInline:", width=SW, height=22)
+        add_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
         add_btn.setFrameOrigin_((0, y))
         acc.addSubview_(add_btn)
-        y += 32
+        y += 30
 
         self._add_trigger_kw = kw_field
         self._add_trigger_sk = sk_popup
