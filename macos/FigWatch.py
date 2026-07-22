@@ -1596,7 +1596,7 @@ class FigWatch(NSObject):
         _section("AI", "cpu", trailing_btn=conn_btn)
 
         # Claude access status — company gateway (cc-switch) vs personal login.
-        claude_text = f"Company gateway · {gw['host']}" if gw else "Personal Claude login"
+        claude_text = f"Gateway · {gw['host']}" if gw else "Personal Claude login"
         crh = 20
         cr = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, crh))
         cic = _sf_symbol("checkmark.circle.fill", size=12, color=NSColor.secondaryLabelColor())
