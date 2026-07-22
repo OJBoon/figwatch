@@ -31,6 +31,15 @@ def subprocess_env():
         env.setdefault('NODE_EXTRA_CA_CERTS', certifi.where())
     except ImportError:
         pass
+    # If a gateway (e.g. a cc-switch company profile) is configured for the
+    # Claude CLI in ~/.claude/settings.json, inject its credentials so the
+    # subprocess deterministically targets the gateway even when the launching
+    # process carries stale/partial ANTHROPIC_* variables. No-op otherwise.
+    try:
+        from figwatch.gateway import gateway_subprocess_env
+        env.update(gateway_subprocess_env())
+    except Exception:
+        pass
     return env
 
 

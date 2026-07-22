@@ -48,6 +48,7 @@ STATUS_ERROR = AuditStatus.ERROR.value
 import contextlib
 
 from figwatch import __version__ as VERSION
+from figwatch.gateway import gateway_info
 
 RELEASES_API = "https://api.github.com/repos/OJBoon/figwatch/releases/latest"
 RELEASES_URL = "https://github.com/OJBoon/figwatch/releases/latest"
@@ -283,7 +284,16 @@ def check_deps():
     claude_ok = claude_path != "claude" and os.path.exists(claude_path)
     deps["claude"] = {"ok": claude_ok, "path": claude_path if claude_ok else None}
 
-    if claude_ok:
+    # Gateway-first: if a company/custom gateway is configured for the Claude CLI
+    # (e.g. an active cc-switch profile writes ANTHROPIC_BASE_URL + token into
+    # ~/.claude/settings.json), auth is satisfied by the gateway token. The
+    # OAuth-only `claude auth status` check reports loggedIn:false under token
+    # auth, so we must not fall through to it. Personal `claude login` remains
+    # the fallback when no gateway is configured.
+    gw = gateway_info()
+    if gw:
+        deps["claude_auth"] = {"ok": True, "mode": "gateway", "host": gw["host"]}
+    elif claude_ok:
         try:
             result = subprocess.run(
                 [claude_path, 'auth', 'status', '--json'],
@@ -299,11 +309,11 @@ def check_deps():
                 except Exception:
                     low = stdout.lower()
                     logged_in = result.returncode == 0 and "not logged" not in low and "not authenticated" not in low
-            deps["claude_auth"] = {"ok": logged_in}
+            deps["claude_auth"] = {"ok": logged_in, "mode": "personal"}
         except Exception:
-            deps["claude_auth"] = {"ok": False}
+            deps["claude_auth"] = {"ok": False, "mode": "personal"}
     else:
-        deps["claude_auth"] = {"ok": False}
+        deps["claude_auth"] = {"ok": False, "mode": "personal"}
 
     config = _load_config()
     deps["pat"] = {"ok": bool(config.get("figmaPat"))}
@@ -432,6 +442,17 @@ def build_onboarding_view(app, deps):
     root.addSubview_(subtitle)
     y += 24
 
+    auth = deps["claude_auth"]
+    if auth["ok"] and auth.get("mode") == "gateway":
+        auth_name = "Claude Access"
+        auth_desc = "Connected via company account (%s)" % (auth.get("host") or "gateway")
+    elif auth["ok"]:
+        auth_name = "Claude Login"
+        auth_desc = "Signed in to your Claude account"
+    else:
+        auth_name = "Claude Access"
+        auth_desc = "Company account or personal Claude"
+
     items = [
         {
             "key": "claude",
@@ -443,11 +464,14 @@ def build_onboarding_view(app, deps):
         },
         {
             "key": "claude_auth",
-            "name": "Claude Login",
-            "desc": "Sign in to your Claude account",
-            "ok": deps["claude_auth"]["ok"],
+            "name": auth_name,
+            "desc": auth_desc,
+            "ok": auth["ok"],
             "installing": False,
             "action": b"doClaudeAuth:",
+            # When not signed in, offer both paths: company gateway (cc-switch)
+            # and personal Claude login.
+            "actions": [("Company", b"doConnectGateway:"), ("Personal", b"doClaudeAuth:")],
         },
         {
             "key": "pat",
@@ -484,15 +508,32 @@ def build_onboarding_view(app, deps):
         row.addSubview_(dl)
 
         if not item["ok"] and not item["installing"]:
-            btn_title = "Set Up" if item["key"] == "pat" else "Install"
-            btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 70, 8, 62, 24))
-            btn.setTitle_(btn_title)
-            btn.setBezelStyle_(NSBezelStyleRecessed)
-            btn.setControlSize_(1)
-            btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-            btn.setTarget_(app)
-            btn.setAction_(item["action"])
-            row.addSubview_(btn)
+            actions = item.get("actions")
+            if actions:
+                # Right-aligned choice buttons (e.g. Company / Personal).
+                bw = 76
+                bx = cw - 8
+                for title, selector in reversed(actions):
+                    bx -= bw
+                    b = NSButton.alloc().initWithFrame_(NSMakeRect(bx, 8, bw, 24))
+                    b.setTitle_(title)
+                    b.setBezelStyle_(NSBezelStyleRecessed)
+                    b.setControlSize_(1)
+                    b.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+                    b.setTarget_(app)
+                    b.setAction_(selector)
+                    row.addSubview_(b)
+                    bx -= 6
+            else:
+                btn_title = "Set Up" if item["key"] == "pat" else "Install"
+                btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 70, 8, 62, 24))
+                btn.setTitle_(btn_title)
+                btn.setBezelStyle_(NSBezelStyleRecessed)
+                btn.setControlSize_(1)
+                btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+                btn.setTarget_(app)
+                btn.setAction_(item["action"])
+                row.addSubview_(btn)
         elif item["installing"]:
             il = _label("Installing\u2026", size=11, color=NSColor.secondaryLabelColor())
             il.setFrameOrigin_((cw - 75, 13))
@@ -1960,6 +2001,24 @@ class FigWatch(NSObject):
             'osascript', '-e',
             'tell application "Terminal" to do script "claude login"'
         ], capture_output=True)
+
+    @objc.typedSelector(b"v@:@")
+    def doConnectGateway_(self, sender):
+        # Open cc-switch so the user can activate their company gateway profile;
+        # they then tap "Check Again". Falls back to the project page if the app
+        # isn't found under a common name.
+        launched = False
+        for app_name in ("CC Switch", "cc-switch", "CCSwitch"):
+            try:
+                r = subprocess.run(['open', '-a', app_name], capture_output=True)
+                if r.returncode == 0:
+                    launched = True
+                    break
+            except Exception:
+                pass
+        if not launched:
+            NSWorkspace.sharedWorkspace().openURL_(
+                NSURL.URLWithString_("https://github.com/farion1231/cc-switch"))
 
     @objc.typedSelector(b"v@:@")
     def doCheckDeps_(self, sender):

@@ -49,6 +49,13 @@ docker compose up -d --build
 ### macOS app
 - macOS 13+
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code/getting-started)
+- Claude access — either:
+  - a personal Claude login (`claude login`), or
+  - a company / self-hosted **gateway** configured for the Claude CLI. If
+    `~/.claude/settings.json` defines an `ANTHROPIC_BASE_URL` + token (e.g. an
+    active [cc-switch](https://github.com/farion1231/cc-switch) profile),
+    FigWatch detects it automatically, uses the gateway's own model, and skips
+    the personal-login step. Onboarding offers both paths.
 - Figma Personal Access Token
 
 ### Docker / server

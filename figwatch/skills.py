@@ -9,6 +9,7 @@ import re
 import tempfile
 from pathlib import Path
 
+from figwatch.gateway import gateway_info
 from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS, make_provider
 from figwatch.providers.ai.anthropic import AnthropicProvider
 from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
@@ -211,7 +212,7 @@ def introspect_skill(skill_path, claude_path, model=None):
             CLAUDE_API_MODELS['haiku'], os.environ.get('ANTHROPIC_API_KEY', ''),
         )
     else:
-        provider = ClaudeCLIProvider('haiku', claude_path)
+        provider = ClaudeCLIProvider('haiku', claude_path, gateway=gateway_info())
 
     try:
         stdout = provider.call(prompt, None)
@@ -379,7 +380,7 @@ def execute_skill(audit, *, config, design_repo):
             refs_section = '\n\nReference files:\n' + '\n\n'.join(ref_parts)
 
     frame_name = tree_data.get('name', 'Unknown frame') if tree_data else 'Unknown frame'
-    provider = make_provider(model, claude_path, skill_dir=skill_dir)
+    provider = make_provider(model, claude_path, skill_dir=skill_dir, gateway=gateway_info())
     logger.debug(
         'calling ai provider',
         extra={'provider': provider.model_id, 'frame': frame_name},
