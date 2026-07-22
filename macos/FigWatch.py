@@ -1396,29 +1396,23 @@ class FigWatch(NSObject):
         while True:
             alert = NSAlert.alloc().init()
             alert.setMessageText_("Connect to Figma")
-            alert.setInformativeText_("Paste your Personal Access Token.")
+            alert.setInformativeText_(
+                "Paste your Personal Access Token.\n\n"
+                "Figma \u2192 Settings \u2192 Security \u2192 Personal Access Tokens")
             alert.addButtonWithTitle_("Connect")
             alert.addButtonWithTitle_("Cancel")
 
-            # Accessory: the settings path with an inline "see details here" link,
-            # then the token input.
+            # Accessory (left edge aligns with the text above): a "see details
+            # here" link right under the settings path, then the token input.
             acc_w = 340
-            acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 100))
-            ay = 0
-            path_lbl = NSTextField.alloc().initWithFrame_(NSMakeRect(0, ay, acc_w, 32))
-            path_lbl.setStringValue_(
-                "Figma \u2192 Settings \u2192 Security \u2192 Personal Access Tokens")
-            path_lbl.setEditable_(False)
-            path_lbl.setSelectable_(False)
-            path_lbl.setBordered_(False)
-            path_lbl.setDrawsBackground_(False)
-            path_lbl.setFont_(NSFont.systemFontOfSize_(11))
-            path_lbl.setTextColor_(NSColor.secondaryLabelColor())
-            path_lbl.cell().setWraps_(True)
-            acc.addSubview_(path_lbl)
-            ay += 34
+            acc = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 52))
 
-            link = NSButton.alloc().initWithFrame_(NSMakeRect(0, ay, 200, 18))
+            inp = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 24))
+            inp.setPlaceholderString_("figd_...")
+            if self._state["pat"]: inp.setStringValue_(self._state["pat"])
+            acc.addSubview_(inp)
+
+            link = NSButton.alloc().initWithFrame_(NSMakeRect(0, 30, 200, 18))
             link.setBordered_(False)
             link.setAttributedTitle_(
                 NSAttributedString.alloc().initWithString_attributes_(
@@ -1430,19 +1424,11 @@ class FigWatch(NSObject):
                     },
                 ))
             link.sizeToFit()
-            link.setFrameOrigin_((0, ay))
+            link.setFrameOrigin_((-2, 30))
             link.setTarget_(self)
             link.setAction_(b"doOpenFigmaTokenDocs:")
             acc.addSubview_(link)
-            ay += 26
 
-            inp = NSTextField.alloc().initWithFrame_(NSMakeRect(0, ay, acc_w, 24))
-            inp.setPlaceholderString_("figd_...")
-            if self._state["pat"]: inp.setStringValue_(self._state["pat"])
-            acc.addSubview_(inp)
-            ay += 24
-
-            acc.setFrameSize_(NSMakeSize(acc_w, ay))
             alert.setAccessoryView_(acc); alert.window().setInitialFirstResponder_(inp)
             r = alert.runModal()
             if r == NSAlertFirstButtonReturn:
