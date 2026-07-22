@@ -1000,10 +1000,20 @@ class FigWatch(NSObject):
                 svc.post_reply(audit, response)
                 self._write_log("\u2709\ufe0f  Reply posted")
             except Exception as e:
-                if ack_id:
-                    with contextlib.suppress(Exception):
-                        svc.delete_ack(audit, ack_id)
                 self._write_log(f"\u26a0\ufe0f Audit failed: {e}")
+                # Post a short reply instead of going silent: the reviewer gets
+                # feedback, and because the trigger now has a reply it won't be
+                # re-audited on the next poll (avoids a bad frame clogging the worker).
+                with contextlib.suppress(Exception):
+                    if ack_id:
+                        svc.delete_ack(audit, ack_id)
+                    svc.post_reply(
+                        audit,
+                        f"\u26a0\ufe0f Couldn\u2019t complete the {trigger_name} audit right now. "
+                        f"This frame\u2019s design data may be unavailable, or the service was "
+                        f"busy. Re-trigger to retry.\n\n\u2014 FigWatch",
+                    )
+                    self._write_log("\u2709\ufe0f  Error reply posted")
 
     def _build_audit_service(self):
         """Construct AuditService for macOS polling path."""
