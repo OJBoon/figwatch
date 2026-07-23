@@ -159,7 +159,7 @@ figwatch/skills/                 bundled skill definitions (.md) + reference fil
 - **Fast path / slow path split** — `detect_triggers()` is a single API call (<1s); `process_work_item()` runs on worker threads and can take 30–120s
 - **Multi-file, multi-worker** — each watched file gets its own `FigmaWatcher` thread; work items are dispatched to shared queues processed by configurable worker pools
 
-## What's new in v1.4.3 (macOS app)
+## What's new in v1.4.4 (macOS app)
 
 No-CLI gateway support — macOS app only, server unchanged:
 
