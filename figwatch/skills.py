@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from figwatch.gateway import gateway_info
+from figwatch.gateway import gateway_api_config, gateway_info
 from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS, make_provider
 from figwatch.providers.ai.anthropic import AnthropicProvider
 from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
@@ -209,9 +209,23 @@ def introspect_skill(skill_path, claude_path, model=None):
             GEMINI_MODELS['gemini-flash'], os.environ.get('GOOGLE_API_KEY', ''),
         )
     elif claude_path == 'api':
-        provider = AnthropicProvider(
-            CLAUDE_API_MODELS['haiku'], os.environ.get('ANTHROPIC_API_KEY', ''),
-        )
+        # In gateway mode, introspection must go through the gateway too — the
+        # gateway typically rejects public model aliases and a Finder-launched
+        # .app carries no ANTHROPIC_API_KEY, so a bare public-API call would
+        # fail. When no gateway is active (e.g. the Docker server, which sets
+        # ANTHROPIC_API_KEY but no base URL) this is byte-identical to before.
+        cfg = gateway_api_config()
+        if cfg:
+            provider = AnthropicProvider(
+                cfg.get('model') or CLAUDE_API_MODELS['haiku'],
+                cfg.get('api_key', ''),
+                base_url=cfg['base_url'],
+                auth_token=cfg.get('auth_token'),
+            )
+        else:
+            provider = AnthropicProvider(
+                CLAUDE_API_MODELS['haiku'], os.environ.get('ANTHROPIC_API_KEY', ''),
+            )
     else:
         provider = ClaudeCLIProvider('haiku', claude_path, gateway=gateway_info())
 

@@ -3,6 +3,13 @@ name = "figwatch"
 dynamic = ["version"]
 description = "AI-powered Figma design auditor — drop a trigger comment on any frame, get an instant audit reply"
 requires-python = ">=3.9"
+# Core runtime dependency: the macOS app's no-CLI gateway path and the Docker
+# server both drive Claude through the Anthropic Messages API, so `anthropic`
+# (and its transitive deps) must be installed wherever figwatch runs — including
+# the py2app build env, which bundles it into FigWatch.app.
+dependencies = [
+    "anthropic",
+]
 
 [project.optional-dependencies]
 # pip install -e ".[server]"  — installs API clients for server/Docker deployment

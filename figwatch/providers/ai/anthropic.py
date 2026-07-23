@@ -8,10 +8,15 @@ from figwatch.providers.ai import with_retry
 class AnthropicProvider:
     inline_files = True
 
-    def __init__(self, model_name: str, api_key: str, rate_limiter=None):
+    def __init__(self, model_name: str, api_key: str, rate_limiter=None,
+                 *, base_url: 'str | None' = None, auth_token: 'str | None' = None,
+                 max_tokens: int = 4096):
         self.model_id = model_name
         self._model_name = model_name
         self._api_key = api_key
+        self._base_url = base_url
+        self._auth_token = auth_token
+        self._max_tokens = max_tokens
         self._rate_limiter = rate_limiter
 
     def call(self, prompt: str, image_path: 'str | None') -> str:
@@ -25,7 +30,16 @@ class AnthropicProvider:
         if self._rate_limiter:
             self._rate_limiter.acquire()
 
-        client = anthropic.Anthropic(api_key=self._api_key)
+        # A custom base_url + bearer token targets an Anthropic-compatible
+        # gateway (e.g. a cc-switch company profile); otherwise use the API key.
+        client_kwargs: dict = {}
+        if self._base_url:
+            client_kwargs['base_url'] = self._base_url
+        if self._auth_token:
+            client_kwargs['auth_token'] = self._auth_token
+        else:
+            client_kwargs['api_key'] = self._api_key
+        client = anthropic.Anthropic(**client_kwargs)
         content = []
 
         if image_path:
@@ -41,7 +55,7 @@ class AnthropicProvider:
         def _call():
             response = client.messages.create(
                 model=self._model_name,
-                max_tokens=4096,
+                max_tokens=self._max_tokens,
                 messages=[{'role': 'user', 'content': content}],
             )
             return response.content[0].text.strip()

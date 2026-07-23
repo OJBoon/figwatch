@@ -128,7 +128,9 @@ def make_provider(
 
     `gateway` is the figwatch.gateway.gateway_info() dict when a custom
     Claude-CLI gateway (e.g. a cc-switch company profile) is active, else None.
-    It is only meaningful for the Claude CLI provider.
+    When truthy on the `api` path, the provider is built against the gateway via
+    the Anthropic Messages API (no CLI); it also selects the CLI gateway mode.
+    The Docker server passes gateway=None, keeping its api-path behavior intact.
     """
     from figwatch.providers.ai.anthropic import AnthropicProvider
     from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
@@ -142,6 +144,22 @@ def make_provider(
             rate_limiter=get_gemini_limiter(),
         )
     if claude_path == 'api':
+        # Gateway active (e.g. a cc-switch company profile or an Option-B manual
+        # config): drive the gateway through the Anthropic Messages API directly
+        # — no CLI. Gated on `gateway` being truthy so the Docker server path
+        # (gateway=None) is byte-identical to the original behavior below.
+        if gateway:
+            from figwatch.gateway import gateway_api_config
+            cfg = gateway_api_config()
+            if cfg:
+                return AnthropicProvider(
+                    cfg.get('model') or CLAUDE_API_MODELS.get(model, model),
+                    cfg.get('api_key', ''),
+                    rate_limiter=get_anthropic_limiter(),
+                    base_url=cfg['base_url'],
+                    auth_token=cfg.get('auth_token'),
+                    max_tokens=8192,
+                )
         model_name = CLAUDE_API_MODELS.get(model, model)
         return AnthropicProvider(
             model_name,

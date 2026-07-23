@@ -103,6 +103,16 @@ def _resolve_claude_path():
     return found
 
 
+def _skill_claude_path():
+    """Which backend skills should use.
+
+    When a gateway is active (cc-switch / env / a manual ~/.figwatch entry),
+    return 'api' so audits run through the Anthropic Messages API directly —
+    no ``claude`` CLI needed. Otherwise resolve the personal-login CLI path.
+    """
+    return "api" if gateway_info() else _resolve_claude_path()
+
+
 W = 320
 PAD = 12
 ROW_H = 28
@@ -284,6 +294,18 @@ def _validate_token(pat):
         return None, str(e)
 
 
+def _all_required(deps):
+    """Whether every required dependency is satisfied, for the active auth mode.
+
+    In gateway mode the audit runs via the Anthropic Messages API (no CLI), so
+    the `claude` CLI is NOT required — only the Figma PAT and an active gateway.
+    Personal-login mode still needs the CLI + login.
+    """
+    if deps.get("claude_auth", {}).get("mode") == "gateway":
+        return deps["claude_auth"]["ok"] and deps["pat"]["ok"]
+    return deps["claude"]["ok"] and deps["claude_auth"]["ok"] and deps["pat"]["ok"]
+
+
 def check_deps():
     """Check all dependencies. Returns dict of status per dep."""
     deps = {}
@@ -326,7 +348,7 @@ def check_deps():
     config = _load_config()
     deps["pat"] = {"ok": bool(config.get("figmaPat"))}
 
-    deps["all_required"] = deps["claude"]["ok"] and deps["claude_auth"]["ok"] and deps["pat"]["ok"]
+    deps["all_required"] = _all_required(deps)
     return deps
 
 
@@ -508,35 +530,43 @@ def build_onboarding_view(app, deps):
         auth_name = "Claude Access"
         auth_desc = "Gateway profile or personal Claude"
 
-    items = [
-        {
+    gateway_active = auth["ok"] and auth.get("mode") == "gateway"
+
+    items = []
+    if not gateway_active:
+        # The `claude` CLI is only needed for the personal-login path; an active
+        # gateway drives the audits via the Anthropic API with no CLI.
+        items.append({
             "key": "claude",
             "name": "Claude Code",
-            "desc": "Powers the AI audits",
+            "desc": "Powers the AI audits (personal login)",
             "ok": deps["claude"]["ok"],
             "installing": app._state.get("installing_claude"),
             "action": b"doInstallClaude:",
-        },
-        {
-            "key": "claude_auth",
-            "name": auth_name,
-            "desc": auth_desc,
-            "ok": auth["ok"],
-            "installing": False,
-            "action": b"doClaudeAuth:",
-            # When not signed in, offer both paths: company gateway (cc-switch)
-            # and personal Claude login.
-            "actions": [("Gateway", b"doConnectGateway:"), ("Personal", b"doClaudeAuth:")],
-        },
-        {
-            "key": "pat",
-            "name": "Figma Token",
-            "desc": "Connects to your Figma files",
-            "ok": deps["pat"]["ok"],
-            "installing": False,
-            "action": b"doToken:",
-        },
-    ]
+        })
+    items.append({
+        "key": "claude_auth",
+        "name": auth_name,
+        "desc": auth_desc,
+        "ok": auth["ok"],
+        "installing": False,
+        "action": b"doClaudeAuth:",
+        # When not signed in, offer all three paths: company gateway (cc-switch),
+        # manual gateway entry, and personal Claude login.
+        "actions": [
+            ("Gateway", b"doConnectGateway:"),
+            ("Manual", b"doEnterGateway:"),
+            ("Personal", b"doClaudeAuth:"),
+        ],
+    })
+    items.append({
+        "key": "pat",
+        "name": "Figma Token",
+        "desc": "Connects to your Figma files",
+        "ok": deps["pat"]["ok"],
+        "installing": False,
+        "action": b"doToken:",
+    })
 
     for item in items:
         has_actions = bool(item.get("actions")) and not item["ok"] and not item["installing"]
@@ -1113,7 +1143,7 @@ class FigWatch(NSObject):
             design_repo=FigmaDesignDataRepository(pat),
             config=AuditConfig(
                 model=self._state.get("model", "sonnet"),
-                claude_path=_resolve_claude_path(),
+                claude_path=_skill_claude_path(),
                 reply_lang=self._state.get("reply_lang", "en"),
                 locale=self._state.get("locale", "uk"),
             ),
@@ -1530,7 +1560,7 @@ class FigWatch(NSObject):
                     cached = self._state.get("deps")
                     if cached:
                         cached["pat"] = {"ok": True}
-                        cached["all_required"] = cached["claude"]["ok"] and cached["claude_auth"]["ok"] and cached["pat"]["ok"]
+                        cached["all_required"] = _all_required(cached)
                     if not self._state.get("workers"):
                         threading.Thread(target=self._app_init, daemon=True).start()
                     self._rebuild_popover()
@@ -1774,7 +1804,7 @@ class FigWatch(NSObject):
             # The model is dictated by the gateway (cc-switch); show it read-only
             # so the picker can't imply an override that the gateway would reject.
             model_popup = None
-            mval = _label((gw.get("model") or "gateway default") + "  (set in cc-switch)",
+            mval = _label((gw.get("model") or "gateway default") + "  (from gateway)",
                           size=12, color=NSColor.secondaryLabelColor())
             mval.sizeToFit()
             # Cap so a long gateway model id truncates instead of running off the
@@ -1918,7 +1948,7 @@ class FigWatch(NSObject):
 
     def _introspect_new_trigger(self, skill_path):
         from figwatch.skills import introspect_skill
-        result = introspect_skill(skill_path, _resolve_claude_path())
+        result = introspect_skill(skill_path, _skill_claude_path())
         intro = self._state.setdefault("introspection_results", {})
         intro[skill_path] = result
 
@@ -2152,6 +2182,83 @@ class FigWatch(NSObject):
         if not launched:
             NSWorkspace.sharedWorkspace().openURL_(
                 NSURL.URLWithString_("https://github.com/farion1231/cc-switch"))
+
+    @objc.typedSelector(b"v@:@")
+    def doEnterGateway_(self, sender):
+        """Option B fallback: manually enter a gateway URL + token.
+
+        For users without cc-switch. Writes ~/.figwatch/gateway.json (which the
+        gateway detection reads as a fallback source), then re-checks deps and
+        starts watching. Audits then run via the Anthropic API — no CLI.
+        """
+        from figwatch.gateway import read_manual_gateway, write_manual_gateway
+        self._close_popover()
+        NSApp.activateIgnoringOtherApps_(True)
+
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Connect a Gateway")
+        alert.setInformativeText_(
+            "Enter your company gateway URL and token. FigWatch talks to it via "
+            "the Anthropic API directly — no Claude CLI needed.")
+        alert.addButtonWithTitle_("Save")
+        alert.addButtonWithTitle_("Cancel")
+
+        acc_w = 360
+        LEFT = 4
+        cw = acc_w - LEFT * 2
+        lbl_h, fh, gap = 16, 24, 12
+        existing = read_manual_gateway() or {}
+        acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 3 * (lbl_h + fh + gap)))
+        _fy = 0
+
+        def _field(label_text, placeholder, value):
+            nonlocal _fy
+            lbl = _label(label_text, size=11, color=NSColor.secondaryLabelColor())
+            lbl.setFrameOrigin_((LEFT, _fy)); acc.addSubview_(lbl)
+            _fy += lbl_h
+            tf = NSTextField.alloc().initWithFrame_(NSMakeRect(LEFT, _fy, cw, fh))
+            tf.setPlaceholderString_(placeholder)
+            if value:
+                tf.setStringValue_(value)
+            acc.addSubview_(tf)
+            _fy += fh + gap
+            return tf
+
+        url_field = _field("Gateway URL", "http://llm-gw.example.com/anthropic",
+                           existing.get("base_url", ""))
+        tok_field = _field("Token", "auth token (or API key)",
+                           existing.get("auth_token") or existing.get("api_key") or "")
+        model_field = _field("Model (optional)", "gateway model id",
+                             existing.get("model", ""))
+
+        alert.setAccessoryView_(acc)
+        alert.window().setInitialFirstResponder_(url_field)
+        if alert.runModal() != NSAlertFirstButtonReturn:
+            return
+
+        base_url = url_field.stringValue().strip()
+        token = tok_field.stringValue().strip()
+        model = model_field.stringValue().strip()
+        if not base_url or not token:
+            err = NSAlert.alloc().init()
+            err.setMessageText_("Gateway not saved")
+            err.setInformativeText_("A gateway URL and a token are both required.")
+            err.addButtonWithTitle_("OK"); err.runModal()
+            return
+        try:
+            write_manual_gateway(base_url, auth_token=token, model=model or None)
+        except Exception as e:
+            err = NSAlert.alloc().init()
+            err.setMessageText_("Couldn't save gateway")
+            err.setInformativeText_(str(e))
+            err.addButtonWithTitle_("OK"); err.runModal()
+            return
+
+        self._state["deps"] = check_deps()
+        if self._state["deps"].get("all_required") and not self._state.get("workers"):
+            threading.Thread(target=self._app_init, daemon=True).start()
+        self._rebuild_popover()
+        _post_notification("FigWatch", "Gateway connected")
 
     @objc.typedSelector(b"v@:@")
     def doCheckDeps_(self, sender):
