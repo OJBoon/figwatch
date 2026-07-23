@@ -105,8 +105,16 @@ def _resolve_claude_path():
 
 W = 320
 PAD = 12
-ROW_H = 26
+ROW_H = 28
 MAX_FILE_ROWS = 12  # scroll if more than this
+POPOVER_CORNER_RADIUS = 16  # match macOS Tahoe native menu/popover rounding
+
+# macOS 26 (Tahoe) Liquid Glass container; None on older macOS (we fall back to
+# NSVisualEffectView). Looked up dynamically so the app still runs pre-Tahoe.
+try:
+    _GLASS_CLS = objc.lookUpClass("NSGlassEffectView")
+except Exception:
+    _GLASS_CLS = None
 
 
 def _load_config():
@@ -412,6 +420,23 @@ def _label(text, size=13, weight=NSFontWeightRegular, color=None, mono=False):
     return l
 
 
+def _dynamic_color(light, dark):
+    """Appearance-adaptive NSColor: resolves per effectiveAppearance at draw time.
+
+    Lets a single color read well in both light and dark mode (e.g. a warm accent
+    that would be too pale on white but is fine on a dark glass). Falls back to the
+    light color on very old macOS where dynamic providers are unavailable.
+    """
+    def _provider(appearance):
+        name = appearance.bestMatchFromAppearancesWithNames_(
+            [NSAppearanceNameAqua, NSAppearanceNameDarkAqua])
+        return dark if name == NSAppearanceNameDarkAqua else light
+    try:
+        return NSColor.colorWithName_dynamicProvider_(None, _provider)
+    except Exception:
+        return light
+
+
 def _sf_symbol(name, size=13, color=None):
     img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, name)
     if not img: return None
@@ -437,6 +462,24 @@ def _emoji_icon(emoji, size=64):
     return img
 
 
+def _rounded_mask_image(radius):
+    """Resizable rounded-rect mask for NSVisualEffectView.maskImage. capInsets
+    pin the corners while the 1pt centre stretches, so one image masks any panel
+    size with clean antialiased corners — and a correctly rounded drop shadow.
+    (Masking a vibrancy view's own layer instead leaves aliased corners and a
+    square shadow.)"""
+    edge = radius * 2 + 1
+    img = NSImage.alloc().initWithSize_(NSMakeSize(edge, edge))
+    img.setCapInsets_(NSEdgeInsetsMake(radius, radius, radius, radius))
+    img.setResizingMode_(1)  # NSImageResizingModeStretch
+    img.lockFocus()
+    NSColor.blackColor().set()
+    NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+        NSMakeRect(0, 0, edge, edge), radius, radius).fill()
+    img.unlockFocus()
+    return img
+
+
 def build_onboarding_view(app, deps):
     """Build the onboarding/setup checklist. Returns (view, height)."""
     cw = W - PAD * 2
@@ -447,7 +490,7 @@ def build_onboarding_view(app, deps):
     title = _label("FigWatch Setup", size=15, weight=NSFontWeightBold)
     title.setFrameOrigin_((PAD + 6, y))
     root.addSubview_(title)
-    y += 22
+    y += 24
 
     subtitle = _label("Let\u2019s get everything ready.", size=12, color=NSColor.secondaryLabelColor())
     subtitle.setFrameOrigin_((PAD + 6, y))
@@ -518,12 +561,21 @@ def build_onboarding_view(app, deps):
         if icon:
             row.addSubview_(icon)
 
+        # Available text width: full width when the buttons sit on their own line
+        # (has_actions) or the row is complete (ok, no trailing control); otherwise
+        # reserve the right side for the Install/Set Up button or "Installing…".
+        text_w = (cw - 32) if (has_actions or item["ok"]) else (cw - 108)
+
         nl = _label(item["name"], size=13, weight=NSFontWeightMedium)
-        nl.setFrameOrigin_((26, name_y))
+        nl.setFrameSize_(NSMakeSize(text_w, nl.frame().size.height))
+        nl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
+        nl.setFrameOrigin_((28, name_y))
         row.addSubview_(nl)
 
         dl = _label(item["desc"], size=11, color=NSColor.secondaryLabelColor())
-        dl.setFrameOrigin_((26, desc_y))
+        dl.setFrameSize_(NSMakeSize(text_w, dl.frame().size.height))
+        dl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
+        dl.setFrameOrigin_((28, desc_y))
         row.addSubview_(dl)
 
         if has_actions:
@@ -540,7 +592,7 @@ def build_onboarding_view(app, deps):
                 b.setTarget_(app)
                 b.setAction_(selector)
                 row.addSubview_(b)
-                bx -= 6
+                bx -= 8
         elif not item["ok"] and not item["installing"]:
             btn_title = "Set Up" if item["key"] == "pat" else "Install"
             btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 70, name_y + 2, 62, 24))
@@ -553,7 +605,7 @@ def build_onboarding_view(app, deps):
             row.addSubview_(btn)
         elif item["installing"]:
             il = _label("Installing\u2026", size=11, color=NSColor.secondaryLabelColor())
-            il.setFrameOrigin_((cw - 75, 13))
+            il.setFrameOrigin_((cw - 76, 12))
             row.addSubview_(il)
 
         root.addSubview_(row)
@@ -618,17 +670,19 @@ def build_popover_view(app):
     title.setFrameOrigin_((PAD + 4, y))
     root.addSubview_(title)
 
-    quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 22, y + 1, 20, 20))
+    quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 24, y + 1, 20, 20))
     quit_btn.setBordered_(False); quit_btn.setTitle_("")
     qi = _sf_symbol("power", size=12, color=NSColor.tertiaryLabelColor())
     if qi: quit_btn.setImage_(qi.image())
     quit_btn.setTarget_(app); quit_btn.setAction_(b"doPowerMenu:")
     root.addSubview_(quit_btn)
-    y += 22
+    y += 24
 
     trigger_config = app._state.get("trigger_config", [])
     triggers_str = " \u00B7 ".join(t.get("trigger", "") for t in trigger_config) if trigger_config else "@tone \u00B7 @ux"
     subline = _label(triggers_str, size=11, color=NSColor.secondaryLabelColor())
+    subline.setFrameSize_(NSMakeSize(cw, subline.frame().size.height))
+    subline.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
     subline.setFrameOrigin_((PAD + 4, y))
     root.addSubview_(subline)
     y += 20
@@ -636,7 +690,7 @@ def build_popover_view(app):
     sep0 = NSBox.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 1))
     sep0.setBoxType_(2)
     root.addSubview_(sep0)
-    y += 10
+    y += 12
 
     # ── File list or empty state ───────────────────────────────
     if not watched:
@@ -648,7 +702,7 @@ def build_popover_view(app):
         hint = _label("Open a file in Figma Desktop to start watching.", size=11, color=NSColor.tertiaryLabelColor())
         hint.setFrameOrigin_((PAD + 4, y))
         root.addSubview_(hint)
-        y += 22
+        y += 24
 
     else:
         n = len(watched)
@@ -667,11 +721,16 @@ def build_popover_view(app):
             status = status_info.get("status", STATUS_LIVE)
 
             row = NSView.alloc().initWithFrame_(NSMakeRect(0, list_y, cw + 4, ROW_H))
-            vc = (ROW_H - 14) // 2
+            vc = (ROW_H - 12) // 2
 
             if status == STATUS_LIVE:
+                # Center the bullet in the same 15pt-wide slot the SF-symbol status
+                # icons occupy (frame x=4, size 11 \u2192 15pt box) so the status column
+                # is optically flush regardless of which glyph a row shows.
                 dot = _label("\u25CF", size=8, color=NSColor.systemGreenColor())
-                dot.setFrameOrigin_((8, vc + 2))
+                dot.setAlignment_(NSTextAlignmentCenter)
+                dot.setFrameSize_(NSMakeSize(15, dot.frame().size.height))
+                dot.setFrameOrigin_((4, vc + 2))
                 row.addSubview_(dot)
             elif status == STATUS_REPLIED:
                 icon = _sf_symbol("checkmark.circle.fill", size=11, color=NSColor.systemGreenColor())
@@ -715,10 +774,14 @@ def build_popover_view(app):
                 trigger = status_info.get("trigger", "")
                 user = status_info.get("user", "")
                 badge_text = f"{trigger} \u00B7 {user}" if user else trigger
-                badge = _label(badge_text, size=10, color=NSColor.systemOrangeColor())
+                # systemOrange is fine on the dark glass but only ~2.2:1 on the
+                # light glass; use a darker amber in light mode, keep orange in dark.
+                badge = _label(badge_text, size=10, color=_dynamic_color(
+                    NSColor.colorWithCalibratedRed_green_blue_alpha_(0.72, 0.35, 0.0, 1.0),
+                    NSColor.systemOrangeColor()))
                 badge.sizeToFit()
                 bw = min(badge.frame().size.width, 92)
-                badge.setFrameSize_(NSMakeSize(bw, 14))
+                badge.setFrameSize_(NSMakeSize(bw, 16))
                 badge.setFrameOrigin_((cw - bw, name_y + 1))
                 badge.cell().setLineBreakMode_(5)
                 row.addSubview_(badge)
@@ -781,12 +844,12 @@ def build_popover_view(app):
     footer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, footer_h))
 
     ct = _label(countdown_text or " ", size=11, color=NSColor.tertiaryLabelColor())
-    ct.setFrameOrigin_((4, (footer_h - 14) // 2))
-    ct.setFrameSize_(NSMakeSize(cw - 30, 14))
+    ct.setFrameOrigin_((4, (footer_h - 16) // 2))
+    ct.setFrameSize_(NSMakeSize(cw - 32, 16))
     footer.addSubview_(ct)
     app._state["_countdown_label"] = ct
 
-    gear = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 22, (footer_h - 20) // 2, 20, 20))
+    gear = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 24, (footer_h - 20) // 2, 20, 20))
     gear.setBordered_(False); gear.setTitle_("")
     gi = _sf_symbol("gearshape.fill", size=12, color=NSColor.tertiaryLabelColor())
     if gi: gear.setImage_(gi.image())
@@ -857,17 +920,21 @@ class FigWatch(NSObject):
         self._panel.setHasShadow_(True)
         self._panel.setOpaque_(False)
         self._panel.setBackgroundColor_(NSColor.clearColor())
-        glass = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 400))
-        glass.setMaterial_(3)
-        glass.setState_(1)
-        glass.setBlendingMode_(0)
-        glass.setWantsLayer_(True)
-        glass.layer().setCornerRadius_(12)
-        glass.layer().setMasksToBounds_(True)
+        # macOS Tahoe (26+) Liquid Glass matches Control Center exactly. Use the
+        # real NSGlassEffectView when available — it renders the glass and its own
+        # rounded shadow, and cornerRadius shapes it natively. Fall back to the
+        # menu material + rounded-rect maskImage on older macOS (class absent).
+        if _GLASS_CLS is not None:
+            glass = _GLASS_CLS.alloc().initWithFrame_(NSMakeRect(0, 0, W, 400))
+            glass.setCornerRadius_(POPOVER_CORNER_RADIUS)
+        else:
+            glass = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 400))
+            glass.setMaterial_(5)  # NSVisualEffectMaterialMenu
+            glass.setState_(1)
+            glass.setBlendingMode_(0)
+            glass.setMaskImage_(_rounded_mask_image(POPOVER_CORNER_RADIUS))
+        self._glass_is_container = _GLASS_CLS is not None
         self._panel.setContentView_(glass)
-        self._panel.contentView().superview().setWantsLayer_(True)
-        self._panel.contentView().superview().layer().setCornerRadius_(12)
-        self._panel.contentView().superview().layer().setMasksToBounds_(True)
 
         self._register_login_item()
 
@@ -1235,13 +1302,16 @@ class FigWatch(NSObject):
     def _rebuild_popover(self):
         view, h = self._build_current_view()
         content = self._panel.contentView()
-        for sub in list(content.subviews()):
-            sub.removeFromSuperview()
         view.setFrame_(NSMakeRect(0, 0, W, h))
         view.setDrawsBackground_(False) if hasattr(view, 'setDrawsBackground_') else None
         view.setWantsLayer_(True)
         view.layer().setBackgroundColor_(None)
-        content.addSubview_(view)
+        if self._glass_is_container:
+            content.setContentView_(view)  # NSGlassEffectView hosts a single content view
+        else:
+            for sub in list(content.subviews()):
+                sub.removeFromSuperview()
+            content.addSubview_(view)
         old_frame = self._panel.frame()
         new_y = old_frame.origin.y + old_frame.size.height - h
         self._panel.setFrame_display_(NSMakeRect(old_frame.origin.x, new_y, W, h), True)
@@ -1402,11 +1472,16 @@ class FigWatch(NSObject):
 
             # Accessory: the Figma settings path and a docs link as two tight,
             # left-aligned lines (one text view keeps their left edges identical),
-            # then the token input below.
+            # then the token input below. NSAlert pins the accessory 4px left of
+            # its message/informative text, so inset the content by LEFT=4 to line
+            # it up with "Connect to Figma" / "Paste\u2026" (verified via render test).
             acc_w = 360
+            LEFT = 4
+            cw = acc_w - LEFT * 2
             acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 80))
+            font = NSFont.systemFontOfSize_(NSFont.systemFontSize())
 
-            info = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 40))
+            info = NSTextView.alloc().initWithFrame_(NSMakeRect(LEFT, 0, cw, 40))
             info.setDrawsBackground_(False)
             info.setEditable_(False)
             info.setSelectable_(True)
@@ -1415,14 +1490,14 @@ class FigWatch(NSObject):
             body = NSMutableAttributedString.alloc().initWithString_attributes_(
                 "Figma \u2192 Settings \u2192 Security \u2192 Personal Access Tokens\n",
                 {
-                    NSFontAttributeName: NSFont.systemFontOfSize_(11),
+                    NSFontAttributeName: font,
                     NSForegroundColorAttributeName: NSColor.secondaryLabelColor(),
                 })
             body.appendAttributedString_(
                 NSAttributedString.alloc().initWithString_attributes_(
                     "see details here \u2197",
                     {
-                        NSFontAttributeName: NSFont.systemFontOfSize_(11),
+                        NSFontAttributeName: font,
                         NSForegroundColorAttributeName: NSColor.linkColor(),
                         NSLinkAttributeName: NSURL.URLWithString_(
                             "https://developers.figma.com/docs/rest-api/"
@@ -1433,10 +1508,10 @@ class FigWatch(NSObject):
             lm = info.layoutManager(); tc = info.textContainer()
             lm.ensureLayoutForTextContainer_(tc)
             text_h = lm.usedRectForTextContainer_(tc).size.height
-            info.setFrame_(NSMakeRect(0, 0, acc_w, text_h))
+            info.setFrame_(NSMakeRect(LEFT, 0, cw, text_h))
             acc.addSubview_(info)
 
-            inp = NSTextField.alloc().initWithFrame_(NSMakeRect(0, text_h + 10, acc_w, 24))
+            inp = NSTextField.alloc().initWithFrame_(NSMakeRect(LEFT, text_h + 10, cw, 24))
             inp.setPlaceholderString_("figd_...")
             if self._state["pat"]: inp.setStringValue_(self._state["pat"])
             acc.addSubview_(inp)
@@ -1485,23 +1560,36 @@ class FigWatch(NSObject):
 
         def _pill(title, action, width=SW, height=28):
             btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
-            btn.setTitle_(title)
             btn.setBordered_(False)
+            # Explicit labelColor title — a borderless layer-backed button's
+            # default title color does NOT adapt to dark mode (renders dark-on-
+            # dark). labelColor resolves per-appearance at draw time.
+            btn.setAttributedTitle_(
+                NSAttributedString.alloc().initWithString_attributes_(
+                    title,
+                    {
+                        NSForegroundColorAttributeName: NSColor.labelColor(),
+                        NSFontAttributeName: NSFont.systemFontOfSize_weight_(
+                            12, NSFontWeightMedium),
+                    }))
             btn.setWantsLayer_(True)
+            # Raised fill + hairline border so the chip reads as a tappable button
+            # in both light and dark (labelColor@6% was ~invisible on white).
             btn.layer().setBackgroundColor_(
-                NSColor.labelColor().colorWithAlphaComponent_(0.06).CGColor())
+                NSColor.labelColor().colorWithAlphaComponent_(0.10).CGColor())
             btn.layer().setCornerRadius_(height // 2)
-            btn.setFont_(NSFont.systemFontOfSize_weight_(12, NSFontWeightMedium))
+            btn.layer().setBorderWidth_(1)
+            btn.layer().setBorderColor_(NSColor.separatorColor().CGColor())
             btn.setTarget_(self); btn.setAction_(action)
             return btn
 
         def _sep():
             nonlocal y
-            y += 10
+            y += 12
             s = NSBox.alloc().initWithFrame_(NSMakeRect(0, y, SW, 1))
             s.setBoxType_(2)
             acc.addSubview_(s)
-            y += 14
+            y += 12
 
         def _section(title, icon_name, trailing_btn=None):
             nonlocal y
@@ -1532,7 +1620,7 @@ class FigWatch(NSObject):
             cf = control.frame()
             control.setFrameOrigin_((SW - cf.size.width, y))
             acc.addSubview_(control)
-            y += 30
+            y += 28
 
         # ── Triggers ──────────────────────────────────────────
         _section("Triggers", "bolt.fill")
@@ -1559,13 +1647,17 @@ class FigWatch(NSObject):
 
             tw = _label(trigger_word, size=13, weight=NSFontWeightMedium, mono=True)
             tw.sizeToFit()
+            # Clamp so a long keyword truncates instead of overrunning the skill
+            # name at x=100 (leaves a 4pt gap: 20 + 76 = 96).
+            tw.setFrameSize_(NSMakeSize(min(tw.frame().size.width, 76), tw.frame().size.height))
+            tw.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
             tw.setFrameOrigin_((20, (rh - tw.frame().size.height) / 2))
             row.addSubview_(tw)
 
             sn = _label(display, size=11, color=NSColor.secondaryLabelColor())
             sn.sizeToFit()
             sn.setFrameOrigin_((100, (rh - sn.frame().size.height) / 2))
-            sn.setFrameSize_(NSMakeSize(SW - 130, sn.frame().size.height))
+            sn.setFrameSize_(NSMakeSize(SW - 128, sn.frame().size.height))
             sn.cell().setLineBreakMode_(5)
             row.addSubview_(sn)
 
@@ -1581,7 +1673,7 @@ class FigWatch(NSObject):
             acc.addSubview_(row)
             y += 28
 
-        y += 10
+        y += 12
         add_lbl = _label("Add your own skill", size=11, color=NSColor.secondaryLabelColor())
         add_lbl.setFrameOrigin_((0, y))
         acc.addSubview_(add_lbl)
@@ -1603,20 +1695,20 @@ class FigWatch(NSObject):
             skill_paths.append(s["path"])
         sk_popup.addItemWithTitle_("Browse for file\u2026")
         acc.addSubview_(sk_popup)
-        y += 34
+        y += 32
 
-        add_btn = _pill("Add", b"doAddTriggerInline:", width=SW, height=22)
+        add_btn = _pill("Add", b"doAddTriggerInline:", width=SW, height=24)
         add_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
         add_btn.setFrameOrigin_((0, y))
         acc.addSubview_(add_btn)
-        y += 30
+        y += 32
 
         self._add_trigger_kw = kw_field
         self._add_trigger_sk = sk_popup
         self._add_trigger_paths = skill_paths
 
         # ── Connection ────────────────────────────────────────
-        tok_hdr_btn = _pill("Change Token\u2026", b"doToken:", width=120, height=22)
+        tok_hdr_btn = _pill("Change Token\u2026", b"doToken:", width=120, height=24)
         tok_hdr_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
         _section("Connection", "link", trailing_btn=tok_hdr_btn)
 
@@ -1635,10 +1727,12 @@ class FigWatch(NSObject):
             conn_row.addSubview_(conn_icon)
         conn_lbl = _label(conn_text, size=13)
         conn_lbl.sizeToFit()
+        conn_lbl.setFrameSize_(NSMakeSize(min(conn_lbl.frame().size.width, SW - 20), conn_lbl.frame().size.height))
+        conn_lbl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
         conn_lbl.setFrameOrigin_((20, (crh - conn_lbl.frame().size.height) / 2))
         conn_row.addSubview_(conn_lbl)
         acc.addSubview_(conn_row)
-        y += 22
+        y += 24
 
         tok_input = NSTextField.alloc().initWithFrame_(NSMakeRect(0, -100, 0, 0))
         if self._state.get("pat"):
@@ -1649,24 +1743,32 @@ class FigWatch(NSObject):
         gw = gateway_info()
         conn_btn = _pill("Switch…" if gw else "Sign in…",
                          b"doConnectGateway:" if gw else b"doClaudeAuth:",
-                         width=92, height=22)
+                         width=92, height=24)
         conn_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
         _section("AI", "cpu", trailing_btn=conn_btn)
 
         # Claude access status — company gateway (cc-switch) vs personal login.
+        # Mirror the Connection row: the icon must reflect real auth state, not a
+        # hard-coded checkmark. Authed = a gateway is configured OR personal login
+        # succeeded (cached deps from the last check).
+        ai_ok = bool(gw) or bool(self._state.get("deps", {}) and
+                                  self._state.get("deps", {}).get("claude_auth", {}).get("ok"))
         claude_text = f"Gateway · {gw['host']}" if gw else "Personal Claude login"
         crh = 20
         cr = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, crh))
-        cic = _sf_symbol("checkmark.circle.fill", size=12, color=NSColor.secondaryLabelColor())
+        cic = _sf_symbol("checkmark.circle.fill" if ai_ok else "xmark.circle",
+                         size=12, color=NSColor.secondaryLabelColor())
         if cic:
             cic.setFrameOrigin_((0, (crh - cic.frame().size.height) / 2))
             cr.addSubview_(cic)
         cl = _label(claude_text, size=13)
         cl.sizeToFit()
+        cl.setFrameSize_(NSMakeSize(min(cl.frame().size.width, SW - 20), cl.frame().size.height))
+        cl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
         cl.setFrameOrigin_((20, (crh - cl.frame().size.height) / 2))
         cr.addSubview_(cl)
         acc.addSubview_(cr)
-        y += 22
+        y += 24
 
         if gw:
             # The model is dictated by the gateway (cc-switch); show it read-only
@@ -1675,6 +1777,10 @@ class FigWatch(NSObject):
             mval = _label((gw.get("model") or "gateway default") + "  (set in cc-switch)",
                           size=12, color=NSColor.secondaryLabelColor())
             mval.sizeToFit()
+            # Cap so a long gateway model id truncates instead of running off the
+            # left edge (the row right-aligns the value at SW - width).
+            mval.setFrameSize_(NSMakeSize(min(mval.frame().size.width, SW - 64), mval.frame().size.height))
+            mval.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
             _row("Model", mval)
         else:
             model_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 180, 24), False)
@@ -1703,7 +1809,7 @@ class FigWatch(NSObject):
         _row("UX workers", ux_popup)
 
         # ── About ─────────────────────────────────────────────
-        upd_hdr_btn = _pill("Check for Updates", b"doCheckUpdate:", width=140, height=22)
+        upd_hdr_btn = _pill("Check for Updates", b"doCheckUpdate:", width=140, height=24)
         upd_hdr_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
         _section("About", "info.circle", trailing_btn=upd_hdr_btn)
 
@@ -1794,71 +1900,6 @@ class FigWatch(NSObject):
             self._commit_trigger(keyword, skill_path)
             self._add_trigger_kw.setStringValue_("")
             _post_notification("FigWatch", f"Trigger {keyword} added")
-
-    @objc.typedSelector(b"v@:@")
-    def doAddTrigger_(self, sender):
-        try:
-            NSApp.abortModal()
-            NSApp.keyWindow().orderOut_(None)
-        except Exception:
-            pass
-
-        from figwatch.skills import find_skills as _find_skills
-        available = _find_skills()
-
-        NSApp.activateIgnoringOtherApps_(True)
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_("Add Trigger")
-        alert.setInformativeText_("Enter the trigger keyword and select a skill.")
-        alert.addButtonWithTitle_("Add")
-        alert.addButtonWithTitle_("Cancel")
-
-        acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, 340, 120))
-
-        kw_label = _label("Trigger keyword (e.g. @a11y)", size=11)
-        kw_label.setFrameOrigin_((0, 0))
-        acc.addSubview_(kw_label)
-        kw_input = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 18, 340, 24))
-        kw_input.setPlaceholderString_("@keyword")
-        acc.addSubview_(kw_input)
-
-        sk_label = _label("Skill", size=11)
-        sk_label.setFrameOrigin_((0, 50))
-        acc.addSubview_(sk_label)
-
-        sk_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 68, 260, 24), False)
-        sk_popup.setFont_(NSFont.systemFontOfSize_(11))
-        skill_paths = []
-        for s in available:
-            label = s["name"] + (" (built-in)" if s["builtin"] else "")
-            sk_popup.addItemWithTitle_(label)
-            skill_paths.append(s["path"])
-        sk_popup.addItemWithTitle_("Browse for file\u2026")
-        acc.addSubview_(sk_popup)
-
-        sk_path_label = _label("", size=9, color=NSColor.tertiaryLabelColor())
-        sk_path_label.setFrameOrigin_((0, 96))
-        sk_path_label.setFrameSize_(NSMakeSize(340, 14))
-        if skill_paths:
-            sk_path_label.setStringValue_(skill_paths[0])
-        acc.addSubview_(sk_path_label)
-
-        acc.setFrameSize_(NSMakeSize(340, 114))
-        alert.setAccessoryView_(acc)
-        alert.window().setInitialFirstResponder_(kw_input)
-
-        if alert.runModal() == NSAlertFirstButtonReturn:
-            keyword = kw_input.stringValue().strip()
-            sel = sk_popup.indexOfSelectedItem()
-            if sel < len(skill_paths):
-                self._commit_trigger(keyword, skill_paths[sel])
-            else:
-                panel = NSOpenPanel.alloc().init()
-                panel.setCanChooseFiles_(True)
-                panel.setCanChooseDirectories_(False)
-                panel.setAllowedFileTypes_(["md"])
-                if panel.runModal() == NSModalResponseOK:
-                    self._commit_trigger(keyword, panel.URLs()[0].path())
 
     def _commit_trigger(self, keyword, skill_path):
         if not keyword or not skill_path:
