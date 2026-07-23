@@ -159,6 +159,16 @@ figwatch/skills/                 bundled skill definitions (.md) + reference fil
 - **Fast path / slow path split** — `detect_triggers()` is a single API call (<1s); `process_work_item()` runs on worker threads and can take 30–120s
 - **Multi-file, multi-worker** — each watched file gets its own `FigmaWatcher` thread; work items are dispatched to shared queues processed by configurable worker pools
 
+## What's new in v1.4.2 (macOS app)
+
+UI polish pass — macOS app only, server unchanged:
+
+- **Liquid Glass popover** — on macOS 26 (Tahoe) the menu-bar panel now uses the system `NSGlassEffectView` (the real Liquid Glass, matching Control Center), with antialiased rounded corners and a correctly-shaped shadow. Falls back to the frosted *menu* material on older macOS.
+- **Dark mode fixes** — the Settings action buttons (Add / Change Token… / Switch… / Check for Updates) now use adaptive `labelColor` text so they're legible in dark mode (previously dark-on-dark), and the pill background is visible as a button in both appearances. The AI-section status icon now reflects the real sign-in state instead of always showing a checkmark.
+- **No more clipped text** — long trigger keywords, gateway model names, gateway hosts, usernames, and the trigger subline now truncate with an ellipsis instead of overlapping neighbours or running off the panel edge.
+- **"Connect to Figma" dialog** — the settings path and `see details here ↗` link match the dialog's text size, and the path, link, and token field all left-align with the title.
+- **4pt-grid layout** — all spacing, sizing, and corner radii snapped to a 4pt grid for a more consistent rhythm (font sizes left at native macOS values). Status-indicator dots now align with the row icons; light-mode badge contrast improved.
+
 ## What's new in v1.4.1 (macOS app)
 
 Polish and fixes on top of v1.4.0 (macOS app only — server unchanged):
