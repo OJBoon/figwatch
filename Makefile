@@ -13,6 +13,10 @@ help:
 # Install Python build dependencies needed to build the macOS app
 install:
 	python3.11 -m pip install setuptools py2app pyobjc
+	# The .app bundles `anthropic` (gateway users audit via the Messages API,
+	# no CLI), so its runtime deps must be importable for py2app to graph them.
+	# pip install -e . pulls them from pyproject's [project].dependencies.
+	python3.11 -m pip install -e .
 
 # Build the macOS .app bundle
 build:
