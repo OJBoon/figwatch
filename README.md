@@ -159,6 +159,15 @@ figwatch/skills/                 bundled skill definitions (.md) + reference fil
 - **Fast path / slow path split** — `detect_triggers()` is a single API call (<1s); `process_work_item()` runs on worker threads and can take 30–120s
 - **Multi-file, multi-worker** — each watched file gets its own `FigmaWatcher` thread; work items are dispatched to shared queues processed by configurable worker pools
 
+## What's new in v1.4.3 (macOS app)
+
+No-CLI gateway support — macOS app only, server unchanged:
+
+- **Gateway audits run via the Anthropic API directly — no `claude` CLI needed.** When a company/self-hosted gateway is configured (a cc-switch profile that writes `ANTHROPIC_BASE_URL` + token into `~/.claude/settings.json`, or a URL+token you paste into FigWatch), audits *and* skill introspection now talk to the gateway through the Messages API. Personal `claude login` users keep the CLI path.
+- **Robust gateway detection** — the config is discovered across six sources (Claude Code `settings.json`, `settings.local.json`, XDG config, `~/.claude.json`, the environment, and a manual `~/.figwatch/gateway.json`), each read gracefully, so a profile stored somewhere non-standard is still found.
+- **Manual gateway entry** — a "Manual" onboarding option lets you paste a gateway URL + token directly (written `0600` to `~/.figwatch/gateway.json`) when you don't use cc-switch.
+- **Onboarding adapts to gateway mode** — the "Claude Code" install step is hidden when a gateway is active (the CLI isn't a dependency), leaving the Figma token as the only setup step.
+
 ## What's new in v1.4.2 (macOS app)
 
 UI polish pass — macOS app only, server unchanged:
