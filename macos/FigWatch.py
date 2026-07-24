@@ -31,9 +31,6 @@ from PyObjCTools import AppHelper
 import figwatch.handlers as handlers
 from figwatch.domain import (
     STATUS_LIVE,
-    AuditCompleted,
-    AuditFailed,
-    AuditStarted,
     AuditStatus,
 )
 
@@ -118,6 +115,11 @@ PAD = 12
 ROW_H = 28
 MAX_FILE_ROWS = 12  # scroll if more than this
 POPOVER_CORNER_RADIUS = 16  # match macOS Tahoe native menu/popover rounding
+
+# Auto-watch poll interval choices (seconds), offered in Settings. 15s is the
+# floor — shorter risks Figma rate limits when many files are watched.
+INTERVAL_PRESETS = [15, 30, 45, 60]
+DEFAULT_INTERVAL = 30
 
 # macOS 26 (Tahoe) Liquid Glass container; None on older macOS (we fall back to
 # NSVisualEffectView). Looked up dynamically so the app still runs pre-Tahoe.
@@ -858,7 +860,7 @@ def build_popover_view(app):
     root.addSubview_(sep)
     y += 8
 
-    poll_interval = 30
+    poll_interval = app._state.get("poll_interval", DEFAULT_INTERVAL)
     last_polls = [s.get("last_poll") for s in file_statuses.values() if s.get("last_poll")]
     if last_polls:
         most_recent = max(last_polls)
@@ -924,6 +926,8 @@ class FigWatch(NSObject):
         self._state["locale"] = config.get("watchLocale", "uk")
         self._state["model"] = config.get("aiModel", "sonnet")
         self._state["reply_lang"] = config.get("replyLang", "en")
+        iv = config.get("watchInterval", DEFAULT_INTERVAL)
+        self._state["poll_interval"] = iv if iv in INTERVAL_PRESETS else DEFAULT_INTERVAL
 
         menubar = NSMenu.alloc().init()
         edit_menu = NSMenu.alloc().initWithTitle_("Edit")
@@ -1043,7 +1047,7 @@ class FigWatch(NSObject):
         if new_keys:
             n = len(new_keys)
             for i, key in enumerate(new_keys):
-                delay = (30.0 / n) * i if n > 1 else 0
+                delay = (self._state.get("poll_interval", DEFAULT_INTERVAL) / n) * i if n > 1 else 0
                 self._start_watcher(merged[key], initial_delay=delay)
 
         manual_keys = {f["key"] for f in manual}
@@ -1080,32 +1084,59 @@ class FigWatch(NSObject):
             t.start()
             self._state["workers"].append(t)
 
+    def _set_file_status(self, key, status, *, trigger=None, user=None, error=None,
+                         revert_after=None):
+        """Drive a watched file's row status from the worker thread, then refresh
+        the popover + menu-bar icon. Pass revert_after to fall back to LIVE after
+        a delay (the brief REPLIED flash once an audit succeeds)."""
+        fs = self._state["file_statuses"].get(key)
+        if fs is None:
+            return
+        fs["status"] = status
+        if trigger is not None:
+            fs["trigger"] = trigger
+        if user is not None:
+            fs["user"] = user
+        fs["error"] = error
+        self._schedule_refresh()
+        self._update_icon_state()
+        if revert_after is not None:
+            def _revert():
+                cur = self._state.get("file_statuses", {}).get(key)
+                if cur is not None and cur.get("status") == status:
+                    cur["status"] = STATUS_LIVE
+                    self._schedule_refresh()
+                    self._update_icon_state()
+            threading.Timer(revert_after, _revert).start()
+
     def _worker_loop(self, q):
         seen = set()
         while True:
-            audit = q.get()
-            if audit is None:
+            item = q.get()
+            if item is None:
                 break
+            audit, ack_id = item
             comment_id = audit.comment.comment_id
+            svc = self._state.get("audit_service")
             if comment_id in seen:
+                # The ack was already posted at dispatch; delete it so a skipped
+                # duplicate doesn't leave a dangling "working on it\u2026" reply.
+                if ack_id and svc:
+                    with contextlib.suppress(Exception):
+                        svc.delete_ack(audit, ack_id)
                 continue
             seen.add(comment_id)
-            svc = self._state.get("audit_service")
             if not svc:
                 continue
             trigger_name = audit.trigger_match.trigger.keyword.lstrip('@')
             node_id = audit.comment.node_id
             file_key = audit.comment.file_key
             self._write_log(f"\u2699\ufe0f  Starting {trigger_name} audit on {file_key} node {node_id}")
-            ack_id = None
-            try:
-                ack_id = svc.post_ack(
-                    audit,
-                    f'\u23f3 {trigger_name} audit received \u2014 working on it\u2026',
-                )
-                self._write_log("\u2709\ufe0f  Ack posted")
-            except Exception as e:
-                self._write_log(f"\u26a0\ufe0f Ack failed: {e}")
+            self._set_file_status(
+                file_key, STATUS_PROCESSING,
+                trigger=audit.trigger_match.trigger.keyword,
+                user=audit.comment.user_handle,
+            )
             try:
                 response = svc.execute(audit)
                 self._write_log(f"\u2705 Audit complete ({len(response)} chars)")
@@ -1113,8 +1144,10 @@ class FigWatch(NSObject):
                     svc.delete_ack(audit, ack_id)
                 svc.post_reply(audit, response)
                 self._write_log("\u2709\ufe0f  Reply posted")
+                self._set_file_status(file_key, STATUS_REPLIED, revert_after=4.0)
             except Exception as e:
                 self._write_log(f"\u26a0\ufe0f Audit failed: {e}")
+                self._set_file_status(file_key, STATUS_ERROR, error=str(e))
                 # Post a short reply instead of going silent: the reviewer gets
                 # feedback, and because the trigger now has a reply it won't be
                 # re-audited on the next poll (avoids a bad frame clogging the worker).
@@ -1166,33 +1199,26 @@ class FigWatch(NSObject):
         if "audit_service" not in self._state:
             self._state["audit_service"] = self._build_audit_service()
 
-        def event_listener(event, audit):
-            if key not in self._state["file_statuses"]:
-                return
-            fs = self._state["file_statuses"][key]
-            if isinstance(event, AuditStarted):
-                fs["status"] = STATUS_PROCESSING
-                fs["trigger"] = audit.trigger_match.trigger.keyword
-                fs["user"] = audit.comment.user_handle
-            elif isinstance(event, AuditCompleted):
-                fs["status"] = STATUS_REPLIED
-                def _revert(k=key):
-                    if k in self._state.get("file_statuses", {}):
-                        self._state["file_statuses"][k]["status"] = STATUS_LIVE
-                        self._schedule_refresh()
-                threading.Timer(4.0, _revert).start()
-            elif isinstance(event, AuditFailed):
-                fs["status"] = STATUS_ERROR
-                fs["error"] = event.error
-            self._schedule_refresh()
-            self._update_icon_state()
-
         def dispatch(audit):
             trigger_kw = audit.trigger_match.trigger.keyword
-            if trigger_kw == "@tone":
-                self._state["work_queue_tone"].put(audit)
-            else:
-                self._state["work_queue_ux"].put(audit)
+            trigger_name = trigger_kw.lstrip("@")
+            # Post the ack the instant the poll detects the trigger, on the poll
+            # thread -- NOT when a worker dequeues it. Otherwise a busy worker
+            # (audits take 30-120s) makes the "working on it" reply wait behind
+            # the whole queue. The worker later replaces/deletes it via ack_id.
+            svc = self._state.get("audit_service")
+            ack_id = None
+            if svc:
+                try:
+                    ack_id = svc.post_ack(
+                        audit,
+                        f'⏳ {trigger_name} audit received — working on it…',
+                    )
+                    self._write_log("✉️  Ack posted")
+                except Exception as e:
+                    self._write_log(f"⚠️ Ack failed: {e}")
+            q_key = "work_queue_tone" if trigger_kw == "@tone" else "work_queue_ux"
+            self._state[q_key].put((audit, ack_id))
 
         def on_poll():
             if key in self._state["file_statuses"]:
@@ -1205,8 +1231,8 @@ class FigWatch(NSObject):
             trigger_config=self._state["trigger_config"],
             dispatch=dispatch,
             on_poll=on_poll,
-            event_listener=event_listener,
             initial_delay=initial_delay,
+            interval=self._state.get("poll_interval", DEFAULT_INTERVAL),
         )
         w.start()
         self._state["watchers"][key] = w
@@ -1838,6 +1864,14 @@ class FigWatch(NSObject):
         ux_popup.selectItemAtIndex_(config.get("workersUx", 1) - 1)
         _row("UX workers", ux_popup)
 
+        interval_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 120, 24), False)
+        for s in INTERVAL_PRESETS: interval_popup.addItemWithTitle_(f"{s} seconds")
+        # poll_interval is coerced into INTERVAL_PRESETS at config load, so it is
+        # always a valid member here.
+        interval_popup.selectItemAtIndex_(
+            INTERVAL_PRESETS.index(self._state.get("poll_interval", DEFAULT_INTERVAL)))
+        _row("Check interval", interval_popup)
+
         # ── About ─────────────────────────────────────────────
         upd_hdr_btn = _pill("Check for Updates", b"doCheckUpdate:", width=140, height=24)
         upd_hdr_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
@@ -1880,6 +1914,7 @@ class FigWatch(NSObject):
             new_lang = lrmap.get(lang_popup.indexOfSelectedItem(), "en")
             new_tone_workers = tone_popup.indexOfSelectedItem() + 1
             new_ux_workers = ux_popup.indexOfSelectedItem() + 1
+            new_interval = INTERVAL_PRESETS[interval_popup.indexOfSelectedItem()]
 
             needs_restart = False
             c = _load_config()
@@ -1895,6 +1930,10 @@ class FigWatch(NSObject):
                 c["workersTone"] = new_tone_workers
                 c["workersUx"] = new_ux_workers
                 needs_restart = True
+            if new_interval != self._state.get("poll_interval"):
+                self._state["poll_interval"] = new_interval
+                c["watchInterval"] = new_interval
+                needs_restart = True
             _save_config(c)
 
             if needs_restart and self._state.get("watchers"):
@@ -1903,7 +1942,7 @@ class FigWatch(NSObject):
                 watched = self._state.get("watched", [])
                 n = len(watched)
                 for i, f in enumerate(watched):
-                    delay = (30.0 / n) * i if n > 1 else 0
+                    delay = (self._state.get("poll_interval", DEFAULT_INTERVAL) / n) * i if n > 1 else 0
                     self._start_watcher(f, initial_delay=delay)
 
     # ── Trigger management ─────────────────────────────────────
