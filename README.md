@@ -159,6 +159,14 @@ figwatch/skills/                 bundled skill definitions (.md) + reference fil
 - **Fast path / slow path split** — `detect_triggers()` is a single API call (<1s); `process_work_item()` runs on worker threads and can take 30–120s
 - **Multi-file, multi-worker** — each watched file gets its own `FigmaWatcher` thread; work items are dispatched to shared queues processed by configurable worker pools
 
+## What's new in v1.4.5 (macOS app)
+
+Faster, more responsive comment handling — macOS app only, server unchanged:
+
+- **Instant "working on it" reply.** The acknowledgement now posts the moment a poll detects an `@ux`/`@tone` comment, instead of waiting for a worker to pick the audit up. With a busy worker (audits take 30–120s) the ack no longer sits behind the queue — it lands within one poll cycle.
+- **Configurable check interval.** Settings → **Check interval** lets you pick how often FigWatch polls (15 / 30 / 45 / 60 seconds; default 30). Lower it for snappier detection.
+- **Live status indicators.** The popover row and menu-bar icon now reflect real audits — *processing* while an audit runs, briefly *replied* on success (then back to live), or *error* on failure.
+
 ## What's new in v1.4.4 (macOS app)
 
 No-CLI gateway support — macOS app only, server unchanged:
