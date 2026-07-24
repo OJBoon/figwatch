@@ -975,6 +975,20 @@ class FigWatch(NSObject):
         if self._state["pat"]:
             threading.Thread(target=self._app_init, daemon=True).start()
 
+        # Confirm a just-completed self-update (the download/quit/relaunch is
+        # otherwise silent). The marker is written right before the update quit.
+        pending = config.get("pendingUpdate")
+        if pending:
+            c = _load_config()
+            c.pop("pendingUpdate", None)
+            _save_config(c)
+            self._show_update_hud(f"Updated to {pending} ✓", spinning=False)
+            threading.Timer(
+                2.5,
+                lambda: self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                    b"_hide_update_hud:", None, False),
+            ).start()
+
     # ── Logging ─────────────────────────────────────────────────
 
     def _write_log(self, msg):
@@ -2012,6 +2026,65 @@ class FigWatch(NSObject):
         c["triggers"] = trigger_config
         _save_config(c)
 
+    # ── Update progress HUD ────────────────────────────────────
+    # System notifications (NSUserNotification) are dead on modern macOS, so the
+    # self-update flow needs visible in-app feedback instead of a silent
+    # download + quit + relaunch.
+
+    def _show_update_hud(self, message, *, spinning=True):
+        """Show (or update) a small centered panel with a status line. Main thread."""
+        panel = getattr(self, "_hud_panel", None)
+        if panel is None:
+            w, h = 300, 100
+            panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(0, 0, w, h),
+                NSWindowStyleMaskTitled | NSWindowStyleMaskUtilityWindow,
+                NSBackingStoreBuffered, False)
+            panel.setTitle_("FigWatch")
+            panel.setLevel_(NSFloatingWindowLevel)
+            panel.setReleasedWhenClosed_(False)
+            panel.center()
+            content = panel.contentView()
+
+            spinner = NSProgressIndicator.alloc().initWithFrame_(
+                NSMakeRect((w - 24) / 2, h - 46, 24, 24))
+            spinner.setStyle_(1)  # NSProgressIndicatorStyleSpinning
+            spinner.setIndeterminate_(True)
+            content.addSubview_(spinner)
+
+            label = _label(message, size=13)
+            label.setAlignment_(2)  # NSTextAlignmentCenter
+            label.setFrame_(NSMakeRect(16, 20, w - 32, 20))
+            content.addSubview_(label)
+
+            self._hud_panel = panel
+            self._hud_spinner = spinner
+            self._hud_label = label
+        else:
+            self._hud_label.setStringValue_(message)
+        self._hud_spinner.setHidden_(not spinning)
+        if spinning:
+            self._hud_spinner.startAnimation_(None)
+        else:
+            self._hud_spinner.stopAnimation_(None)
+        self._hud_panel.orderFrontRegardless()
+        NSApp.activateIgnoringOtherApps_(True)
+
+    @objc.typedSelector(b"v@:@")
+    def _set_update_hud_(self, message):
+        """Main-thread selector: update the HUD status line from a bg thread."""
+        if getattr(self, "_hud_label", None) is not None:
+            self._hud_label.setStringValue_(str(message))
+            self._hud_panel.orderFrontRegardless()
+
+    @objc.typedSelector(b"v@:@")
+    def _hide_update_hud_(self, _):
+        """Main-thread selector: stop the spinner and close the HUD."""
+        if getattr(self, "_hud_spinner", None) is not None:
+            self._hud_spinner.stopAnimation_(None)
+        if getattr(self, "_hud_panel", None) is not None:
+            self._hud_panel.orderOut_(None)
+
     # ── Update check ───────────────────────────────────────────
 
     @objc.typedSelector(b"v@:@")
@@ -2066,9 +2139,10 @@ class FigWatch(NSObject):
             alert.addButtonWithTitle_("Later")
             resp = alert.runModal()
             if resp == NSAlertFirstButtonReturn:
-                _post_notification("FigWatch", "Downloading update\u2026")
+                self._show_update_hud("Downloading update\u2026")
                 threading.Thread(
-                    target=self._install_update, args=(zip_url, release_ts), daemon=True
+                    target=self._install_update,
+                    args=(zip_url, release_ts, latest.get("tag", "")), daemon=True
                 ).start()
             elif resp == NSAlertSecondButtonReturn:
                 NSWorkspace.sharedWorkspace().openURL_(
@@ -2080,7 +2154,7 @@ class FigWatch(NSObject):
                 NSWorkspace.sharedWorkspace().openURL_(
                     NSURL.URLWithString_(latest.get("url", RELEASES_URL)))
 
-    def _install_update(self, zip_url, release_ts=""):
+    def _install_update(self, zip_url, release_ts="", tag=""):
         import shutil
         try:
             cache = os.path.join(HOME, "Library", "Caches", "FigWatch")
@@ -2090,6 +2164,9 @@ class FigWatch(NSObject):
 
             with urllib.request.urlopen(zip_url, timeout=120, context=_SSL_CTX) as r, open(zip_path, "wb") as f:
                 shutil.copyfileobj(r, f)
+
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                b"_set_update_hud:", "Installing update…", False)
 
             shutil.rmtree(staging, ignore_errors=True)
             os.makedirs(staging, exist_ok=True)
@@ -2131,10 +2208,18 @@ class FigWatch(NSObject):
                 start_new_session=True,
             )
 
+            c = _load_config()
             if release_ts:
-                c = _load_config()
                 c["installedReleaseTimestamp"] = release_ts
-                _save_config(c)
+            # Marker so the relaunched app can confirm the update (the restart is
+            # otherwise silent). Cleared on next launch after the confirmation.
+            c["pendingUpdate"] = tag or "the latest version"
+            _save_config(c)
+
+            # Hold the final state briefly so it's seen before the app vanishes.
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                b"_set_update_hud:", "Restarting FigWatch…", False)
+            time.sleep(0.8)
 
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 b"_quitForUpdate:", None, False)
@@ -2150,6 +2235,7 @@ class FigWatch(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def showInstallError_(self, _):
+        self._hide_update_hud_(None)
         err = getattr(self, "_update_error", "Unknown error")
         NSApp.activateIgnoringOtherApps_(True)
         alert = NSAlert.alloc().init()
