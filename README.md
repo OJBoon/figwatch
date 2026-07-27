@@ -159,6 +159,13 @@ figwatch/skills/                 bundled skill definitions (.md) + reference fil
 - **Fast path / slow path split** — `detect_triggers()` is a single API call (<1s); `process_work_item()` runs on worker threads and can take 30–120s
 - **Multi-file, multi-worker** — each watched file gets its own `FigmaWatcher` thread; work items are dispatched to shared queues processed by configurable worker pools
 
+## What's new in v1.4.7 (macOS app)
+
+Bug fixes — macOS app only, server unchanged:
+
+- **Audits no longer fail with "Could not find skill".** The bundled `tone`/`ux` skill definitions are extracted from the app on first launch; a previous interrupted extraction could leave an empty cache that was then trusted on every launch (and across updates), breaking every audit. The extractor now confirms completion with a sentinel and self-heals a partial cache.
+- **Update dialog fixes.** "Check for Updates" no longer offers to "update" to the version you're already on, and the dialog no longer shows raw Markdown from the release notes (full notes are one click away via **View on GitHub**).
+
 ## What's new in v1.4.6 (macOS app)
 
 Clearer self-update — macOS app only, server unchanged:
