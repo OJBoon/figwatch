@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -32,26 +33,30 @@ def _extract_bundled_skills():
     if _BUNDLED_SKILLS.is_dir():
         return _BUNDLED_SKILLS
 
-    # Running from zip — extract to a persistent temp dir
+    # Running from a zip (py2app): extract to a persistent temp dir. A `.complete`
+    # sentinel guards the fast path — mere directory existence is NOT enough: an
+    # interrupted or partial extraction leaves the dir tree but no files, which
+    # would otherwise be locked in and make every skill fail to resolve on every
+    # later launch. Clear any partial state and re-extract until it fully succeeds.
     extract_dir = Path(tempfile.gettempdir()) / 'figwatch-skills'
-    if extract_dir.is_dir():
+    if (extract_dir / '.complete').exists():
         return extract_dir
 
+    def _copy_tree(src, dst):
+        dst.mkdir(parents=True, exist_ok=True)
+        for item in src.iterdir():
+            target = dst / item.name
+            if item.is_dir():
+                _copy_tree(item, target)
+            else:
+                target.write_bytes(item.read_bytes())
+
     try:
+        shutil.rmtree(extract_dir, ignore_errors=True)
         pkg = importlib.resources.files('figwatch') / 'skills'
         for skill_name in ('ux', 'tone'):
-            skill_pkg = pkg / skill_name
-            for item in skill_pkg.iterdir():
-                if item.is_file():
-                    dest = extract_dir / skill_name / item.name
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    dest.write_bytes(item.read_bytes())
-                elif item.name == 'references':
-                    for ref in item.iterdir():
-                        if ref.is_file():
-                            dest = extract_dir / skill_name / 'references' / ref.name
-                            dest.parent.mkdir(parents=True, exist_ok=True)
-                            dest.write_bytes(ref.read_bytes())
+            _copy_tree(pkg / skill_name, extract_dir / skill_name)
+        (extract_dir / '.complete').write_text('')  # only after all files written
     except Exception as e:
         logger.warning('Failed to extract bundled skills: %s', e)
         return _BUNDLED_SKILLS
