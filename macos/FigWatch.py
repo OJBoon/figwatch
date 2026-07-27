@@ -2115,22 +2115,26 @@ class FigWatch(NSObject):
 
         cur = _parse_version(VERSION)
         new = _parse_version(latest.get("tag", ""))
-        installed_ts = _load_config().get("installedReleaseTimestamp", "")
         release_ts = latest.get("published_at", "")
-        is_newer = new > cur or (new == cur and release_ts and release_ts != installed_ts)
-        if not is_newer:
+        # Only a strictly higher version is an update. A matching version is up
+        # to date even if the release timestamp differs (e.g. after a manual or
+        # install.sh install that never recorded a timestamp) \u2014 otherwise the
+        # dialog offers to "update" to the version you're already on.
+        if new <= cur:
             alert.setMessageText_("You\u2019re up to date")
             alert.setInformativeText_(f"FigWatch v{VERSION} is the latest version.")
             alert.addButtonWithTitle_("OK")
             alert.runModal()
             return
 
-        body = (latest.get("body") or "").strip()
-        if len(body) > 500:
-            body = body[:500].rstrip() + "\u2026"
+        # The GitHub release body is Markdown (headers, **bold**, manual-install
+        # steps that don't apply in-app), so don't dump it raw \u2014 show a clean
+        # line and point at "View on GitHub" for the full notes.
         alert.setMessageText_(f"Update available: {latest.get('tag', '')}")
         alert.setInformativeText_(
-            f"You\u2019re on v{VERSION}.\n\n{body}" if body else f"You\u2019re on v{VERSION}.")
+            f"You\u2019re on v{VERSION}. Install & Restart downloads the update and "
+            f"relaunches FigWatch automatically.\n\n"
+            f"See View on GitHub for the full release notes.")
 
         zip_url = latest.get("zip_url")
         if zip_url:
