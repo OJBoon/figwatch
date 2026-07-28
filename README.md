@@ -180,7 +180,10 @@ Faster, more responsive comment handling — macOS app only, server unchanged:
 - **Configurable check interval.** Settings → **Check interval** lets you pick how often FigWatch polls (15 / 30 / 45 / 60 seconds; default 30). Lower it for snappier detection.
 - **Live status indicators.** The popover row and menu-bar icon now reflect real audits — *processing* while an audit runs, briefly *replied* on success (then back to live), or *error* on failure.
 
-## What's new in v1.4.4 (macOS app)
+<details>
+<summary>Previous releases</summary>
+
+### v1.4.4 (macOS app)
 
 No-CLI gateway support — macOS app only, server unchanged:
 
@@ -189,7 +192,7 @@ No-CLI gateway support — macOS app only, server unchanged:
 - **Manual gateway entry** — a "Manual" onboarding option lets you paste a gateway URL + token directly (written `0600` to `~/.figwatch/gateway.json`) when you don't use cc-switch.
 - **Onboarding adapts to gateway mode** — the "Claude Code" install step is hidden when a gateway is active (the CLI isn't a dependency), leaving the Figma token as the only setup step.
 
-## What's new in v1.4.2 (macOS app)
+### v1.4.2 (macOS app)
 
 UI polish pass — macOS app only, server unchanged:
 
@@ -199,7 +202,7 @@ UI polish pass — macOS app only, server unchanged:
 - **"Connect to Figma" dialog** — the settings path and `see details here ↗` link match the dialog's text size, and the path, link, and token field all left-align with the title.
 - **4pt-grid layout** — all spacing, sizing, and corner radii snapped to a 4pt grid for a more consistent rhythm (font sizes left at native macOS values). Status-indicator dots now align with the row icons; light-mode badge contrast improved.
 
-## What's new in v1.4.1 (macOS app)
+### v1.4.1 (macOS app)
 
 Polish and fixes on top of v1.4.0 (macOS app only — server unchanged):
 
@@ -208,14 +211,14 @@ Polish and fixes on top of v1.4.0 (macOS app only — server unchanged):
 - **Onboarding polish** — the setup checklist uses the same row spacing as the rest of Settings, and the AI row wording is consistent (**Gateway** / **Gateway profile** / *Connected via gateway*).
 - **Settings** — the "Add your own skill" row and its **Add** button match the styling of the other Settings controls.
 
-## What's new in v1.4.0 (macOS app)
+### v1.4.0 (macOS app)
 
 - **Company / custom gateway support** — the macOS app now defers to whatever the Claude CLI is configured with. If `~/.claude/settings.json` defines an `ANTHROPIC_BASE_URL` + token (e.g. an active [cc-switch](https://github.com/farion1231/cc-switch) company profile), FigWatch detects it, authenticates via the gateway (no personal `claude login` needed), and uses the gateway's own model. Onboarding offers both **Company** (opens cc-switch) and **Personal** login paths.
 - **Gateway visible & switchable in Settings** — the AI section shows `Gateway · <host>` (or `Personal Claude login`) with a **Switch…** / **Sign in…** button; in gateway mode the model is shown read-only (set in cc-switch).
 - **Sign-off shows skill + duration** — replies end with `— FigWatch · <skill> skill · <duration> · <model>`.
 - **No more silent failures** — if an audit can't complete (e.g. a comment on a non-renderable frame), it posts a short "couldn't complete — re-trigger to retry" reply instead of going silent, and a bad frame no longer clogs the worker (fetches fail fast).
 
-## What's new in v1.3.0
+### v1.3.0
 
 - **Webhook-driven server** — replaced polling with Figma `FILE_COMMENT` webhooks; audits trigger in real time with no polling delay. See the [Docker setup guide](docs/docker.md) for webhook registration.
 - **Google Gemini support** — primary provider for Docker deployments (free tier available); Anthropic Claude remains fully supported
@@ -226,7 +229,7 @@ Polish and fixes on top of v1.4.0 (macOS app only — server unchanged):
 - **Domain-driven package structure** — business logic (`processor.py`, `skills.py`) separated from provider implementations (`providers/figma.py`, `providers/ai/`)
 - **Concurrent webhook workers** — `ThreadPoolExecutor` replaces thread-per-request; configurable via `FIGWATCH_WORKERS`
 
-## What's new in v1.2.0
+### v1.2.0
 
 - **Docker / server deployment** — run FigWatch as a headless server with no macOS dependency
 - **Multi-file watching** — watch multiple Figma files simultaneously with live status indicators (live, processing, replied, error) per file
@@ -236,9 +239,6 @@ Polish and fixes on top of v1.4.0 (macOS app only — server unchanged):
 - **Skill introspection cache** — custom skills are analysed once via Haiku to determine compatibility and data requirements; built-in skills use pre-seeded cache data
 - **Removed CDP dependency** — no more Chrome DevTools Protocol, no more auto-relaunching Figma, no more port 9222; file detection is now URL-based
 - **Removed dedicated handlers** — `handlers/tone.py` and `handlers/ux.py` replaced by generic skill execution; the skill `.md` files are the single source of truth
-
-<details>
-<summary>Previous releases</summary>
 
 ### v1.1.5
 
