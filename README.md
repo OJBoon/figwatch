@@ -159,6 +159,10 @@ figwatch/skills/                 bundled skill definitions (.md) + reference fil
 - **Fast path / slow path split** — `detect_triggers()` is a single API call (<1s); `process_work_item()` runs on worker threads and can take 30–120s
 - **Multi-file, multi-worker** — each watched file gets its own `FigmaWatcher` thread; work items are dispatched to shared queues processed by configurable worker pools
 
+## What's new in v1.4.8 (macOS app)
+
+- **UK / English tone guide.** The `@tone` auditor now has a proper UK English Tone of Voice guide (plain-spoken, restrained, no hype; £/UK spelling; UK terms like *basket* and *voucher*). Previously, audits on English copy flagged that no English ToV guide existed.
+
 ## What's new in v1.4.7 (macOS app)
 
 Bug fixes — macOS app only, server unchanged:
@@ -172,16 +176,16 @@ Clearer self-update — macOS app only, server unchanged:
 
 - **Visible update progress.** Clicking **Install & Restart** now shows a progress panel — *Downloading… → Installing… → Restarting…* — instead of silently downloading and quitting (system notifications don't fire on modern macOS). After the app relaunches it briefly confirms **"Updated to vX.Y.Z ✓"**, so the restart is no longer a silent disappear-and-reappear.
 
-## What's new in v1.4.5 (macOS app)
+<details>
+<summary>Previous releases</summary>
+
+### v1.4.5 (macOS app)
 
 Faster, more responsive comment handling — macOS app only, server unchanged:
 
 - **Instant "working on it" reply.** The acknowledgement now posts the moment a poll detects an `@ux`/`@tone` comment, instead of waiting for a worker to pick the audit up. With a busy worker (audits take 30–120s) the ack no longer sits behind the queue — it lands within one poll cycle.
 - **Configurable check interval.** Settings → **Check interval** lets you pick how often FigWatch polls (15 / 30 / 45 / 60 seconds; default 30). Lower it for snappier detection.
 - **Live status indicators.** The popover row and menu-bar icon now reflect real audits — *processing* while an audit runs, briefly *replied* on success (then back to live), or *error* on failure.
-
-<details>
-<summary>Previous releases</summary>
 
 ### v1.4.4 (macOS app)
 
