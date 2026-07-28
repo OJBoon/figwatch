@@ -58,6 +58,7 @@ This returns a list of text nodes with their IDs, names, and content. If the fil
 
 Ask the user which locale this file targets, or infer it from the copy language. Then read the matching reference:
 
+- **UK / English** → `references/tov-uk.md`
 - **DE** → `references/tov-de.md`
 - **FR** → `references/tov-fr.md`
 - **NL** → `references/tov-nl.md`
@@ -402,6 +403,7 @@ This avoids translating copy that's about to be changed.
 
 The `references/` directory contains the full Tone of Voice guide for each locale. Read the relevant one(s) for any review or translation task:
 
+- `references/tov-uk.md` — UK / English (plain-spoken, restrained, no hype)
 - `references/tov-de.md` — German market (formal, precise, trustworthy)
 - `references/tov-fr.md` — French market (elegant, warm, confident)
 - `references/tov-nl.md` — Netherlands (direct, plain-speaking, concise)
