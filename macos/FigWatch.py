@@ -396,6 +396,10 @@ class KeyPanel(NSPanel):
 
 # ── Flipped View (Y=0 at top) ──────────────────────────────────────
 
+class _UpdateCancelled(Exception):
+    """Raised inside the download loop when the user hits Cancel."""
+
+
 class FlippedView(NSView):
     def isFlipped(self): return True
     def drawRect_(self, rect): pass  # don't fill background
@@ -536,7 +540,26 @@ def _rounded_mask_image(radius):
     return img
 
 
-def build_onboarding_view(app, deps):
+def _make_glass_view(w, h, radius=POPOVER_CORNER_RADIUS):
+    """Liquid-glass content view matching the popover, for any panel.
+
+    Returns (view, is_container). On macOS Tahoe (26+) this is a real
+    NSGlassEffectView, which hosts a single content view and draws its own
+    rounded shadow; older macOS gets the menu-material NSVisualEffectView with
+    a resizable rounded mask. Shared by the popover and the update HUD so both
+    read as the same material.
+    """
+    if _GLASS_CLS is not None:
+        glass = _GLASS_CLS.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
+        glass.setCornerRadius_(radius)
+        return glass, True
+    glass = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
+    glass.setMaterial_(5)  # NSVisualEffectMaterialMenu
+    glass.setState_(1)
+    glass.setBlendingMode_(0)
+    glass.setMaskImage_(_rounded_mask_image(radius))
+    return glass, False
+
     """Build the onboarding/setup checklist. Returns (view, height)."""
     cw = W - PAD * 2
     y = PAD
@@ -1026,16 +1049,7 @@ class FigWatch(NSObject):
         # real NSGlassEffectView when available — it renders the glass and its own
         # rounded shadow, and cornerRadius shapes it natively. Fall back to the
         # menu material + rounded-rect maskImage on older macOS (class absent).
-        if _GLASS_CLS is not None:
-            glass = _GLASS_CLS.alloc().initWithFrame_(NSMakeRect(0, 0, W, 400))
-            glass.setCornerRadius_(POPOVER_CORNER_RADIUS)
-        else:
-            glass = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 400))
-            glass.setMaterial_(5)  # NSVisualEffectMaterialMenu
-            glass.setState_(1)
-            glass.setBlendingMode_(0)
-            glass.setMaskImage_(_rounded_mask_image(POPOVER_CORNER_RADIUS))
-        self._glass_is_container = _GLASS_CLS is not None
+        glass, self._glass_is_container = _make_glass_view(W, 400)
         self._panel.setContentView_(glass)
 
         self._register_login_item()
@@ -1050,12 +1064,9 @@ class FigWatch(NSObject):
             c = _load_config()
             c.pop("pendingUpdate", None)
             _save_config(c)
-            self._show_update_hud(f"Updated to {pending} ✓", spinning=False)
-            threading.Timer(
-                2.5,
-                lambda: self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                    b"_hide_update_hud:", None, False),
-            ).start()
+            # Stays until the user clicks Done — no auto-hide to race the button.
+            self._show_update_hud(f"Updated to {pending} ✓", spinning=False,
+                                  button="Done", button_action=b"_hide_update_hud:")
 
     # ── Logging ─────────────────────────────────────────────────
 
@@ -2006,7 +2017,15 @@ class FigWatch(NSObject):
             cf = cancel_b.frame()
             cancel_b.setFrameOrigin_(NSMakePoint(win_w - sf.size.width - cf.size.width - 28, cf.origin.y))
 
-        if alert.runModal() == NSAlertFirstButtonReturn:
+        # Reset before the modal so a Switch-AI click (which sets it True and
+        # stops the modal) is detected on return without a stale value.
+        self._want_ai_switch = False
+        resp = alert.runModal()
+        if self._want_ai_switch:
+            self._want_ai_switch = False
+            self._show_ai_switch_chooser()
+            return
+        if resp == NSAlertFirstButtonReturn:
             rmap = {0: "sonnet", 1: "opus", 2: "haiku"}
             if model_popup is not None:
                 new_model = rmap.get(model_popup.indexOfSelectedItem(), "sonnet")
@@ -2145,44 +2164,93 @@ class FigWatch(NSObject):
     # self-update flow needs visible in-app feedback instead of a silent
     # download + quit + relaunch.
 
-    def _show_update_hud(self, message, *, spinning=True):
-        """Show (or update) a small centered panel with a status line. Main thread."""
-        panel = getattr(self, "_hud_panel", None)
-        if panel is None:
-            w, h = 300, 100
-            panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-                NSMakeRect(0, 0, w, h),
-                NSWindowStyleMaskTitled | NSWindowStyleMaskUtilityWindow,
-                NSBackingStoreBuffered, False)
-            panel.setTitle_("FigWatch")
-            panel.setLevel_(NSFloatingWindowLevel)
-            panel.setReleasedWhenClosed_(False)
-            panel.center()
-            content = panel.contentView()
+    def _show_update_hud(self, message, *, spinning=True, button=None, button_action=None):
+        """Show (or update) the glass update HUD with a status line. Main thread.
 
-            spinner = NSProgressIndicator.alloc().initWithFrame_(
-                NSMakeRect((w - 24) / 2, h - 46, 24, 24))
-            spinner.setStyle_(1)  # NSProgressIndicatorStyleSpinning
-            spinner.setIndeterminate_(True)
-            content.addSubview_(spinner)
-
-            label = _label(message, size=13)
-            label.setAlignment_(2)  # NSTextAlignmentCenter
-            label.setFrame_(NSMakeRect(16, 20, w - 32, 20))
-            content.addSubview_(label)
-
-            self._hud_panel = panel
-            self._hud_spinner = spinner
-            self._hud_label = label
-        else:
-            self._hud_label.setStringValue_(message)
-        self._hud_spinner.setHidden_(not spinning)
+        button/button_action drive the action button: "Cancel" (b"doCancelUpdate:")
+        while downloading so a half-done download can be aborted, "Done"
+        (b"_hide_update_hud:") on the completion toast so the window can be
+        dismissed. Pass button=None to hide it (e.g. mid-install, when there's
+        nothing safe to cancel).
+        """
+        if getattr(self, "_hud_panel", None) is None:
+            self._build_hud_panel()
+        self._hud_label.setStringValue_(message)
+        bar = self._hud_bar
         if spinning:
-            self._hud_spinner.startAnimation_(None)
+            bar.setHidden_(False)
+            bar.setIndeterminate_(True)
+            bar.startAnimation_(None)
         else:
-            self._hud_spinner.stopAnimation_(None)
+            bar.stopAnimation_(None)
+            bar.setHidden_(True)
+        btn = self._hud_button
+        if button:
+            btn.setTitle_(button)
+            btn.setAction_(button_action or b"_hide_update_hud:")
+            btn.setTarget_(self)
+            btn.setHidden_(False)
+        else:
+            btn.setHidden_(True)
         self._hud_panel.orderFrontRegardless()
         NSApp.activateIgnoringOtherApps_(True)
+
+    def _build_hud_panel(self):
+        """Build the liquid-glass update HUD once — matches the popover material."""
+        w, h = 300, 158
+        panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, w, h),
+            NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel,
+            NSBackingStoreBuffered, False)
+        panel.setLevel_(NSFloatingWindowLevel)
+        panel.setReleasedWhenClosed_(False)
+        panel.setHasShadow_(True)
+        panel.setOpaque_(False)
+        panel.setBackgroundColor_(NSColor.clearColor())
+
+        glass, is_container = _make_glass_view(w, h)
+        inner = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
+
+        title = _label("FigWatch", size=12, weight=NSFontWeightMedium,
+                       color=NSColor.secondaryLabelColor())
+        title.setAlignment_(2)  # NSTextAlignmentCenter
+        title.setFrame_(NSMakeRect(0, 20, w, 16))
+        inner.addSubview_(title)
+
+        bar = NSProgressIndicator.alloc().initWithFrame_(
+            NSMakeRect((w - 210) / 2, 58, 210, 8))
+        bar.setStyle_(0)  # NSProgressIndicatorStyleBar
+        bar.setIndeterminate_(True)
+        bar.setMinValue_(0.0); bar.setMaxValue_(1.0)
+        inner.addSubview_(bar)
+
+        label = _label("", size=13)
+        label.setAlignment_(2)  # NSTextAlignmentCenter
+        label.setFrame_(NSMakeRect(16, 82, w - 32, 20))
+        inner.addSubview_(label)
+
+        btn = NSButton.buttonWithTitle_target_action_("", self, b"_hide_update_hud:")
+        btn.setFrame_(NSMakeRect((w - 96) / 2, 116, 96, 28))
+        btn.setHidden_(True)
+        inner.addSubview_(btn)
+
+        if is_container:
+            glass.setContentView_(inner)  # NSGlassEffectView hosts a single view
+        else:
+            glass.addSubview_(inner)
+        panel.setContentView_(glass)
+        panel.center()
+
+        self._hud_panel = panel
+        self._hud_bar = bar
+        self._hud_label = label
+        self._hud_button = btn
+
+    @objc.typedSelector(b"v@:@")
+    def _hide_hud_button_(self, _):
+        """Main-thread selector: hide the action button (download done → can't cancel)."""
+        if getattr(self, "_hud_button", None) is not None:
+            self._hud_button.setHidden_(True)
 
     @objc.typedSelector(b"v@:@")
     def _set_update_hud_(self, message):
@@ -2192,10 +2260,31 @@ class FigWatch(NSObject):
             self._hud_panel.orderFrontRegardless()
 
     @objc.typedSelector(b"v@:@")
+    def _set_update_progress_(self, frac_str):
+        """Main-thread selector: switch the bar to determinate + set 0..1 fraction.
+
+        Passed as a string — strings bridge cleanly through
+        performSelectorOnMainThread where a bare NSNumber does not float()
+        reliably across PyObjC versions.
+        """
+        bar = getattr(self, "_hud_bar", None)
+        if bar is None:
+            return
+        try:
+            frac = max(0.0, min(1.0, float(frac_str)))
+        except (TypeError, ValueError):
+            return
+        if bar.isIndeterminate():
+            bar.stopAnimation_(None)
+            bar.setIndeterminate_(False)
+        bar.setDoubleValue_(frac)
+
+    @objc.typedSelector(b"v@:@")
     def _hide_update_hud_(self, _):
-        """Main-thread selector: stop the spinner and close the HUD."""
-        if getattr(self, "_hud_spinner", None) is not None:
-            self._hud_spinner.stopAnimation_(None)
+        """Main-thread selector: stop the bar and close the HUD."""
+        bar = getattr(self, "_hud_bar", None)
+        if bar is not None:
+            bar.stopAnimation_(None)
         if getattr(self, "_hud_panel", None) is not None:
             self._hud_panel.orderOut_(None)
 
@@ -2267,7 +2356,8 @@ class FigWatch(NSObject):
             alert.addButtonWithTitle_("Later")
             resp = alert.runModal()
             if resp == NSAlertFirstButtonReturn:
-                self._show_update_hud("Downloading update\u2026")
+                self._show_update_hud("Downloading update\u2026",
+                                      button="Cancel", button_action=b"doCancelUpdate:")
                 threading.Thread(
                     target=self._install_update,
                     args=(zip_url, release_ts, latest.get("tag", "")), daemon=True
@@ -2284,15 +2374,49 @@ class FigWatch(NSObject):
 
     def _install_update(self, zip_url, release_ts="", tag=""):
         import shutil
+        cancel = self._update_cancel = threading.Event()
         try:
             cache = os.path.join(HOME, "Library", "Caches", "FigWatch")
             os.makedirs(cache, exist_ok=True)
             zip_path = os.path.join(cache, "update.zip")
             staging = os.path.join(cache, "staging")
 
-            with urllib.request.urlopen(zip_url, timeout=120, context=_SSL_CTX) as r, open(zip_path, "wb") as f:
-                shutil.copyfileobj(r, f)
+            # GitHub asset URLs 302 to a CDN; some corp networks throttle the
+            # default urllib UA, so set our own. Stream in chunks so the HUD can
+            # show real progress — a 34 MB download over VPN can take minutes,
+            # and a blind spinner reads as "hung". A per-read socket timeout
+            # means a genuinely stalled connection fails fast (→ error dialog +
+            # manual-download fallback) instead of spinning indefinitely.
+            req = urllib.request.Request(zip_url, headers={"User-Agent": "FigWatch"})
+            with urllib.request.urlopen(req, timeout=60, context=_SSL_CTX) as r, \
+                    open(zip_path, "wb") as f:
+                total = int(r.headers.get("Content-Length") or 0)
+                got = 0
+                last_ui = 0.0
+                while True:
+                    if cancel.is_set():
+                        raise _UpdateCancelled()
+                    buf = r.read(256 * 1024)
+                    if not buf:
+                        break
+                    f.write(buf)
+                    got += len(buf)
+                    now = time.time()
+                    if total and now - last_ui > 0.15:
+                        last_ui = now
+                        frac = got / total
+                        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                            b"_set_update_hud:", f"Downloading update… {int(frac * 100)}%", False)
+                        self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                            b"_set_update_progress:", str(frac), False)
+                if total:
+                    self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                        b"_set_update_progress:", "1.0", False)
 
+            # Past the download the install is a few fast, non-abortable steps,
+            # so drop the Cancel button.
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                b"_hide_hud_button:", None, False)
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 b"_set_update_hud:", "Installing update…", False)
 
@@ -2313,18 +2437,29 @@ class FigWatch(NSObject):
             if not current_app.endswith(".app"):
                 raise RuntimeError(f"Running from unexpected location: {current_app}")
 
+            # The script owns the handoff: wait briefly for a graceful exit, then
+            # force-kill us by PID (TERM, then KILL) so the bundle can be replaced
+            # cleanly, then relaunch with `open -n` — a plain `open` refuses to
+            # start a second instance while the old one is still registered as
+            # running, which is exactly how a stuck update stranded the old
+            # process with a frozen HUD. Killing by our own PID is precise; the
+            # pkill is a belt-and-braces catch for any stray instance.
             script_path = os.path.join(cache, "install.sh")
             script = (
                 "#!/bin/bash\n"
-                "for i in $(seq 1 40); do\n"
-                "  pgrep -x FigWatch > /dev/null 2>&1 || break\n"
-                "  sleep 0.25\n"
-                "done\n"
-                "sleep 1\n"
+                f'PID={os.getpid()}\n'
+                'for i in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || break; sleep 0.25; done\n'
+                'if kill -0 "$PID" 2>/dev/null; then\n'
+                '  kill -TERM "$PID" 2>/dev/null\n'
+                '  for i in $(seq 1 20); do kill -0 "$PID" 2>/dev/null || break; sleep 0.25; done\n'
+                '  kill -KILL "$PID" 2>/dev/null\n'
+                'fi\n'
+                'pkill -x FigWatch 2>/dev/null\n'
+                'sleep 0.5\n'
                 f'rm -rf "{current_app}" 2>/dev/null\n'
                 f'/usr/bin/ditto "{new_app}" "{current_app}"\n'
                 f'/usr/bin/xattr -dr com.apple.quarantine "{current_app}" 2>/dev/null\n'
-                f'open "{current_app}"\n'
+                f'open -n "{current_app}"\n'
             )
             with open(script_path, "w") as f:
                 f.write(script)
@@ -2351,14 +2486,33 @@ class FigWatch(NSObject):
 
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 b"_quitForUpdate:", None, False)
+        except _UpdateCancelled:
+            # User hit Cancel mid-download — bin the partial file and close the
+            # HUD quietly (no "update failed" alert; nothing went wrong).
+            with contextlib.suppress(Exception):
+                os.remove(zip_path)
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                b"_hide_update_hud:", None, False)
         except Exception as e:
             self._update_error = str(e)
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
                 b"showInstallError:", None, False)
 
     @objc.typedSelector(b"v@:@")
+    def doCancelUpdate_(self, sender):
+        """Cancel an in-progress download and dismiss the HUD (main thread)."""
+        ev = getattr(self, "_update_cancel", None)
+        if ev is not None:
+            ev.set()
+        self._hide_update_hud_(None)
+
+    @objc.typedSelector(b"v@:@")
     def _quitForUpdate_(self, _):
-        self._stop_all_watchers()
+        # Do NOT run _stop_all_watchers here: it joins every watcher thread with
+        # a 5s timeout each, so with N watched files it froze the main thread for
+        # up to N*5s (frozen spinner, HUD stuck) right at "Restarting…". Watchers
+        # are daemon threads and die with the process; the installer force-kills
+        # us by PID as a backstop, so just terminate promptly.
         NSApp.terminate_(None)
 
     @objc.typedSelector(b"v@:@")
@@ -2413,23 +2567,41 @@ class FigWatch(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def doSwitchAI_(self, sender):
-        # Offer the same three AI-backend choices as onboarding, rather than only
-        # opening cc-switch. A popup menu (not a nested alert) keeps this reliable
-        # inside the Settings modal; each item is checked if it's the active mode.
+        # Popping an NSMenu inside the live Settings NSAlert modal is unreliable —
+        # it tore the alert down with no follow-up (and read_manual_gateway wasn't
+        # even in scope here, so the click raised). Instead flag the intent and
+        # stop the modal; doSettings_ then shows the chooser as its own alert.
+        self._want_ai_switch = True
+        NSApp.stopModal()
+
+    def _show_ai_switch_chooser(self):
+        """Standalone backend chooser, shown after Settings closes (not nested)."""
+        from figwatch.gateway import read_manual_gateway
         gw = gateway_info()
         manual = read_manual_gateway() is not None
-        menu = NSMenu.alloc().init()
-        for title, action, active in (
-            ("Switch profile in cc-switch", b"doConnectGateway:", bool(gw) and not manual),
-            ("Enter gateway manually…", b"doEnterGateway:", bool(gw) and manual),
-            ("Use personal Claude login", b"doClaudeAuth:", not gw),
-        ):
-            item = menu.addItemWithTitle_action_keyEquivalent_(title, action, "")
-            item.setTarget_(self)
-            if active:
-                item.setState_(1)  # NSControlStateValueOn — checkmark
-        menu.popUpMenuPositioningItem_atLocation_inView_(
-            None, NSMakePoint(0, sender.bounds().size.height + 4), sender)
+        if gw and manual:
+            current = "Currently using a manually-entered gateway."
+        elif gw:
+            current = "Currently using the company gateway (cc-switch)."
+        else:
+            current = "Currently using personal Claude login."
+
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_("Switch AI backend")
+        alert.setInformativeText_(f"{current}\n\nChoose how FigWatch connects to Claude.")
+        alert.setIcon_(_emoji_icon("🔀"))
+        alert.addButtonWithTitle_("Company gateway (cc-switch)")
+        alert.addButtonWithTitle_("Enter gateway manually…")
+        alert.addButtonWithTitle_("Personal Claude login")
+        alert.addButtonWithTitle_("Cancel")
+        NSApp.activateIgnoringOtherApps_(True)
+        resp = alert.runModal()
+        if resp == NSAlertFirstButtonReturn:
+            self.doConnectGateway_(None)
+        elif resp == NSAlertFirstButtonReturn + 1:
+            self.doEnterGateway_(None)
+        elif resp == NSAlertFirstButtonReturn + 2:
+            self.doClaudeAuth_(None)
 
     @objc.typedSelector(b"v@:@")
     def doClaudeAuth_(self, sender):
