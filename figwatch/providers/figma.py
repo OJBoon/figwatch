@@ -363,7 +363,7 @@ def fetch_screenshot(file_key, node_id, pat, limiter=None):
                 except (socket.timeout, TimeoutError):
                     if retry == 0:
                         logger.info(
-                            'screenshot render timed out — retrying (Figma renders + caches server-side)',
+                            'screenshot render timed out — retrying (warm cache)',
                             extra={'file_key': file_key, 'node_id': node_id,
                                    'format': fmt, 'scale': scale},
                         )
