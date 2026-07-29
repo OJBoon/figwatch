@@ -314,8 +314,11 @@ def fetch_screenshot(file_key, node_id, pat, limiter=None):
     Tries progressively smaller PNG scales then falls back to JPEG. Returns None
     if nothing fits within 3.75 MB (safe ceiling before base64 hits the 5 MB API limit).
 
-    Timeouts abort immediately — retrying at smaller scales won't help when
-    Figma is slow to render (see #37).
+    Large multi-screen frames render slowly on a cold cache and can exceed the
+    per-request timeout; since Figma renders server-side and caches the result, a
+    timeout is retried once (the follow-up usually hits the warm cache). A second
+    timeout on the same scale aborts the chain — smaller scales render slower, not
+    faster, so they won't beat the clock either (see #37).
     """
     tracer = get_tracer()
     with tracer.start_as_current_span('figma.screenshot', attributes={
@@ -330,34 +333,49 @@ def fetch_screenshot(file_key, node_id, pat, limiter=None):
                 tempfile.gettempdir(),
                 f'figwatch-screenshot-{node_id.replace(":", "-")}.{fmt}',
             )
-            try:
-                data = figma_get_retry(
-                    f'/images/{file_key}?ids={enc_id}&scale={scale}&format={fmt}',
-                    pat,
-                    timeout=20,
-                    limiter=limiter,
-                )
-                if not data or data.get('err') or data.get('status') == 400:
-                    continue
-                url = (data.get('images') or {}).get(node_id)
-                if not url:
-                    continue
-                with urllib.request.urlopen(url, timeout=20, context=_SSL_CTX) as r:
-                    img_bytes = r.read()
-                if len(img_bytes) > _MAX_IMAGE_BYTES:
-                    continue
-                with open(out_path, 'wb') as f:
-                    f.write(img_bytes)
-                return out_path
-            except (socket.timeout, TimeoutError):
-                logger.warning(
-                    'screenshot render timed out — aborting fallback chain',
-                    extra={'file_key': file_key, 'node_id': node_id,
-                           'format': fmt, 'scale': scale},
-                )
-                return None
-            except Exception:
-                continue
+            # Figma renders large frames server-side and caches the result, so a
+            # cold render of a big multi-screen frame can exceed one request's
+            # timeout while the follow-up hits the warm cache and returns fast.
+            # Retry a timeout once; if even the warm retry times out, Figma is
+            # genuinely stuck and smaller scales (which render slower, not faster)
+            # won't help — abort the chain. Non-timeout misses (400 / too big)
+            # still fall through to the next, smaller scale.
+            for retry in range(2):
+                try:
+                    data = figma_get_retry(
+                        f'/images/{file_key}?ids={enc_id}&scale={scale}&format={fmt}',
+                        pat,
+                        timeout=30,
+                        limiter=limiter,
+                    )
+                    if not data or data.get('err') or data.get('status') == 400:
+                        break
+                    url = (data.get('images') or {}).get(node_id)
+                    if not url:
+                        break
+                    with urllib.request.urlopen(url, timeout=30, context=_SSL_CTX) as r:
+                        img_bytes = r.read()
+                    if len(img_bytes) > _MAX_IMAGE_BYTES:
+                        break
+                    with open(out_path, 'wb') as f:
+                        f.write(img_bytes)
+                    return out_path
+                except (socket.timeout, TimeoutError):
+                    if retry == 0:
+                        logger.info(
+                            'screenshot render timed out — retrying (Figma renders + caches server-side)',
+                            extra={'file_key': file_key, 'node_id': node_id,
+                                   'format': fmt, 'scale': scale},
+                        )
+                        continue
+                    logger.warning(
+                        'screenshot render timed out after retry — aborting fallback chain',
+                        extra={'file_key': file_key, 'node_id': node_id,
+                               'format': fmt, 'scale': scale},
+                    )
+                    return None
+                except Exception:
+                    break
         return None
 
 
