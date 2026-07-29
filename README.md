@@ -159,6 +159,10 @@ figwatch/skills/                 bundled skill definitions (.md) + reference fil
 - **Fast path / slow path split** — `detect_triggers()` is a single API call (<1s); `process_work_item()` runs on worker threads and can take 30–120s
 - **Multi-file, multi-worker** — each watched file gets its own `FigmaWatcher` thread; work items are dispatched to shared queues processed by configurable worker pools
 
+## What's new in v1.4.9 (macOS app)
+
+- **Big-frame `@ux` reviews no longer fail with "design data unavailable".** Figma's screenshot render of a large multi-screen frame (e.g. a full user-journey board) takes longer than the old timeout allowed, so the capture was aborted. FigWatch now waits longer and retries the render (Figma caches it server-side), so large frames capture reliably.
+
 ## What's new in v1.4.8 (macOS app)
 
 - **UK / English tone guide.** The `@tone` auditor now has a proper UK English Tone of Voice guide (plain-spoken, restrained, no hype; £/UK spelling; UK terms like *basket* and *voucher*). Previously, audits on English copy flagged that no English ToV guide existed.
@@ -170,14 +174,14 @@ Bug fixes — macOS app only, server unchanged:
 - **Audits no longer fail with "Could not find skill".** The bundled `tone`/`ux` skill definitions are extracted from the app on first launch; a previous interrupted extraction could leave an empty cache that was then trusted on every launch (and across updates), breaking every audit. The extractor now confirms completion with a sentinel and self-heals a partial cache.
 - **Update dialog fixes.** "Check for Updates" no longer offers to "update" to the version you're already on, and the dialog no longer shows raw Markdown from the release notes (full notes are one click away via **View on GitHub**).
 
-## What's new in v1.4.6 (macOS app)
+<details>
+<summary>Previous releases</summary>
+
+### v1.4.6 (macOS app)
 
 Clearer self-update — macOS app only, server unchanged:
 
 - **Visible update progress.** Clicking **Install & Restart** now shows a progress panel — *Downloading… → Installing… → Restarting…* — instead of silently downloading and quitting (system notifications don't fire on modern macOS). After the app relaunches it briefly confirms **"Updated to vX.Y.Z ✓"**, so the restart is no longer a silent disappear-and-reappear.
-
-<details>
-<summary>Previous releases</summary>
 
 ### v1.4.5 (macOS app)
 
