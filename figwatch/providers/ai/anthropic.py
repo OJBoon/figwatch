@@ -2,7 +2,16 @@
 
 import base64
 
-from figwatch.providers.ai import with_retry
+from figwatch.providers.ai import as_image_list, media_type_for, with_retry
+
+
+def _image_block(path):
+    with open(path, 'rb') as f:
+        img_b64 = base64.standard_b64encode(f.read()).decode()
+    return {
+        'type': 'image',
+        'source': {'type': 'base64', 'media_type': media_type_for(path), 'data': img_b64},
+    }
 
 
 class AnthropicProvider:
@@ -19,7 +28,7 @@ class AnthropicProvider:
         self._max_tokens = max_tokens
         self._rate_limiter = rate_limiter
 
-    def call(self, prompt: str, image_path: 'str | None') -> str:
+    def call(self, prompt: str, image_path: 'str | list[str] | None') -> str:
         try:
             import anthropic
         except ImportError as err:
@@ -40,16 +49,10 @@ class AnthropicProvider:
         else:
             client_kwargs['api_key'] = self._api_key
         client = anthropic.Anthropic(**client_kwargs)
-        content = []
 
-        if image_path:
-            media_type = 'image/jpeg' if image_path.endswith('.jpg') else 'image/png'
-            with open(image_path, 'rb') as f:
-                img_b64 = base64.standard_b64encode(f.read()).decode()
-            content.append({
-                'type': 'image',
-                'source': {'type': 'base64', 'media_type': media_type, 'data': img_b64},
-            })
+        # One path, a list of paths (journey review), or None. A single str is a
+        # 1-element list, so the single-image request is byte-identical.
+        content = [_image_block(p) for p in as_image_list(image_path)]
         content.append({'type': 'text', 'text': prompt})
 
         def _call():

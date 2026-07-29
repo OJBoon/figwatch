@@ -92,7 +92,10 @@ class AIProvider(Protocol):
     model_id: str
     inline_files: bool
 
-    def call(self, prompt: str, image_path: 'str | None') -> str:
+    def call(self, prompt: str, image_path: 'str | list[str] | None') -> str:
+        """Run the prompt. `image_path` may be one path, a list of paths (a
+        multi-screen journey review), or None. A single str is treated the same
+        as a 1-element list, so the single-image path is unchanged."""
         ...
 
 
@@ -119,6 +122,21 @@ def with_retry(call_fn, is_rate_limit_fn, label):
                 time.sleep(wait)
             else:
                 raise
+
+
+def media_type_for(path: str) -> str:
+    """Image media type from a screenshot path's suffix (matches what
+    fetch_screenshot emits: .jpg → JPEG, otherwise PNG)."""
+    return 'image/jpeg' if path.endswith('.jpg') else 'image/png'
+
+
+def as_image_list(image_path: 'str | list[str] | None') -> list:
+    """Normalize the provider image argument to a list: one path, several paths
+    (a journey review), or None → []. A single str is a 1-element list, so the
+    single-image request stays identical."""
+    if image_path is None:
+        return []
+    return [image_path] if isinstance(image_path, str) else list(image_path)
 
 
 def make_provider(

@@ -25,9 +25,10 @@ class ClaudeCLIProvider:
         self._claude_path = claude_path
         self._skill_dir = skill_dir
 
-    def call(self, prompt: str, image_path: 'str | None') -> str:
-        # image_path is unused — the path is embedded in the prompt text and
-        # Claude reads it directly via the Read tool (--add-dir /tmp).
+    def call(self, prompt: str, image_path: 'str | list[str] | None') -> str:
+        # image_path is unused — screenshot paths are embedded in the prompt text
+        # (one, or several for a journey review) and Claude reads them via the
+        # Read tool (--add-dir /tmp below covers the temp screenshots).
         from figwatch.handlers import parse_claude_output, subprocess_env
 
         cmd = [

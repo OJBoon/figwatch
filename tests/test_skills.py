@@ -210,3 +210,89 @@ def test_resolve_builtin_skill_tone():
 def test_resolve_builtin_skill_missing():
     path = _resolve_builtin_skill("builtin:nonexistent")
     assert path is None
+
+
+# ── execute_skill journey vs single-screen ────────────────────────────
+
+import figwatch.skills as _skills  # noqa: E402
+
+
+def _screen_child(cid, name, x, w=400, h=800):
+    return {"id": cid, "name": name, "type": "FRAME",
+            "absoluteBoundingBox": {"x": x, "y": 0, "width": w, "height": h}}
+
+
+class _FakeRepo:
+    def __init__(self, tree, journey_screens=None, screenshot=None):
+        self._tree = tree
+        self._journey = journey_screens or []
+        self._shot = screenshot
+        self.calls = []
+
+    def fetch(self, required_data, file_key, node_id):
+        req = list(required_data)
+        self.calls.append(req)
+        data = {}
+        if "node_tree" in req:
+            data["node_tree"] = "/tmp/figwatch-test-tree.json"
+        if "screenshot" in req:
+            data["screenshot"] = self._shot
+        return data, (self._tree if "node_tree" in req else None)
+
+    def fetch_journey_screenshots(self, file_key, node_id, tree_data):
+        return list(self._journey)
+
+
+class _FakeProvider:
+    inline_files = True
+    model_id = "test-model"
+
+    def __init__(self):
+        self.calls = []
+
+    def call(self, prompt, image_arg):
+        self.calls.append((prompt, image_arg))
+        return "REVIEW-OK"
+
+
+def test_execute_skill_journey_multi_screen(monkeypatch):
+    prov = _FakeProvider()
+    monkeypatch.setattr(_skills, "make_provider", lambda *a, **k: prov)
+    tree = {"name": "SONY Journey", "type": "FRAME", "children": [
+        _screen_child("1:1", "Home", 0), _screen_child("1:2", "PDP", 500),
+        _screen_child("1:3", "Cart", 1000)]}
+    screens = [{"id": "1:1", "name": "Home", "path": "/tmp/s1.png"},
+               {"id": "1:2", "name": "PDP", "path": "/tmp/s2.png"},
+               {"id": "1:3", "name": "Cart", "path": "/tmp/s3.png"}]
+    repo = _FakeRepo(tree, journey_screens=screens)
+    result = _skills.execute_skill(_make_audit(), config=_make_config(), design_repo=repo)
+    assert "Journey Audit" in result and "(3 screens)" in result
+    assert "REVIEW-OK" in result
+    _, image_arg = prov.calls[0]
+    assert image_arg == ["/tmp/s1.png", "/tmp/s2.png", "/tmp/s3.png"]
+    # journey skips the doomed whole-board render — never fetched 'screenshot'
+    assert all("screenshot" not in c for c in repo.calls)
+
+
+def test_execute_skill_single_screen_unchanged(monkeypatch):
+    prov = _FakeProvider()
+    monkeypatch.setattr(_skills, "make_provider", lambda *a, **k: prov)
+    tree = {"name": "Home", "type": "FRAME", "children": []}  # not a journey
+    repo = _FakeRepo(tree, screenshot="/tmp/shot.png")
+    result = _skills.execute_skill(_make_audit(), config=_make_config(), design_repo=repo)
+    assert "Journey Audit" not in result
+    assert "Audit" in result
+    _, image_arg = prov.calls[0]
+    assert image_arg == "/tmp/shot.png"  # a single str, not a list
+    assert any("screenshot" in c for c in repo.calls)
+
+
+def test_execute_skill_explicit_journey_keyword(monkeypatch):
+    prov = _FakeProvider()
+    monkeypatch.setattr(_skills, "make_provider", lambda *a, **k: prov)
+    # Only one screen → not auto-detected, but the keyword forces journey mode.
+    tree = {"name": "Board", "type": "FRAME", "children": [_screen_child("1:1", "A", 0)]}
+    repo = _FakeRepo(tree, journey_screens=[{"id": "1:1", "name": "A", "path": "/tmp/a.png"}])
+    audit = _make_audit(extra="journey please")
+    result = _skills.execute_skill(audit, config=_make_config(), design_repo=repo)
+    assert "Journey Audit" in result

@@ -275,6 +275,38 @@ def _post_notification(title, message):
         pass
 
 
+def _fallback_reply(kind, lang, trigger):
+    """Localized ack / error text posted to Figma. The AI audit text is localized
+    by the skill; these fixed status and fallback messages are localized here too
+    so they honour the reply-language setting (`en` / `cn`)."""
+    cn = lang == "cn"
+    if kind == "ack":
+        if cn:
+            return f"⏳ 已收到 {trigger} 审查请求，正在处理…"
+        return f"⏳ {trigger} audit received — working on it…"
+    if kind == "too_large":
+        if cn:
+            return (
+                f"⚠️ 无法截取该画面的截图，它可能太大或太复杂，Figma 无法一次性渲染。"
+                f"如果这是完整的用户旅程，请在其中某个具体页面上触发 @{trigger}，我会单独审查。"
+                f"\n\n— FigWatch"
+            )
+        return (
+            f"⚠️ I couldn't capture a screenshot of this frame — it may be too large or "
+            f"complex for Figma to render as a single image. For a big user journey, "
+            f"trigger @{trigger} on a specific screen inside it and I'll review that.\n\n— FigWatch"
+        )
+    if cn:
+        return (
+            f"⚠️ 暂时无法完成 {trigger} 审查。该画面的设计数据可能暂不可用，或服务繁忙。"
+            f"请重新触发以重试。\n\n— FigWatch"
+        )
+    return (
+        f"⚠️ Couldn't complete the {trigger} audit right now. This frame's design data "
+        f"may be unavailable, or the service was busy. Re-trigger to retry.\n\n— FigWatch"
+    )
+
+
 def _validate_token(pat):
     """Return (handle, None) on success or (None, error_string) on failure."""
     try:
@@ -724,6 +756,41 @@ def build_popover_view(app):
     root.addSubview_(sep0)
     y += 12
 
+    # ── Update banner ──────────────────────────────────────────
+    # A gentle "there's a newer version" reminder. Set by the background
+    # update check (_check_for_update); clicking it opens the install dialog.
+    update = app._state.get("update_available")
+    if update:
+        banner_h = 32
+        accent = NSColor.controlAccentColor()
+        banner = NSView.alloc().initWithFrame_(NSMakeRect(PAD - 2, y, cw + 4, banner_h))
+        banner.setWantsLayer_(True)
+        banner.layer().setCornerRadius_(8)
+        banner.layer().setBackgroundColor_(accent.colorWithAlphaComponent_(0.12).CGColor())
+
+        dl = _sf_symbol("arrow.down.circle.fill", size=15, color=accent)
+        if dl:
+            dl.setFrameOrigin_((10, (banner_h - 19) // 2))
+            banner.addSubview_(dl)
+
+        tag = update.get("tag", "")
+        msg = f"Update available · {tag}" if tag else "Update available"
+        txt = _label(msg, size=12, weight=NSFontWeightMedium, color=accent)
+        txt.setFrameSize_(NSMakeSize(cw - 34 - 20, 16))
+        txt.setFrameOrigin_((34, (banner_h - 16) // 2))
+        banner.addSubview_(txt)
+
+        chev = _sf_symbol("chevron.right", size=11, color=accent)
+        if chev:
+            chev.setFrameOrigin_((cw + 4 - 22, (banner_h - 15) // 2))
+            banner.addSubview_(chev)
+
+        overlay = HoverRow.alloc().initWithFrame_(NSMakeRect(0, 0, cw + 4, banner_h))
+        overlay.setTarget_(app); overlay.setAction_(b"doUpdateBanner:")
+        banner.addSubview_(overlay)
+
+        root.addSubview_(banner)
+        y += banner_h + 8
     # ── File list or empty state ───────────────────────────────
     if not watched:
         no_files = _label("No Figma files detected", size=12, color=NSColor.secondaryLabelColor())
@@ -919,6 +986,7 @@ class FigWatch(NSObject):
             "force_onboarding": False,
             "deps": None,
             "excluded_keys": [],
+            "update_available": None,
         }
         config = _load_config()
         self._state["excluded_keys"] = config.get("excludedFiles", [])
@@ -1022,22 +1090,41 @@ class FigWatch(NSObject):
             if recents:
                 _save_watched(recents)
 
-        config = _load_config()
-        if not config.get("installedReleaseTimestamp"):
-            rel = _fetch_latest_release()
-            if rel and rel.get("published_at"):
-                config["installedReleaseTimestamp"] = rel["published_at"]
-                _save_config(config)
+        self._check_for_update()
 
         self._start_workers()
         self._sync_watchers()
         threading.Thread(target=self._sync_loop, daemon=True).start()
 
+    def _check_for_update(self):
+        """Fetch the latest release and flag the popover banner if it's newer.
+
+        Runs off the main thread (called from _app_init at launch and from
+        _sync_loop every few hours). Also seeds installedReleaseTimestamp on
+        first run so update bookkeeping happens even when already up to date.
+        """
+        rel = _fetch_latest_release()
+        if not rel:
+            return
+        config = _load_config()
+        if not config.get("installedReleaseTimestamp") and rel.get("published_at"):
+            config["installedReleaseTimestamp"] = rel["published_at"]
+            _save_config(config)
+        newer = _parse_version(rel.get("tag", "")) > _parse_version(VERSION)
+        self._state["update_available"] = rel if newer else None
+        if newer and self._state.get("popover_open"):
+            self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                b"_rebuildPopoverFromThread:", None, False)
+
     def _sync_loop(self):
+        last_update_check = time.time()
         while True:
             time.sleep(10)
             try:
                 self._sync_watchers()
+                if time.time() - last_update_check > 6 * 3600:
+                    last_update_check = time.time()
+                    self._check_for_update()
             except Exception as e:
                 self._write_log(f'\u26a0\ufe0f Sync error: {e}')
 
@@ -1165,16 +1252,16 @@ class FigWatch(NSObject):
                 # Post a short reply instead of going silent: the reviewer gets
                 # feedback, and because the trigger now has a reply it won't be
                 # re-audited on the next poll (avoids a bad frame clogging the worker).
+                # A screenshot-capture miss is usually a too-large multi-screen frame;
+                # everything else gets the generic "busy, re-trigger" reply.
+                err = str(e)
+                kind = "too_large" if ("required data" in err and "screenshot" in err) else "generic"
+                reply = _fallback_reply(kind, self._state.get("reply_lang", "en"), trigger_name)
                 with contextlib.suppress(Exception):
                     if ack_id:
                         svc.delete_ack(audit, ack_id)
-                    svc.post_reply(
-                        audit,
-                        f"\u26a0\ufe0f Couldn\u2019t complete the {trigger_name} audit right now. "
-                        f"This frame\u2019s design data may be unavailable, or the service was "
-                        f"busy. Re-trigger to retry.\n\n\u2014 FigWatch",
-                    )
-                    self._write_log("\u2709\ufe0f  Error reply posted")
+                    svc.post_reply(audit, reply)
+                    self._write_log("✉️  Error reply posted")
 
     def _build_audit_service(self):
         """Construct AuditService for macOS polling path."""
@@ -1226,7 +1313,7 @@ class FigWatch(NSObject):
                 try:
                     ack_id = svc.post_ack(
                         audit,
-                        f'⏳ {trigger_name} audit received — working on it…',
+                        _fallback_reply("ack", self._state.get("reply_lang", "en"), trigger_name),
                     )
                     self._write_log("✉️  Ack posted")
                 except Exception as e:
@@ -1392,7 +1479,9 @@ class FigWatch(NSObject):
             for k, s in sorted(self._state.get("file_statuses", {}).items())
         )
         watched_keys = tuple(f["key"] for f in self._state.get("watched", []))
-        return (watched_keys, statuses)
+        update = self._state.get("update_available")
+        update_tag = update.get("tag") if update else None
+        return (watched_keys, statuses, update_tag)
 
     def _update_countdown_label(self):
         label = self._state.get("_countdown_label")
@@ -1764,6 +1853,8 @@ class FigWatch(NSObject):
             sk_popup.addItemWithTitle_(label)
             skill_paths.append(s["path"])
         sk_popup.addItemWithTitle_("Browse for file\u2026")
+        sk_popup.setTarget_(self)
+        sk_popup.setAction_(b"doSkillPopupChanged:")
         acc.addSubview_(sk_popup)
         y += 32
 
@@ -1811,9 +1902,7 @@ class FigWatch(NSObject):
 
         # ── AI ────────────────────────────────────────────────
         gw = gateway_info()
-        conn_btn = _pill("Switch…" if gw else "Sign in…",
-                         b"doConnectGateway:" if gw else b"doClaudeAuth:",
-                         width=92, height=24)
+        conn_btn = _pill("Switch…" if gw else "Sign in…", b"doSwitchAI:", width=92, height=24)
         conn_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
         _section("AI", "cpu", trailing_btn=conn_btn)
 
@@ -1962,6 +2051,29 @@ class FigWatch(NSObject):
     # ── Trigger management ─────────────────────────────────────
 
     @objc.typedSelector(b"v@:@")
+    def doSkillPopupChanged_(self, sender):
+        # "Browse for file…" is the last item (index == number of real skills).
+        # Selecting it opens the macOS file picker immediately; the chosen file is
+        # added to the popup and selected, so "Add" then commits it. Activate the
+        # app first — a menu-bar (agent) app isn't frontmost, so without this the
+        # open panel opens behind everything or not at all.
+        if sender.indexOfSelectedItem() != len(self._add_trigger_paths):
+            return
+        panel = NSOpenPanel.alloc().init()
+        panel.setCanChooseFiles_(True)
+        panel.setCanChooseDirectories_(False)
+        panel.setAllowedFileTypes_(["md"])
+        NSApp.activateIgnoringOtherApps_(True)
+        if panel.runModal() == NSModalResponseOK and panel.URLs():
+            path = panel.URLs()[0].path()
+            idx = len(self._add_trigger_paths)
+            sender.insertItemWithTitle_atIndex_(os.path.basename(path), idx)
+            self._add_trigger_paths.append(path)
+            sender.selectItemAtIndex_(idx)
+        else:
+            sender.selectItemAtIndex_(0)
+
+    @objc.typedSelector(b"v@:@")
     def doAddTriggerInline_(self, sender):
         keyword = self._add_trigger_kw.stringValue().strip()
         sel = self._add_trigger_sk.indexOfSelectedItem()
@@ -1970,6 +2082,8 @@ class FigWatch(NSObject):
         if sel < len(paths):
             skill_path = paths[sel]
         else:
+            # Fallback: "Browse for file…" still selected (e.g. picker cancelled).
+            NSApp.activateIgnoringOtherApps_(True)
             panel = NSOpenPanel.alloc().init()
             panel.setCanChooseFiles_(True)
             panel.setCanChooseDirectories_(False)
@@ -2088,6 +2202,16 @@ class FigWatch(NSObject):
     # ── Update check ───────────────────────────────────────────
 
     @objc.typedSelector(b"v@:@")
+    def doUpdateBanner_(self, sender):
+        # The banner already knows the newer release (from _check_for_update),
+        # so skip the re-fetch doCheckUpdate_ does and open the install dialog.
+        self._close_popover()
+        latest = self._state.get("update_available")
+        if not latest:
+            return
+        self._update_result = latest
+        self.showUpdateResult_(None)
+
     def doCheckUpdate_(self, sender):
         try:
             NSApp.abortModal()
@@ -2286,6 +2410,26 @@ class FigWatch(NSObject):
     def doInstallClaude_(self, sender):
         NSWorkspace.sharedWorkspace().openURL_(
             NSURL.URLWithString_("https://docs.anthropic.com/en/docs/claude-code/getting-started"))
+
+    @objc.typedSelector(b"v@:@")
+    def doSwitchAI_(self, sender):
+        # Offer the same three AI-backend choices as onboarding, rather than only
+        # opening cc-switch. A popup menu (not a nested alert) keeps this reliable
+        # inside the Settings modal; each item is checked if it's the active mode.
+        gw = gateway_info()
+        manual = read_manual_gateway() is not None
+        menu = NSMenu.alloc().init()
+        for title, action, active in (
+            ("Switch profile in cc-switch", b"doConnectGateway:", bool(gw) and not manual),
+            ("Enter gateway manually…", b"doEnterGateway:", bool(gw) and manual),
+            ("Use personal Claude login", b"doClaudeAuth:", not gw),
+        ):
+            item = menu.addItemWithTitle_action_keyEquivalent_(title, action, "")
+            item.setTarget_(self)
+            if active:
+                item.setState_(1)  # NSControlStateValueOn — checkmark
+        menu.popUpMenuPositioningItem_atLocation_inView_(
+            None, NSMakePoint(0, sender.bounds().size.height + 4), sender)
 
     @objc.typedSelector(b"v@:@")
     def doClaudeAuth_(self, sender):

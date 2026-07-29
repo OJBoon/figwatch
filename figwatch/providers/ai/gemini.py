@@ -1,6 +1,6 @@
 """Google Gen AI (Gemini) provider."""
 
-from figwatch.providers.ai import with_retry
+from figwatch.providers.ai import as_image_list, media_type_for, with_retry
 
 
 class GeminiProvider:
@@ -12,7 +12,7 @@ class GeminiProvider:
         self._api_key = api_key
         self._rate_limiter = rate_limiter
 
-    def call(self, prompt: str, image_path: 'str | None') -> str:
+    def call(self, prompt: str, image_path: 'str | list[str] | None') -> str:
         try:
             from google import genai
             from google.genai import types
@@ -26,11 +26,11 @@ class GeminiProvider:
 
         client = genai.Client(api_key=self._api_key)
 
+        # One path, a list (journey review), or None; a single str == 1-element list.
         contents = [prompt]
-        if image_path:
-            mime_type = 'image/jpeg' if image_path.endswith('.jpg') else 'image/png'
-            with open(image_path, 'rb') as f:
-                contents.append(types.Part.from_bytes(data=f.read(), mime_type=mime_type))
+        for p in as_image_list(image_path):
+            with open(p, 'rb') as f:
+                contents.append(types.Part.from_bytes(data=f.read(), mime_type=media_type_for(p)))
 
         return with_retry(
             lambda: client.models.generate_content(

@@ -190,3 +190,62 @@ def test_shared_limiter_across_provider_instances(monkeypatch):
     p1 = make_provider("gemini-flash", "claude")
     p2 = make_provider("gemini-flash", "claude")
     assert p1._rate_limiter is p2._rate_limiter
+
+
+# ── AnthropicProvider multi-image (journey) content building ──────────
+
+class _FakeAnthropicClient:
+    """Captures messages.create kwargs; returns a canned text response."""
+    last_kwargs = None
+
+    def __init__(self, **kwargs):
+        self.messages = self
+
+    def create(self, **kwargs):
+        _FakeAnthropicClient.last_kwargs = kwargs
+        return type("R", (), {"content": [type("B", (), {"text": " ok "})()]})()
+
+
+def _patch_anthropic(monkeypatch):
+    import anthropic
+    _FakeAnthropicClient.last_kwargs = None
+    monkeypatch.setattr(anthropic, "Anthropic", _FakeAnthropicClient)
+
+
+def _content_after_call(prov, prompt, image_arg):
+    return _FakeAnthropicClient.last_kwargs["messages"][0]["content"]
+
+
+def test_anthropic_multi_image_builds_n_blocks(monkeypatch, tmp_path):
+    _patch_anthropic(monkeypatch)
+    p1 = tmp_path / "a.png"
+    p1.write_bytes(b"img1")
+    p2 = tmp_path / "b.jpg"
+    p2.write_bytes(b"img2")
+    prov = AnthropicProvider("m", "k")
+    out = prov.call("PROMPT", [str(p1), str(p2)])
+    assert out == "ok"
+    content = _content_after_call(prov, "PROMPT", [str(p1), str(p2)])
+    imgs = [b for b in content if b["type"] == "image"]
+    assert len(imgs) == 2
+    assert imgs[0]["source"]["media_type"] == "image/png"
+    assert imgs[1]["source"]["media_type"] == "image/jpeg"
+    assert content[-1] == {"type": "text", "text": "PROMPT"}
+
+
+def test_anthropic_single_str_is_one_block(monkeypatch, tmp_path):
+    _patch_anthropic(monkeypatch)
+    p1 = tmp_path / "a.png"
+    p1.write_bytes(b"img1")
+    prov = AnthropicProvider("m", "k")
+    prov.call("P", str(p1))
+    content = _FakeAnthropicClient.last_kwargs["messages"][0]["content"]
+    assert [b["type"] for b in content] == ["image", "text"]
+
+
+def test_anthropic_none_has_no_image_block(monkeypatch):
+    _patch_anthropic(monkeypatch)
+    prov = AnthropicProvider("m", "k")
+    prov.call("P", None)
+    content = _FakeAnthropicClient.last_kwargs["messages"][0]["content"]
+    assert [b["type"] for b in content] == ["text"]

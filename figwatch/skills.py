@@ -16,6 +16,7 @@ from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS, make_provide
 from figwatch.providers.ai.anthropic import AnthropicProvider
 from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
 from figwatch.providers.ai.gemini import GeminiProvider
+from figwatch.providers.figma import is_journey_frame
 from figwatch.tracing import format_trace_line, get_tracer
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,7 @@ _BUILTIN_INTROSPECTION = {
         'comment_compatible': True,
         'incompatible_reason': None,
         'required_data': ['screenshot', 'node_tree'],
+        'journey_capable': True,
     },
 }
 
@@ -267,6 +269,31 @@ def _get_introspection(skill_ref, skill_path, claude_path, model):
 
 # ── Prompt builder ────────────────────────────────────────────────────
 
+def _prompt_preamble(audit, config):
+    """The reviewer-context + reply-language bits shared by both prompt builders."""
+    extra = audit.trigger_match.extra
+    extra_ctx = f'\nAdditional context from reviewer: "{extra}"' if extra else ''
+    lang_instruction = (
+        '\nIMPORTANT: Write your entire reply in Simplified Chinese.'
+        if (config and config.reply_lang == 'cn') else ''
+    )
+    return extra_ctx, lang_instruction
+
+
+def _critical_rules(lang_instruction, extra_bullet=''):
+    """The shared CRITICAL RULES footer; `extra_bullet` inserts a mode-specific rule."""
+    return (
+        "CRITICAL RULES:\n"
+        "- Do NOT create any files. Your entire output IS the comment reply.\n"
+        "- Figma comments are PLAIN TEXT ONLY: no markdown, no asterisks, "
+        "no hashes, no backticks.\n"
+        f"{extra_bullet}"
+        "- Keep it CONCISE. The entire reply MUST be under 4000 characters.\n"
+        "- Do NOT add sign-offs — the sign-off is added automatically."
+        f"{lang_instruction}"
+    )
+
+
 def _build_prompt(
     audit, skill_content, refs_section, data, tree_data, frame_name,
     *, inline_files, config=None,
@@ -307,15 +334,8 @@ def _build_prompt(
 
     data_section = '\n\n'.join(data_desc) if data_desc else 'No data available.'
 
-    extra = audit.trigger_match.extra
+    extra_ctx, lang_instruction = _prompt_preamble(audit, config)
     trigger_kw = audit.trigger_match.trigger.keyword
-    reply_lang = config.reply_lang if config else ''
-
-    extra_ctx = f'\nAdditional context from reviewer: "{extra}"' if extra else ''
-    lang_instruction = (
-        '\nIMPORTANT: Write your entire reply in Simplified Chinese.'
-        if reply_lang == 'cn' else ''
-    )
     eval_instruction = (
         'Evaluate according to the skill using the data provided, then respond with ONLY a'
         if inline_files else
@@ -337,12 +357,54 @@ Available data:
 {eval_instruction}
 plain-text comment reply suitable for posting as a Figma comment.
 
-CRITICAL RULES:
-- Do NOT create any files. Your entire output IS the comment reply.
-- Figma comments are PLAIN TEXT ONLY: no markdown, no asterisks, no hashes, no backticks.
-- Keep it CONCISE. The entire reply MUST be under 4000 characters.
-- Do NOT add sign-offs — the sign-off is added automatically.
-{lang_instruction}"""
+{_critical_rules(lang_instruction)}"""
+
+
+def _build_journey_prompt(
+    audit, skill_content, refs_section, screens, frame_name,
+    *, inline_files, config=None,
+):
+    """Build the multi-screen journey prompt: ordered, labelled screenshots + a
+    compact board outline (not the giant node tree), asking for a flow-level review."""
+    n = len(screens)
+    lines = []
+    for i, s in enumerate(screens, 1):
+        if inline_files:
+            lines.append(f'Screen {i} of {n}: "{s["name"]}" [attached as image {i}]')
+        else:
+            lines.append(f'Screen {i} of {n}: "{s["name"]}" — image at: {s["path"]}')
+    screens_section = '\n'.join(lines)
+
+    extra_ctx, lang_instruction = _prompt_preamble(audit, config)
+    trigger_kw = audit.trigger_match.trigger.keyword
+    eval_instruction = (
+        'Evaluate the JOURNEY using the attached screenshots, in the order listed'
+        if inline_files else
+        'Read the screenshot image files in the order listed, then evaluate the JOURNEY'
+    )
+    journey_bullet = (
+        "- Focus on cross-screen / flow issues and reference screens by name or number\n"
+        "  (e.g. 'between \"Cart\" and \"Payment\"'). Do NOT produce a per-screen heuristic dump.\n"
+    )
+
+    return f"""You have a skill to evaluate a Figma design.
+This is a MULTI-SCREEN USER JOURNEY, not a single screen.
+Use the skill's Journey / flow-review mode: review the FLOW ACROSS the screens
+(coherence and continuity, cross-screen consistency, user control, progress and
+orientation, state carry-over, error prevention and recovery) — NOT each screen
+in isolation.
+
+{skill_content}{refs_section}
+
+Now review this user journey:
+- Board: {frame_name}
+- Trigger: {trigger_kw}{extra_ctx}
+- Screens, in flow order ({n} total):
+{screens_section}
+
+{eval_instruction}, then respond with ONLY a plain-text comment reply.
+
+{_critical_rules(lang_instruction, journey_bullet)}"""
 
 
 # ── Skill execution ───────────────────────────────────────────────────
@@ -375,9 +437,38 @@ def execute_skill(audit, *, config, design_repo):
         extra={'required': ','.join(required_data)},
     )
 
-    data, tree_data = design_repo.fetch(required_data, file_key, node_id)
+    # Journey detection: a big multi-screen board can't render as one screenshot,
+    # so for a journey-capable skill fetch the tree FIRST, and if it's a journey
+    # (auto-detected or forced via "@ux journey \u2026") screenshot each child screen
+    # instead \u2014 skipping the doomed whole-board render. Journey capability is
+    # declared by the skill's introspection (like required_data), not hardcoded.
+    journey_capable = bool(intro.get('journey_capable'))
+    explicit_journey = 'journey' in (audit.trigger_match.extra or '').lower()
+    journey_screens = None
+
+    if journey_capable:
+        data, tree_data = design_repo.fetch(
+            [k for k in required_data if k != 'screenshot'], file_key, node_id,
+        )
+        detected_journey = tree_data is not None and (
+            explicit_journey or is_journey_frame(tree_data)
+        )
+        if detected_journey:
+            # Multi-screen board: screenshot each child screen; do NOT attempt the
+            # whole-board render (it can't render as one image). If capture fails,
+            # 'screenshot' stays absent → the missing-data check reports it.
+            journey_screens = design_repo.fetch_journey_screenshots(
+                file_key, node_id, tree_data,
+            ) or None
+        else:
+            shot_data, _ = design_repo.fetch(['screenshot'], file_key, node_id)
+            data['screenshot'] = shot_data.get('screenshot')
+    else:
+        data, tree_data = design_repo.fetch(required_data, file_key, node_id)
 
     missing = [k for k in required_data if not data.get(k)]
+    if journey_screens:
+        missing = [k for k in missing if k != 'screenshot']  # child screens satisfy it
     if missing:
         raise RuntimeError(f'Failed to fetch required data: {", ".join(missing)}')
 
@@ -406,25 +497,37 @@ def execute_skill(audit, *, config, design_repo):
         'calling ai provider',
         extra={'provider': provider.model_id, 'frame': frame_name},
     )
-    prompt = _build_prompt(
-        audit, skill_content, refs_section, data, tree_data, frame_name,
-        inline_files=provider.inline_files, config=config,
-    )
+
+    audit_base = f'\U0001f5e3\ufe0f {trigger_kw}'
+    if journey_screens:
+        prompt = _build_journey_prompt(
+            audit, skill_content, refs_section, journey_screens, frame_name,
+            inline_files=provider.inline_files, config=config,
+        )
+        image_arg = [s['path'] for s in journey_screens]
+        header = f'{audit_base} Journey Audit \u2014 {frame_name} ({len(journey_screens)} screens)'
+    else:
+        prompt = _build_prompt(
+            audit, skill_content, refs_section, data, tree_data, frame_name,
+            inline_files=provider.inline_files, config=config,
+        )
+        image_arg = data.get('screenshot')
+        header = f'{audit_base} Audit \u2014 {frame_name}'
 
     tracer = get_tracer()
     try:
         with tracer.start_as_current_span('skill.execute', attributes={
             'skill.name': skill_ref,
             'skill.builtin': skill_ref.startswith('builtin:'),
+            'skill.journey': bool(journey_screens),
             'ai.provider': type(provider).__name__,
             'ai.model': provider.model_id,
         }) as span:
-            reply = provider.call(prompt, data.get('screenshot'))
+            reply = provider.call(prompt, image_arg)
             if hasattr(provider, 'last_token_usage'):
                 usage = provider.last_token_usage
                 if usage:
                     span.set_attribute('ai.tokens', usage)
-        header = f'\U0001f5e3\ufe0f {trigger_kw} Audit \u2014 {frame_name}'
         # Sign-off includes the skill that ran and how long the audit took.
         skill_label = (
             skill_ref.split('builtin:', 1)[1] if skill_ref.startswith('builtin:')
@@ -441,8 +544,10 @@ def execute_skill(audit, *, config, design_repo):
         )
         return f'{header}\n\n{reply}\n\n{signoff}'
     finally:
-        for key in ['screenshot', 'node_tree']:
-            p = data.get(key)
+        temp_paths = [data.get('screenshot'), data.get('node_tree')]
+        if journey_screens:
+            temp_paths.extend(s['path'] for s in journey_screens)
+        for p in temp_paths:
             if p and isinstance(p, str):
                 with contextlib.suppress(Exception):
                     os.unlink(p)

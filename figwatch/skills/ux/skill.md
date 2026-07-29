@@ -110,3 +110,45 @@ H10 Help ✅ Tooltip icons on the CVV and promo code fields explain what to ente
 
 ✅ Strong checkout flow with clear step progression and well-labelled form fields that guide the user confidently through payment
 ```
+
+---
+
+## Journey / Flow Review Mode (multiple screens)
+
+When you are given SEVERAL screenshots in flow order (a multi-screen user journey) instead of one screen, switch to this mode. Do NOT run the 10-heuristic evaluation on each screen — that is single-screen mode and would be far too long. Instead review the JOURNEY: the experience of moving THROUGH the screens in the given order.
+
+### What to evaluate (the seams BETWEEN screens)
+- Flow coherence & continuity — does each step lead logically to the next? Are expected states missing (loading, empty, error, success/confirmation)? Any dead ends?
+- Cross-screen consistency — navigation, button hierarchy, terminology, and visual language consistent across screens (H4 at flow scale)?
+- User control across the flow — can the user go back / cancel / undo / exit at every step (H3)?
+- Progress & orientation — does the user always know where they are and how far is left (step indicators, headings) (H1/H6)?
+- State carry-over — is data entered earlier surfaced later (e.g. cart items, gift message at checkout)? Is there a review/confirm step before an irreversible action?
+- Error prevention & recovery across steps — validation before commit; can a user recover from a mistake made a screen or two earlier (H5/H9)?
+- Redundant or missing steps — friction, or a step the user would expect that isn't there.
+
+### Output (Figma comment — PLAIN TEXT only, same rules as single-screen mode)
+Line 1: one-line flow verdict (🟢 / 🟡 / 🟠 / 🔴 plus a short phrase).
+
+Blank line.
+
+Then the few strongest CROSS-SCREEN findings — NOT a per-screen list. Reference screens by name or number so the reviewer can locate them, and always say why it matters for the user:
+  [emoji] Between "Cart" and "Payment": [issue and user impact]
+  → [recommendation]
+
+End with one blank line, then one positive observation about the flow as a whole.
+
+### Example output
+```
+🟠 Major flow issues
+
+🟠 Between "Gift options" and "Checkout": the gift message entered on "Gift options" is never shown again before "Place order", so users can't confirm what they wrote
+→ Surface the gift message on the checkout review, above the final CTA
+
+🟡 No back affordance on "Payment" — a user who wants to change the delivery option from the previous step has to abandon and restart
+→ Add a back arrow so every step is reversible
+
+🟠 No confirmation/success screen after "Place order" — the journey ends with no signal the order went through
+→ Add an order-confirmation step
+
+✅ Strong continuity across browse-to-cart: product, price, and promo carry through consistently and the CTA wording stays task-specific throughout
+```

@@ -39,9 +39,36 @@ class FigmaTokenExpired(Exception):
 # Base64 adds ~33% overhead; cap raw bytes at 3.75 MB to stay under the 5 MB API limit.
 _MAX_IMAGE_BYTES = int(3.75 * 1024 * 1024)
 
+# Whole-journey review: a frame whose direct children are several screen-sized
+# frames is treated as a multi-screen board — each child is screenshotted and
+# reviewed together, since Figma can't render the whole board as one image.
+JOURNEY_MIN_SCREENS = 3       # >= this many screen-sized direct children => journey
+JOURNEY_MAX_SCREENS = 10      # cap of screens sent to the model
+_JOURNEY_MIN_DIM = 200        # a "screen" child must be at least this wide AND tall (px)
+_JOURNEY_MAX_NEST_DEPTH = 3   # how deep to descend into container/section frames
+_JOURNEY_MIN_CONTAINER_SCREENS = 2  # a child with >= this many screen kids is a container
+_SCREEN_TYPES = {'FRAME', 'COMPONENT', 'INSTANCE', 'SECTION'}
+
 
 def urllib_quote(s):
     return urllib.parse.quote(s, safe='')
+
+
+def _temp_path(prefix, node_id, ext):
+    """A stable /tmp path for a node's exported asset."""
+    return os.path.join(tempfile.gettempdir(), f'{prefix}-{node_id.replace(":", "-")}.{ext}')
+
+
+def _download_capped(url, out_path):
+    """Download an image URL to out_path if it fits _MAX_IMAGE_BYTES; return the
+    path, or None if oversized. Raises (e.g. socket.timeout) so callers decide."""
+    with urllib.request.urlopen(url, timeout=30, context=_SSL_CTX) as r:
+        img = r.read()
+    if len(img) > _MAX_IMAGE_BYTES:
+        return None
+    with open(out_path, 'wb') as f:
+        f.write(img)
+    return out_path
 
 
 # ── Figma rate limit tiers ───────────────────────────────────────────
@@ -306,6 +333,229 @@ def _extract_annotations(node):
     return annotations
 
 
+def _prune_hidden(node):
+    """Recursively drop children with ``visible: false`` (and their subtrees) so
+    hidden Figma layers aren't fed to the model via the node tree or text
+    extraction. Visible layers omit the property or set it true; only an explicit
+    ``false`` is dropped."""
+    children = node.get('children')
+    if isinstance(children, list):
+        node['children'] = [
+            _prune_hidden(c) for c in children if c.get('visible') is not False
+        ]
+    return node
+
+
+# ── Journey (multi-screen) enumeration, ordering, capture ─────────────
+
+def _screen_sized(box):
+    box = box or {}
+    return ((box.get('width') or 0) >= _JOURNEY_MIN_DIM
+            and (box.get('height') or 0) >= _JOURNEY_MIN_DIM)
+
+
+def _is_screen(node):
+    """A visible, screen-sized FRAME/COMPONENT/INSTANCE/SECTION with an id."""
+    return (node.get('id') and node.get('visible') is not False
+            and node.get('type') in _SCREEN_TYPES
+            and _screen_sized(node.get('absoluteBoundingBox')))
+
+
+def _screen_child_count(node):
+    """Number of a node's direct children that are screens."""
+    return sum(1 for c in (node.get('children') or []) if _is_screen(c))
+
+
+def enumerate_child_screens(tree_data, _depth=0):
+    """The individual screens inside a board, for a journey review.
+
+    A screen is a visible FRAME/COMPONENT/INSTANCE/SECTION at least
+    ``_JOURNEY_MIN_DIM`` px on both sides. Boards often nest screens under
+    labelled group/section frames (or a big wrapper frame), so a child that is
+    itself a *container* of several screen-sized frames is descended into rather
+    than captured whole. Returns [{id, name, type, x, y, w, h}].
+    """
+    screens = []
+    for child in (tree_data or {}).get('children', []) or []:
+        if not _is_screen(child):
+            continue
+        if (_depth < _JOURNEY_MAX_NEST_DEPTH
+                and _screen_child_count(child) >= _JOURNEY_MIN_CONTAINER_SCREENS):
+            # A container of screens (a section / wrapper) — go one level deeper.
+            screens.extend(enumerate_child_screens(child, _depth + 1))
+        else:
+            box = child.get('absoluteBoundingBox') or {}
+            screens.append({
+                'id': child['id'], 'name': child.get('name', ''), 'type': child.get('type'),
+                'x': box.get('x', 0), 'y': box.get('y', 0),
+                'w': box.get('width', 0), 'h': box.get('height', 0),
+            })
+    return screens
+
+
+def is_journey_frame(tree_data):
+    """True if the node is a multi-screen board (>= JOURNEY_MIN_SCREENS screens)."""
+    return len(enumerate_child_screens(tree_data)) >= JOURNEY_MIN_SCREENS
+
+
+def _reading_order(screens):
+    """Row-major reading order: group into rows by vertical overlap, rows top to
+    bottom, left-to-right within a row."""
+    rows = []
+    for c in sorted(screens, key=lambda s: (s['y'], s['x'])):
+        for row in rows:
+            ref = row[0]
+            if c['y'] < ref['y'] + ref['h'] and ref['y'] < c['y'] + c['h']:
+                row.append(c)
+                break
+        else:
+            rows.append([c])
+    result = []
+    for row in rows:
+        result.extend(sorted(row, key=lambda s: s['x']))
+    return result
+
+
+def _screen_owner_map(tree_data, screen_ids):
+    """Map every node id to the screen that contains it, in one DFS.
+
+    A node's owner is the nearest ancestor (or itself) whose id is in
+    ``screen_ids`` — so a reaction on a deep button is attributed to its screen.
+    """
+    owner = {}
+
+    def walk(node, current):
+        nid = node.get('id')
+        if nid in screen_ids:
+            current = nid
+        if nid is not None and current is not None:
+            owner.setdefault(nid, current)
+        for child in node.get('children', []) or []:
+            walk(child, current)
+
+    walk(tree_data, None)
+    return owner
+
+
+def _flow_order(screens, tree_data):
+    """Order screens by prototype flow when reactions connect the direct-child
+    screens; returns None if the prototype doesn't wire them together."""
+    by_id = {s['id']: s for s in screens}
+    owner = _screen_owner_map(tree_data, set(by_id))
+    edges = {}
+    for f in _extract_prototype_flows(tree_data):
+        src, dst = owner.get(f.get('node_id')), owner.get(f.get('destination'))
+        if src and dst and src != dst:
+            edges.setdefault(src, dst)
+    if not edges:
+        return None
+    starts = []
+    for sp in (tree_data.get('flowStartingPoints') or []):
+        sid = owner.get(sp.get('nodeId'))
+        if sid and sid not in starts:
+            starts.append(sid)
+    if not starts:
+        incoming = set(edges.values())
+        starts = [s['id'] for s in screens if s['id'] not in incoming] or [screens[0]['id']]
+    result, seen = [], set()
+    for start in starts:
+        cur = start
+        while cur in by_id and cur not in seen:
+            seen.add(cur)
+            result.append(by_id[cur])
+            cur = edges.get(cur)
+    for s in _reading_order(screens):  # append any screens the flow didn't reach
+        if s['id'] not in seen:
+            seen.add(s['id'])
+            result.append(s)
+    return result
+
+
+def order_screens(screens, tree_data=None):
+    """Order screens into a journey: prototype-flow order when the board is wired
+    up, else row-major reading order. Never raises — falls back to reading order."""
+    if not screens:
+        return []
+    if tree_data:
+        try:
+            flow = _flow_order(screens, tree_data)
+            if flow:
+                return flow
+        except Exception:
+            pass
+    return _reading_order(screens)
+
+
+def fetch_screenshots_batch(file_key, node_ids, pat, limiter=None, *, scale=1, fmt='png'):
+    """Render multiple nodes in ONE /images call → {node_id: file_path}.
+
+    /images is Tier-1 rate-limited (as low as 1 rpm), so all ids MUST go in one
+    request; the response is an id→url map (values may be null when a node fails
+    to render). Each downloaded image is capped at ``_MAX_IMAGE_BYTES``.
+    """
+    if not node_ids:
+        return {}
+    tracer = get_tracer()
+    with tracer.start_as_current_span('figma.screenshots_batch', attributes={
+        'figma.file_key': file_key, 'figma.count': len(node_ids),
+    }):
+        enc_ids = ','.join(urllib_quote(n) for n in node_ids)
+        images = {}
+        for retry in range(2):
+            try:
+                data = figma_get_retry(
+                    f'/images/{file_key}?ids={enc_ids}&scale={scale}&format={fmt}',
+                    pat, timeout=60, limiter=limiter,
+                )
+                if not data or data.get('err') or data.get('status') == 400:
+                    return {}
+                images = data.get('images') or {}
+                break
+            except (socket.timeout, TimeoutError):
+                if retry == 0:
+                    logger.info('journey render timed out — retrying (warm cache)',
+                                extra={'file_key': file_key, 'count': len(node_ids)})
+                    continue
+                logger.warning('journey render timed out after retry',
+                               extra={'file_key': file_key})
+                return {}
+            except Exception:
+                return {}
+        out = {}
+        for nid in node_ids:
+            url = images.get(nid)
+            if not url:
+                continue
+            try:
+                path = _download_capped(url, _temp_path('figwatch-screen', nid, fmt))
+                if path:
+                    out[nid] = path
+            except Exception:
+                continue
+        return out
+
+
+def fetch_journey_screenshots(file_key, node_id, tree_data, pat, limiter=None,
+                              *, max_screens=JOURNEY_MAX_SCREENS):
+    """Enumerate → order → batch-render a board's child screens.
+
+    Returns an ordered list of {id, name, path} for the screens captured. Scale
+    is reduced as the screen count grows to bound total request size/tokens.
+    """
+    screens = order_screens(enumerate_child_screens(tree_data), tree_data)[:max_screens]
+    if not screens:
+        return []
+    n = len(screens)
+    scale, fmt = (1, 'png') if n <= 4 else (0.5, 'jpg') if n <= 8 else (0.25, 'jpg')
+    paths = fetch_screenshots_batch(
+        file_key, [s['id'] for s in screens], pat, limiter=limiter, scale=scale, fmt=fmt,
+    )
+    return [
+        {'id': s['id'], 'name': s['name'], 'path': paths[s['id']]}
+        for s in screens if s['id'] in paths
+    ]
+
+
 # ── Data fetching ─────────────────────────────────────────────────────
 
 def fetch_screenshot(file_key, node_id, pat, limiter=None):
@@ -329,10 +579,7 @@ def fetch_screenshot(file_key, node_id, pat, limiter=None):
         attempts = [('png', 1), ('png', 0.5), ('jpg', 1), ('jpg', 0.5), ('jpg', 0.25)]
 
         for fmt, scale in attempts:
-            out_path = os.path.join(
-                tempfile.gettempdir(),
-                f'figwatch-screenshot-{node_id.replace(":", "-")}.{fmt}',
-            )
+            out_path = _temp_path('figwatch-screenshot', node_id, fmt)
             # Figma renders large frames server-side and caches the result, so a
             # cold render of a big multi-screen frame can exceed one request's
             # timeout while the follow-up hits the warm cache and returns fast.
@@ -353,13 +600,10 @@ def fetch_screenshot(file_key, node_id, pat, limiter=None):
                     url = (data.get('images') or {}).get(node_id)
                     if not url:
                         break
-                    with urllib.request.urlopen(url, timeout=30, context=_SSL_CTX) as r:
-                        img_bytes = r.read()
-                    if len(img_bytes) > _MAX_IMAGE_BYTES:
-                        break
-                    with open(out_path, 'wb') as f:
-                        f.write(img_bytes)
-                    return out_path
+                    path = _download_capped(url, out_path)
+                    if path:
+                        return path
+                    break  # too big at this scale → try the next, smaller one
                 except (socket.timeout, TimeoutError):
                     if retry == 0:
                         logger.info(
@@ -396,10 +640,8 @@ def fetch_node_tree(file_key, node_id, pat, limiter=None):
             node = data.get('nodes', {}).get(node_id, {}).get('document') if data else None
             if not node:
                 return None, None
-            out_path = os.path.join(
-                tempfile.gettempdir(),
-                f'figwatch-tree-{node_id.replace(":", "-")}.json',
-            )
+            node = _prune_hidden(node)
+            out_path = _temp_path('figwatch-tree', node_id, 'json')
             with open(out_path, 'w', encoding='utf-8') as f:
                 json.dump(node, f, indent=2)
             return out_path, node
@@ -520,3 +762,8 @@ class FigmaDesignDataRepository:
 
     def fetch(self, required_data: list, file_key: str, node_id: str) -> tuple:
         return fetch_figma_data(required_data, file_key, node_id, self._pat, limiter=self._limiter)
+
+    def fetch_journey_screenshots(self, file_key: str, node_id: str, tree_data: dict) -> list:
+        return fetch_journey_screenshots(
+            file_key, node_id, tree_data, self._pat, limiter=self._limiter,
+        )

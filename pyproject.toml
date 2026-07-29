@@ -55,6 +55,10 @@ select = [
     "SIM",   # flake8-simplify
     "RUF",   # ruff-specific rules
 ]
+# Chinese (reply_lang="cn") reply/status strings use full-width punctuation on
+# purpose; allowlist it so RUF001 still flags genuine confusables (e.g. a curly
+# apostrophe) without tripping on legitimate CJK punctuation.
+allowed-confusables = ["，", "：", "；", "！", "？", "（", "）", "、"]
 
 [tool.ruff.lint.per-file-ignores]
 "macos/*" = ["F403", "F405", "E402", "E501", "E701", "E702", "E741", "RUF012", "SIM115"]
