@@ -491,7 +491,19 @@ def execute_skill(audit, *, config, design_repo):
         if ref_parts:
             refs_section = '\n\nReference files:\n' + '\n\n'.join(ref_parts)
 
-    frame_name = tree_data.get('name', 'Unknown frame') if tree_data else 'Unknown frame'
+    # Prefer the tree's name; if the skill didn't fetch a tree (e.g. a report
+    # generator that only needs the screenshot), fall back to a cheap name-only
+    # lookup so the header isn't "Unknown frame". Works for any node, SECTION
+    # included. getattr keeps older repos/test doubles without the method working.
+    frame_name = (tree_data or {}).get('name')
+    if not frame_name:
+        getter = getattr(design_repo, 'fetch_node_name', None)
+        if getter:
+            try:
+                frame_name = getter(file_key, node_id)
+            except Exception:
+                frame_name = None
+    frame_name = frame_name or 'Unknown frame'
     provider = make_provider(model, claude_path, skill_dir=skill_dir, gateway=gateway_info())
     logger.debug(
         'calling ai provider',

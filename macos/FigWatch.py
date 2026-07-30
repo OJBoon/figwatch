@@ -264,17 +264,6 @@ def _fetch_latest_release():
         return None
 
 
-def _post_notification(title, message):
-    try:
-        from Foundation import NSUserNotification, NSUserNotificationCenter
-        notif = NSUserNotification.alloc().init()
-        notif.setTitle_(title)
-        notif.setInformativeText_(message)
-        NSUserNotificationCenter.defaultUserNotificationCenter().deliverNotification_(notif)
-    except Exception:
-        pass
-
-
 def _fallback_reply(kind, lang, trigger):
     """Localized ack / error text posted to Figma. The AI audit text is localized
     by the skill; these fixed status and fallback messages are localized here too
@@ -1704,7 +1693,7 @@ class FigWatch(NSObject):
                     if not self._state.get("workers"):
                         threading.Thread(target=self._app_init, daemon=True).start()
                     self._rebuild_popover()
-                    _post_notification("FigWatch", f"Connected as {name}")
+                    self._show_toast(f"Connected as {name} ✓")
                     break
                 else:
                     err = NSAlert.alloc().init()
@@ -1878,6 +1867,7 @@ class FigWatch(NSObject):
         self._add_trigger_kw = kw_field
         self._add_trigger_sk = sk_popup
         self._add_trigger_paths = skill_paths
+        self._add_trigger_btn = add_btn
 
         # ── Connection ────────────────────────────────────────
         tok_hdr_btn = _pill("Change Token\u2026", b"doToken:", width=120, height=24)
@@ -2112,10 +2102,46 @@ class FigWatch(NSObject):
             else:
                 return
 
-        if keyword:
-            self._commit_trigger(keyword, skill_path)
-            self._add_trigger_kw.setStringValue_("")
-            _post_notification("FigWatch", f"Trigger {keyword} added")
+        if not keyword:
+            self._flash_add_button("Enter a keyword first")
+            return
+        if not keyword.startswith("@"):
+            keyword = "@" + keyword
+        if any(t.get("trigger") == keyword for t in self._state.get("trigger_config", [])):
+            self._flash_add_button(f"{keyword} already added")
+            return
+
+        # NSUserNotification is dead on modern macOS (see the HUD note) and the
+        # open modal's trigger list doesn't refresh, so a successful Add used to
+        # look like nothing happened. Confirm inline on the button instead.
+        self._commit_trigger(keyword, skill_path)
+        self._add_trigger_kw.setStringValue_("")
+        self._add_trigger_sk.selectItemAtIndex_(0)
+        self._flash_add_button(f"✓ Added {keyword}")
+
+    def _set_add_button_title(self, text):
+        btn = getattr(self, "_add_trigger_btn", None)
+        if btn is None:
+            return
+        btn.setAttributedTitle_(
+            NSAttributedString.alloc().initWithString_attributes_(
+                text, {
+                    NSForegroundColorAttributeName: NSColor.labelColor(),
+                    NSFontAttributeName: NSFont.systemFontOfSize_weight_(12, NSFontWeightMedium),
+                }))
+
+    def _flash_add_button(self, text):
+        """Briefly show a status on the Add button, then revert to "Add"."""
+        self._set_add_button_title(text)
+        threading.Timer(
+            1.8,
+            lambda: self.performSelectorOnMainThread_withObject_waitUntilDone_(
+                b"_resetAddButtonTitle:", None, False),
+        ).start()
+
+    @objc.typedSelector(b"v@:@")
+    def _resetAddButtonTitle_(self, _):
+        self._set_add_button_title("Add")
 
     def _commit_trigger(self, keyword, skill_path):
         if not keyword or not skill_path:
@@ -2162,7 +2188,15 @@ class FigWatch(NSObject):
     # ── Update progress HUD ────────────────────────────────────
     # System notifications (NSUserNotification) are dead on modern macOS, so the
     # self-update flow needs visible in-app feedback instead of a silent
-    # download + quit + relaunch.
+    # download + quit + relaunch. The same glass panel doubles as a general
+    # confirmation toast (_show_toast) for other success paths.
+
+    def _show_toast(self, message):
+        """Brief glass confirmation panel, dismissed with Done. Used where a
+        success would otherwise be silent (NSUserNotification does nothing on
+        modern macOS) and there's no persistent control to flash inline."""
+        self._show_update_hud(message, spinning=False,
+                              button="Done", button_action=b"_hide_update_hud:")
 
     def _show_update_hud(self, message, *, spinning=True, button=None, button_action=None):
         """Show (or update) the glass update HUD with a status line. Main thread.
@@ -2544,13 +2578,40 @@ class FigWatch(NSObject):
         alert.addButtonWithTitle_("Cancel")
         r = alert.runModal()
         if r == NSAlertFirstButtonReturn:
-            self._stop_all_watchers()
-            bundle = NSBundle.mainBundle().bundlePath()
-            subprocess.Popen(["open", bundle])
-            NSApp.terminate_(None)
+            self._relaunch()
         elif r == NSAlertSecondButtonReturn:
             self._stop_all_watchers()
             NSApp.terminate_(None)
+
+    def _relaunch(self):
+        """Restart the app reliably.
+
+        `open <bundle>` while we're still running only activates the existing
+        instance — it won't start a new one — so the old code quit without ever
+        relaunching. Spawn a detached helper that waits for THIS process to exit,
+        then forces a fresh instance with `open -n`. Watchers are daemon threads
+        that die with the process, so skip the blocking graceful stop (it froze
+        the main thread up to ~5s per watched file).
+        """
+        bundle = NSBundle.mainBundle().bundlePath()
+        cache = os.path.join(HOME, "Library", "Caches", "FigWatch")
+        os.makedirs(cache, exist_ok=True)
+        script_path = os.path.join(cache, "relaunch.sh")
+        script = (
+            "#!/bin/bash\n"
+            f'PID={os.getpid()}\n'
+            'for i in $(seq 1 40); do kill -0 "$PID" 2>/dev/null || break; sleep 0.25; done\n'
+            f'open -n "{bundle}"\n'
+        )
+        with open(script_path, "w") as f:
+            f.write(script)
+        os.chmod(script_path, 0o755)
+        subprocess.Popen(
+            ["/bin/bash", script_path],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        NSApp.terminate_(None)
 
     @objc.typedSelector(b"v@:@")
     def doQuit_(self, sender):
@@ -2703,7 +2764,7 @@ class FigWatch(NSObject):
         if self._state["deps"].get("all_required") and not self._state.get("workers"):
             threading.Thread(target=self._app_init, daemon=True).start()
         self._rebuild_popover()
-        _post_notification("FigWatch", "Gateway connected")
+        self._show_toast("Gateway connected ✓")
 
     @objc.typedSelector(b"v@:@")
     def doCheckDeps_(self, sender):

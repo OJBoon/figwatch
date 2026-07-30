@@ -45,3 +45,7 @@ class DesignDataRepository(Protocol):
         Returns an ordered list of {id, name, path} for a whole-journey review.
         """
         ...
+
+    def fetch_node_name(self, file_key: str, node_id: str) -> Optional[str]:
+        """Resolve a single node's name (for the reply header) without the tree."""
+        ...

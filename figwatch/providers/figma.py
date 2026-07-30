@@ -649,6 +649,25 @@ def fetch_node_tree(file_key, node_id, pat, limiter=None):
             return None, None
 
 
+def fetch_node_name(file_key, node_id, pat, limiter=None):
+    """Resolve just a node's name (depth=1) for the reply header.
+
+    Skills that don't request the full node tree (e.g. a report generator) leave
+    tree_data None, which otherwise renders as "Unknown frame". This is a cheap
+    single-node lookup — /files/.../nodes is not the Tier-1 /images endpoint —
+    and works for any node type, SECTION included. Returns the name or None.
+    """
+    try:
+        enc_id = urllib_quote(node_id)
+        data = figma_get_retry(
+            f'/files/{file_key}/nodes?ids={enc_id}&depth=1', pat, limiter=limiter,
+        )
+        doc = (data or {}).get('nodes', {}).get(node_id, {}).get('document')
+        return doc.get('name') if doc else None
+    except Exception:
+        return None
+
+
 def fetch_figma_data(required_data, file_key, node_id, pat, limiter=None):
     """Fetch only the declared data points from Figma API in parallel.
 
@@ -767,3 +786,6 @@ class FigmaDesignDataRepository:
         return fetch_journey_screenshots(
             file_key, node_id, tree_data, self._pat, limiter=self._limiter,
         )
+
+    def fetch_node_name(self, file_key: str, node_id: str) -> 'str | None':
+        return fetch_node_name(file_key, node_id, self._pat, limiter=self._limiter)

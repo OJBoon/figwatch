@@ -223,11 +223,13 @@ def _screen_child(cid, name, x, w=400, h=800):
 
 
 class _FakeRepo:
-    def __init__(self, tree, journey_screens=None, screenshot=None):
+    def __init__(self, tree, journey_screens=None, screenshot=None, node_name=None):
         self._tree = tree
         self._journey = journey_screens or []
         self._shot = screenshot
+        self._node_name = node_name
         self.calls = []
+        self.name_calls = []
 
     def fetch(self, required_data, file_key, node_id):
         req = list(required_data)
@@ -241,6 +243,10 @@ class _FakeRepo:
 
     def fetch_journey_screenshots(self, file_key, node_id, tree_data):
         return list(self._journey)
+
+    def fetch_node_name(self, file_key, node_id):
+        self.name_calls.append((file_key, node_id))
+        return self._node_name
 
 
 class _FakeProvider:
@@ -296,3 +302,19 @@ def test_execute_skill_explicit_journey_keyword(monkeypatch):
     audit = _make_audit(extra="journey please")
     result = _skills.execute_skill(audit, config=_make_config(), design_repo=repo)
     assert "Journey Audit" in result
+
+
+def test_execute_skill_resolves_name_without_tree(monkeypatch):
+    # A skill that doesn't request node_tree (e.g. a report generator) leaves
+    # tree_data None; the header must still name the node (SECTION included) via
+    # the fetch_node_name fallback rather than reading "Unknown frame".
+    prov = _FakeProvider()
+    monkeypatch.setattr(_skills, "make_provider", lambda *a, **k: prov)
+    monkeypatch.setattr(_skills, "_get_introspection",
+                        lambda *a, **k: {"required_data": ["screenshot"]})
+    repo = _FakeRepo(tree=None, screenshot="/tmp/shot.png", node_name="Sony SiS demo")
+    result = _skills.execute_skill(_make_audit(), config=_make_config(), design_repo=repo)
+    assert "Sony SiS demo" in result
+    assert "Unknown frame" not in result
+    assert repo.name_calls == [("abc", "2:3")]
+
