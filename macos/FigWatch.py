@@ -112,8 +112,11 @@ def _skill_claude_path():
 
 W = 320
 PAD = 12
-ROW_H = 28
-MAX_FILE_ROWS = 12  # scroll if more than this
+# Type scale: the only text sizes in FigWatch's own panels. 13pt is macOS's
+# standard size for row text and regular controls, 11pt its caption size.
+TITLE_SIZE = 15    # panel titles, bold
+BODY_SIZE = 13     # rows, values, controls, buttons; section headings semibold
+CAPTION_SIZE = 11  # secondary description under a row
 POPOVER_CORNER_RADIUS = 16  # match macOS Tahoe native menu/popover rounding
 # Insets between the settings glass edge and its content (NSAlert used to supply
 # these; our own panel must add them or the rows run flush to the glass edge).
@@ -402,48 +405,6 @@ class FlippedView(NSView):
     def drawRect_(self, rect): pass  # don't fill background
 
 
-# ── Hover Row ───────────────────────────────────────────────────────
-
-class HoverRow(NSButton):
-    def initWithFrame_(self, frame):
-        self = objc.super(HoverRow, self).initWithFrame_(frame)
-        if self:
-            self.setBordered_(False)
-            self.setTitle_("")
-            self.setWantsLayer_(True)
-            self.layer().setCornerRadius_(6)
-        return self
-
-    def updateTrackingAreas(self):
-        objc.super(HoverRow, self).updateTrackingAreas()
-        for ta in list(self.trackingAreas()): self.removeTrackingArea_(ta)
-        ta = NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
-            self.bounds(),
-            NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect,
-            self, None)
-        self.addTrackingArea_(ta)
-
-    def mouseEntered_(self, event):
-        self.layer().setBackgroundColor_(
-            NSColor.labelColor().colorWithAlphaComponent_(0.08).CGColor())
-        objc.super(HoverRow, self).mouseEntered_(event)
-
-    def mouseExited_(self, event):
-        self.layer().setBackgroundColor_(None)
-        objc.super(HoverRow, self).mouseExited_(event)
-
-    def mouseDown_(self, event):
-        self.layer().setBackgroundColor_(
-            NSColor.labelColor().colorWithAlphaComponent_(0.15).CGColor())
-        objc.super(HoverRow, self).mouseDown_(event)
-
-    def mouseUp_(self, event):
-        self.layer().setBackgroundColor_(None)
-        if self.target() and self.action():
-            NSApp.sendAction_to_from_(self.action(), self.target(), self)
-        objc.super(HoverRow, self).mouseUp_(event)
-
-
 # ── UI Builder ──────────────────────────────────────────────────────
 
 def _skill_display_name(skill_path):
@@ -463,15 +424,12 @@ def _skill_display_name(skill_path):
     return stem
 
 
-def _label(text, size=13, weight=NSFontWeightRegular, color=None, mono=False):
+def _label(text, size=BODY_SIZE, weight=NSFontWeightRegular, color=None):
     l = NSTextField.alloc().init()
     l.setStringValue_(text)
     l.setBezeled_(False); l.setEditable_(False)
     l.setSelectable_(False); l.setDrawsBackground_(False)
-    if mono:
-        l.setFont_(NSFont.monospacedSystemFontOfSize_weight_(size, weight))
-    else:
-        l.setFont_(NSFont.systemFontOfSize_weight_(size, weight))
+    l.setFont_(NSFont.systemFontOfSize_weight_(size, weight))
     if color: l.setTextColor_(color)
     l.setLineBreakMode_(NSLineBreakByTruncatingTail)
     l.sizeToFit()
@@ -495,7 +453,7 @@ def _dynamic_color(light, dark):
         return light
 
 
-def _sf_symbol(name, size=13, color=None):
+def _sf_symbol(name, size=BODY_SIZE, color=None):
     img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, name)
     if not img: return None
     iv = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, size + 4, size + 4))
@@ -506,6 +464,62 @@ def _sf_symbol(name, size=13, color=None):
     iv.setImage_(img)
     iv.setImageScaling_(2)  # NSImageScaleProportionallyUpOrDown
     return iv
+
+
+MENU_ICON_BOX = 16  # every menu icon shares this canvas so titles line up
+
+
+def _menu_icon(name, *colors, size=13):
+    """SF Symbol for an NSMenuItem image.
+
+    Without colours it stays a template, so the menu tints it (white on the
+    accent highlight), as for Settings/Quit in native menus. With palette
+    colours (file status: one per symbol layer, e.g. white tick on a green
+    disc) it's drawn centred on a fixed canvas and keeps them.
+    """
+    img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
+    if not img:
+        return None
+    cfg = NSImageSymbolConfiguration.configurationWithPointSize_weight_(size, NSFontWeightRegular)
+    if not colors:
+        img = img.imageWithSymbolConfiguration_(cfg)
+        img.setTemplate_(True)
+        return img
+    # One combined configuration: a second imageWithSymbolConfiguration_
+    # call would replace the size rather than add the colours.
+    img = img.imageWithSymbolConfiguration_(cfg.configurationByApplyingConfiguration_(
+        NSImageSymbolConfiguration.configurationWithPaletteColors_(list(colors))))
+
+    def draw(rect):
+        w, h = img.size().width, img.size().height
+        img.drawInRect_(NSMakeRect((MENU_ICON_BOX - w) / 2, (MENU_ICON_BOX - h) / 2, w, h))
+        return True
+
+    return NSImage.imageWithSize_flipped_drawingHandler_(
+        NSMakeSize(MENU_ICON_BOX, MENU_ICON_BOX), False, draw)
+
+
+def _file_row_look(info):
+    """(icon, status text, action) for a watched file's status-menu item. Clicking
+    opens the file in Figma; an errored file shows its error instead."""
+    status = info.get("status", STATUS_LIVE)
+    trigger = info.get("trigger") or ""
+    if status == STATUS_PROCESSING:
+        user = info.get("user")
+        return (_menu_icon("arrow.triangle.2.circlepath", NSColor.systemOrangeColor()),
+                f"Running {trigger or 'audit'}{f' for {user}' if user else ''}\u2026",
+                b"doOpenFile:")
+    if status == STATUS_DETECTED:
+        return (_menu_icon("bolt.fill", NSColor.systemOrangeColor()),
+                f"{trigger} comment found" if trigger else "Comment found", b"doOpenFile:")
+    if status == STATUS_REPLIED:
+        return (_menu_icon("checkmark.circle.fill", NSColor.whiteColor(), NSColor.systemGreenColor()),
+                "Replied", b"doOpenFile:")
+    if status == STATUS_ERROR:
+        return (_menu_icon("exclamationmark.triangle.fill", NSColor.whiteColor(),
+                           NSColor.systemRedColor()),
+                "Error (click for details)", b"doShowError:")
+    return _menu_icon("circle.fill", NSColor.systemGreenColor(), size=8), None, b"doOpenFile:"
 
 
 def _emoji_icon(emoji, size=64):
@@ -558,18 +572,20 @@ def _make_glass_view(w, h, radius=POPOVER_CORNER_RADIUS):
     glass.setMaskImage_(_rounded_mask_image(radius))
     return glass, False
 
+
+def build_onboarding_view(app, deps):
     """Build the onboarding/setup checklist. Returns (view, height)."""
     cw = W - PAD * 2
     y = PAD
 
     root = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 800))
 
-    title = _label("FigWatch Setup", size=15, weight=NSFontWeightBold)
+    title = _label("FigWatch Setup", size=TITLE_SIZE, weight=NSFontWeightBold)
     title.setFrameOrigin_((PAD + 6, y))
     root.addSubview_(title)
     y += 24
 
-    subtitle = _label("Let\u2019s get everything ready.", size=12, color=NSColor.secondaryLabelColor())
+    subtitle = _label("Let\u2019s get everything ready.", color=NSColor.secondaryLabelColor())
     subtitle.setFrameOrigin_((PAD + 6, y))
     root.addSubview_(subtitle)
     y += 24
@@ -630,20 +646,21 @@ def _make_glass_view(w, h, radius=POPOVER_CORNER_RADIUS):
         row_h = 68 if has_actions else 44
         row = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, row_h))
 
-        # desc sits above name (matching the other rows)
-        name_y, desc_y = (30, 46) if has_actions else (6, 24)
+        # Name above its description, as everywhere else. The row view isn't
+        # flipped, so the larger y is the upper line.
+        name_y, desc_y = (46, 30) if has_actions else (24, 6)
 
         if item["installing"]:
-            icon = _label("\u23F3", size=14)
-            icon.setFrameOrigin_((6, name_y + 6))
+            icon = _label("\u23F3", size=BODY_SIZE)
         elif item["ok"]:
-            icon = _sf_symbol("checkmark.circle.fill", size=14, color=NSColor.systemGreenColor())
-            if icon: icon.setFrameOrigin_((4, name_y + 4))
+            icon = _sf_symbol("checkmark.circle.fill", size=BODY_SIZE, color=NSColor.systemGreenColor())
         else:
-            icon = _sf_symbol("xmark.circle.fill", size=14, color=NSColor.systemRedColor())
-            if icon: icon.setFrameOrigin_((4, name_y + 4))
+            icon = _sf_symbol("xmark.circle.fill", size=BODY_SIZE, color=NSColor.systemRedColor())
 
         if icon:
+            # Centred on the two text lines (labels are ~16pt tall).
+            icon_mid = (desc_y + name_y + 16) / 2
+            icon.setFrameOrigin_((4, icon_mid - icon.frame().size.height / 2))
             row.addSubview_(icon)
 
         # Available text width: full width when the buttons sit on their own line
@@ -651,13 +668,13 @@ def _make_glass_view(w, h, radius=POPOVER_CORNER_RADIUS):
         # reserve the right side for the Install/Set Up button or "Installing…".
         text_w = (cw - 32) if (has_actions or item["ok"]) else (cw - 108)
 
-        nl = _label(item["name"], size=13, weight=NSFontWeightMedium)
+        nl = _label(item["name"])
         nl.setFrameSize_(NSMakeSize(text_w, nl.frame().size.height))
         nl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
         nl.setFrameOrigin_((28, name_y))
         row.addSubview_(nl)
 
-        dl = _label(item["desc"], size=11, color=NSColor.secondaryLabelColor())
+        dl = _label(item["desc"], size=CAPTION_SIZE, color=NSColor.secondaryLabelColor())
         dl.setFrameSize_(NSMakeSize(text_w, dl.frame().size.height))
         dl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
         dl.setFrameOrigin_((28, desc_y))
@@ -665,31 +682,23 @@ def _make_glass_view(w, h, radius=POPOVER_CORNER_RADIUS):
 
         if has_actions:
             # Buttons on their own line along the bottom, right-aligned.
-            bw = 76
             bx = cw - 8
             for title, selector in reversed(item["actions"]):
-                bx -= bw
-                b = NSButton.alloc().initWithFrame_(NSMakeRect(bx, 8, bw, 24))
-                b.setTitle_(title)
-                b.setBezelStyle_(NSBezelStyleRecessed)
-                b.setControlSize_(1)
-                b.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-                b.setTarget_(app)
-                b.setAction_(selector)
+                b = NSButton.buttonWithTitle_target_action_(title, app, selector)
+                b.sizeToFit()
+                bx -= b.frame().size.width
+                b.setFrameOrigin_((bx, 8))
                 row.addSubview_(b)
                 bx -= 8
         elif not item["ok"] and not item["installing"]:
             btn_title = "Set Up" if item["key"] == "pat" else "Install"
-            btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 70, name_y + 2, 62, 24))
-            btn.setTitle_(btn_title)
-            btn.setBezelStyle_(NSBezelStyleRecessed)
-            btn.setControlSize_(1)
-            btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-            btn.setTarget_(app)
-            btn.setAction_(item["action"])
+            btn = NSButton.buttonWithTitle_target_action_(btn_title, app, item["action"])
+            btn.sizeToFit()
+            bf = btn.frame().size
+            btn.setFrameOrigin_((cw - 8 - bf.width, (row_h - bf.height) / 2))
             row.addSubview_(btn)
         elif item["installing"]:
-            il = _label("Installing\u2026", size=11, color=NSColor.secondaryLabelColor())
+            il = _label("Installing\u2026", size=CAPTION_SIZE, color=NSColor.secondaryLabelColor())
             il.setFrameOrigin_((cw - 76, 12))
             row.addSubview_(il)
 
@@ -704,280 +713,23 @@ def _make_glass_view(w, h, radius=POPOVER_CORNER_RADIUS):
 
     footer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 28))
 
-    check_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 90, 24))
-    check_btn.setTitle_("Check Again")
-    check_btn.setBezelStyle_(NSBezelStyleRecessed)
-    check_btn.setControlSize_(1)
-    check_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-    check_btn.setTarget_(app)
-    check_btn.setAction_(b"doCheckDeps:")
-    footer.addSubview_(check_btn)
+    def _footer_button(title, action, right):
+        b = NSButton.buttonWithTitle_target_action_(title, app, action)
+        b.sizeToFit()
+        bf = b.frame().size
+        b.setFrameOrigin_((cw - bf.width if right else 0, (28 - bf.height) / 2))
+        footer.addSubview_(b)
+        return b
 
+    _footer_button("Check Again", b"doCheckDeps:", right=False)
     if deps["all_required"]:
-        cont_btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 80, 0, 80, 24))
-        cont_btn.setTitle_("Continue \u2192")
-        cont_btn.setBezelStyle_(NSBezelStyleRecessed)
-        cont_btn.setControlSize_(1)
-        cont_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-        cont_btn.setTarget_(app)
-        cont_btn.setAction_(b"doContinueSetup:")
-        footer.addSubview_(cont_btn)
-
-    quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 38, 0, 38, 24))
-    quit_btn.setBordered_(False)
-    quit_btn.setTitle_("Quit")
-    quit_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightRegular))
-    quit_btn.setContentTintColor_(NSColor.tertiaryLabelColor())
-    quit_btn.setTarget_(app)
-    quit_btn.setAction_(b"doQuit:")
-
-    if not deps["all_required"]:
-        footer.addSubview_(quit_btn)
+        cont_btn = _footer_button("Continue", b"doContinueSetup:", right=True)
+        cont_btn.setKeyEquivalent_(chr(13))  # default button, in the accent colour
+    else:
+        _footer_button("Quit", b"doQuit:", right=True)
 
     root.addSubview_(footer)
     y += 28 + PAD
-
-    root.setFrameSize_(NSMakeSize(W, y))
-    return root, y
-
-
-def build_popover_view(app):
-    """Build the main panel content — glass effect, file list, countdown."""
-    cw = W - PAD * 2
-    y = PAD + 4
-
-    root = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, W, 800))
-    file_statuses = app._state.get("file_statuses", {})
-    watched = app._state.get("watched", [])
-
-    # ── Header ─────────────────────────────────────────────────
-    title = _label("FigWatch", size=15, weight=NSFontWeightBold)
-    title.setFrameOrigin_((PAD + 4, y))
-    root.addSubview_(title)
-
-    quit_btn = NSButton.alloc().initWithFrame_(NSMakeRect(PAD + cw - 24, y + 1, 20, 20))
-    quit_btn.setBordered_(False); quit_btn.setTitle_("")
-    qi = _sf_symbol("power", size=12, color=NSColor.tertiaryLabelColor())
-    if qi: quit_btn.setImage_(qi.image())
-    quit_btn.setTarget_(app); quit_btn.setAction_(b"doPowerMenu:")
-    root.addSubview_(quit_btn)
-    y += 24
-
-    trigger_config = app._state.get("trigger_config", [])
-    triggers_str = " \u00B7 ".join(t.get("trigger", "") for t in trigger_config) if trigger_config else "@tone \u00B7 @ux"
-    subline = _label(triggers_str, size=11, color=NSColor.secondaryLabelColor())
-    subline.setFrameSize_(NSMakeSize(cw, subline.frame().size.height))
-    subline.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
-    subline.setFrameOrigin_((PAD + 4, y))
-    root.addSubview_(subline)
-    y += 20
-
-    sep0 = NSBox.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 1))
-    sep0.setBoxType_(2)
-    root.addSubview_(sep0)
-    y += 12
-
-    # ── Update banner ──────────────────────────────────────────
-    # A gentle "there's a newer version" reminder. Set by the background
-    # update check (_check_for_update); clicking it opens the install dialog.
-    update = app._state.get("update_available")
-    if update:
-        banner_h = 32
-        accent = NSColor.controlAccentColor()
-        banner = NSView.alloc().initWithFrame_(NSMakeRect(PAD - 2, y, cw + 4, banner_h))
-        banner.setWantsLayer_(True)
-        banner.layer().setCornerRadius_(8)
-        banner.layer().setBackgroundColor_(accent.colorWithAlphaComponent_(0.12).CGColor())
-
-        dl = _sf_symbol("arrow.down.circle.fill", size=15, color=accent)
-        if dl:
-            dl.setFrameOrigin_((10, (banner_h - 19) // 2))
-            banner.addSubview_(dl)
-
-        tag = update.get("tag", "")
-        msg = f"Update available · {tag}" if tag else "Update available"
-        txt = _label(msg, size=12, weight=NSFontWeightMedium, color=accent)
-        txt.setFrameSize_(NSMakeSize(cw - 34 - 20, 16))
-        txt.setFrameOrigin_((34, (banner_h - 16) // 2))
-        banner.addSubview_(txt)
-
-        chev = _sf_symbol("chevron.right", size=11, color=accent)
-        if chev:
-            chev.setFrameOrigin_((cw + 4 - 22, (banner_h - 15) // 2))
-            banner.addSubview_(chev)
-
-        overlay = HoverRow.alloc().initWithFrame_(NSMakeRect(0, 0, cw + 4, banner_h))
-        overlay.setTarget_(app); overlay.setAction_(b"doUpdateBanner:")
-        banner.addSubview_(overlay)
-
-        root.addSubview_(banner)
-        y += banner_h + 8
-    # ── File list or empty state ───────────────────────────────
-    if not watched:
-        no_files = _label("No Figma files detected", size=12, color=NSColor.secondaryLabelColor())
-        no_files.setFrameOrigin_((PAD + 4, y))
-        root.addSubview_(no_files)
-        y += 20
-
-        hint = _label("Open a file in Figma Desktop to start watching.", size=11, color=NSColor.tertiaryLabelColor())
-        hint.setFrameOrigin_((PAD + 4, y))
-        root.addSubview_(hint)
-        y += 24
-
-    else:
-        n = len(watched)
-        section_title = f"Watching {n} file{'s' if n != 1 else ''}"
-        sh = _label(section_title, size=11, weight=NSFontWeightMedium, color=NSColor.secondaryLabelColor())
-        sh.setFrameOrigin_((PAD + 4, y))
-        root.addSubview_(sh)
-        y += 20
-
-        list_y = 0
-        list_container = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, cw + 4, 2000))
-
-        for i, f in enumerate(watched):
-            key = f["key"]
-            status_info = file_statuses.get(key, {})
-            status = status_info.get("status", STATUS_LIVE)
-
-            row = NSView.alloc().initWithFrame_(NSMakeRect(0, list_y, cw + 4, ROW_H))
-            vc = (ROW_H - 12) // 2
-
-            if status == STATUS_LIVE:
-                # Center the bullet in the same 15pt-wide slot the SF-symbol status
-                # icons occupy (frame x=4, size 11 \u2192 15pt box) so the status column
-                # is optically flush regardless of which glyph a row shows.
-                dot = _label("\u25CF", size=8, color=NSColor.systemGreenColor())
-                dot.setAlignment_(NSTextAlignmentCenter)
-                dot.setFrameSize_(NSMakeSize(15, dot.frame().size.height))
-                dot.setFrameOrigin_((4, vc + 2))
-                row.addSubview_(dot)
-            elif status == STATUS_REPLIED:
-                icon = _sf_symbol("checkmark.circle.fill", size=11, color=NSColor.systemGreenColor())
-                if icon:
-                    icon.setFrameOrigin_((4, vc))
-                    row.addSubview_(icon)
-            elif status == STATUS_PROCESSING:
-                icon = _sf_symbol("arrow.triangle.2.circlepath", size=11, color=NSColor.systemOrangeColor())
-                if icon:
-                    icon.setFrameOrigin_((4, vc))
-                    icon.setWantsLayer_(True)
-                    spin = __import__('Quartz').CABasicAnimation.animationWithKeyPath_("transform.rotation.z")
-                    spin.setFromValue_(0)
-                    spin.setToValue_(-6.28318)
-                    spin.setDuration_(1.5)
-                    spin.setRepeatCount_(1e9)
-                    icon.layer().addAnimation_forKey_(spin, "spin")
-                    row.addSubview_(icon)
-            elif status == STATUS_DETECTED:
-                icon = _sf_symbol("bolt.fill", size=11, color=NSColor.systemOrangeColor())
-                if icon:
-                    icon.setFrameOrigin_((4, vc))
-                    row.addSubview_(icon)
-            elif status == STATUS_ERROR:
-                icon = _sf_symbol("exclamationmark.triangle.fill", size=11, color=NSColor.systemRedColor())
-                if icon:
-                    icon.setFrameOrigin_((4, vc))
-                    row.addSubview_(icon)
-
-            name_x = 24
-            has_badge = status in (STATUS_PROCESSING, STATUS_REPLIED, STATUS_ERROR)
-            badge_w = 96 if has_badge else 0
-            name_y = (ROW_H - 16) // 2
-            nl = _label(f["name"], size=12)
-            nl.setFrameSize_(NSMakeSize(cw - name_x - badge_w, 16))
-            nl.setFrameOrigin_((name_x, name_y))
-            nl.cell().setLineBreakMode_(5)
-            row.addSubview_(nl)
-
-            if status == STATUS_PROCESSING:
-                trigger = status_info.get("trigger", "")
-                user = status_info.get("user", "")
-                badge_text = f"{trigger} \u00B7 {user}" if user else trigger
-                # systemOrange is fine on the dark glass but only ~2.2:1 on the
-                # light glass; use a darker amber in light mode, keep orange in dark.
-                badge = _label(badge_text, size=10, color=_dynamic_color(
-                    NSColor.colorWithCalibratedRed_green_blue_alpha_(0.72, 0.35, 0.0, 1.0),
-                    NSColor.systemOrangeColor()))
-                badge.sizeToFit()
-                bw = min(badge.frame().size.width, 92)
-                badge.setFrameSize_(NSMakeSize(bw, 16))
-                badge.setFrameOrigin_((cw - bw, name_y + 1))
-                badge.cell().setLineBreakMode_(5)
-                row.addSubview_(badge)
-            elif status == STATUS_REPLIED:
-                badge = _label("\u2713 replied", size=10, color=NSColor.secondaryLabelColor())
-                badge.sizeToFit()
-                badge.setFrameOrigin_((cw - badge.frame().size.width, name_y + 1))
-                row.addSubview_(badge)
-            elif status == STATUS_ERROR:
-                badge = _label("\u26A0 error", size=10, color=NSColor.systemRedColor())
-                badge.sizeToFit()
-                badge.setFrameOrigin_((cw - badge.frame().size.width, name_y + 1))
-                row.addSubview_(badge)
-                err_btn = HoverRow.alloc().initWithFrame_(NSMakeRect(0, 0, cw + 4, ROW_H))
-                err_btn.setTag_(i)
-                err_btn.setTarget_(app); err_btn.setAction_(b"doShowError:")
-                row.addSubview_(err_btn)
-
-            list_container.addSubview_(row)
-            list_y += ROW_H
-
-        list_container.setFrameSize_(NSMakeSize(cw + 4, list_y))
-
-        max_list_h = MAX_FILE_ROWS * ROW_H
-        visible_h = min(list_y, max_list_h)
-
-        if list_y > max_list_h:
-            scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(PAD - 2, y, cw + 4, visible_h))
-            scroll.setDocumentView_(list_container)
-            scroll.setHasVerticalScroller_(True)
-            scroll.setDrawsBackground_(False)
-            scroll.setBorderType_(0)
-            root.addSubview_(scroll)
-        else:
-            list_container.setFrameOrigin_(NSMakePoint(PAD - 2, y))
-            root.addSubview_(list_container)
-
-        y += visible_h
-
-    # ── Footer ─────────────────────────────────────────────────
-    y += 8
-    sep = NSBox.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, 1))
-    sep.setBoxType_(2)
-    root.addSubview_(sep)
-    y += 8
-
-    poll_interval = app._state.get("poll_interval", DEFAULT_INTERVAL)
-    last_polls = [s.get("last_poll") for s in file_statuses.values() if s.get("last_poll")]
-    if last_polls:
-        most_recent = max(last_polls)
-        elapsed = time.time() - most_recent
-        remaining = max(0, int(poll_interval - elapsed))
-        countdown_text = f"Checking for comments in {remaining}s" if remaining > 0 else "Checking now\u2026"
-    elif watched:
-        countdown_text = "Starting\u2026"
-    else:
-        countdown_text = ""
-
-    footer_h = 24
-    footer = NSView.alloc().initWithFrame_(NSMakeRect(PAD, y, cw, footer_h))
-
-    ct = _label(countdown_text or " ", size=11, color=NSColor.tertiaryLabelColor())
-    ct.setFrameOrigin_((4, (footer_h - 16) // 2))
-    ct.setFrameSize_(NSMakeSize(cw - 32, 16))
-    footer.addSubview_(ct)
-    app._state["_countdown_label"] = ct
-
-    gear = NSButton.alloc().initWithFrame_(NSMakeRect(cw - 24, (footer_h - 20) // 2, 20, 20))
-    gear.setBordered_(False); gear.setTitle_("")
-    gi = _sf_symbol("gearshape.fill", size=12, color=NSColor.tertiaryLabelColor())
-    if gi: gear.setImage_(gi.image())
-    gear.setTarget_(app); gear.setAction_(b"doSettings:")
-    footer.addSubview_(gear)
-
-    root.addSubview_(footer)
-    y += footer_h + PAD - 2
 
     root.setFrameSize_(NSMakeSize(W, y))
     return root, y
@@ -1030,9 +782,14 @@ class FigWatch(NSObject):
         NSApp.setMainMenu_(menubar)
 
         self.statusItem = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
-        btn = self.statusItem.button()
         self._set_icon(False)
-        btn.setTarget_(self); btn.setAction_(b"toggle:")
+        # A real NSMenu: the system draws the glass, the accent highlight and
+        # keyboard navigation. Items are rebuilt from state each time it opens
+        # (menuNeedsUpdate_) and refreshed live while open (menuTick_).
+        self._menu = NSMenu.alloc().initWithTitle_("FigWatch")
+        self._menu.setAutoenablesItems_(False)
+        self._menu.setDelegate_(self)
+        self.statusItem.setMenu_(self._menu)
 
         self._panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, W, 400),
@@ -1062,9 +819,9 @@ class FigWatch(NSObject):
             c = _load_config()
             c.pop("pendingUpdate", None)
             _save_config(c)
-            # Stays until the user clicks Done — no auto-hide to race the button.
-            self._show_update_hud(f"Updated to {pending} ✓", spinning=False,
-                                  button="Done", button_action=b"hudDismiss:")
+            # Deferred until the event loop is running (we're still in init).
+            AppHelper.callLater(0.5, self._show_toast, "FigWatch updated",
+                                f"You\u2019re now on {pending}.")
 
     # ── Logging ─────────────────────────────────────────────────
 
@@ -1370,6 +1127,17 @@ class FigWatch(NSObject):
         self._state["workers"].clear()
         self._update_icon_state()
 
+    def _restart_watchers(self):
+        """Stop every watcher and worker and start them again, staggered, so
+        they pick up changed settings."""
+        self._stop_all_watchers()
+        self._start_workers()
+        watched = self._state.get("watched", [])
+        n = len(watched)
+        for i, f in enumerate(watched):
+            delay = (self._state.get("poll_interval", DEFAULT_INTERVAL) / n) * i if n > 1 else 0
+            self._start_watcher(f, initial_delay=delay)
+
     def _update_icon_state(self):
         active = any(
             s.get("status") in (STATUS_PROCESSING, STATUS_DETECTED)
@@ -1384,7 +1152,7 @@ class FigWatch(NSObject):
         pass
 
     def _refresh_popover(self):
-        pass
+        self._rebuild_popover()
 
     # ── Icon ───────────────────────────────────────────────────
 
@@ -1425,28 +1193,145 @@ class FigWatch(NSObject):
         dotView._isFigWatchDot = True
         btn.addSubview_(dotView)
 
-    # ── Popover ────────────────────────────────────────────────
+    # ── Status menu ────────────────────────────────────────────
 
-    def _build_current_view(self):
+    def _setup_complete(self):
+        if self._state.get("force_onboarding"):
+            return False
         cached = self._state.get("deps")
-        if cached and cached["all_required"] and not self._state.get("force_onboarding"):
-            return build_popover_view(self)
-        deps = check_deps()
-        self._state["deps"] = deps
-        if deps["all_required"] and not self._state.get("force_onboarding"):
-            return build_popover_view(self)
-        else:
-            return build_onboarding_view(self, deps)
+        if not (cached and cached["all_required"]):
+            self._state["deps"] = check_deps()
+        return self._state["deps"]["all_required"]
+
+    def menuNeedsUpdate_(self, menu):
+        self._populate_menu(menu)
+
+    def menuWillOpen_(self, menu):
+        self._close_popover()
+        self._state["menu_open"] = True
+        self._state["_last_data_snap"] = self._data_snapshot()
+        # Common modes, so it keeps firing while the menu tracks the mouse.
+        self._menu_timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+            1.0, self, b"menuTick:", None, True)
+        NSRunLoop.currentRunLoop().addTimer_forMode_(self._menu_timer, NSRunLoopCommonModes)
+
+    def menuDidClose_(self, menu):
+        self._state["menu_open"] = False
+        timer = getattr(self, "_menu_timer", None)
+        if timer is not None:
+            timer.invalidate()
+            self._menu_timer = None
 
     @objc.typedSelector(b"v@:@")
-    def toggle_(self, sender):
+    def menuTick_(self, timer):
+        snap = self._data_snapshot()
+        if snap != self._state.get("_last_data_snap"):
+            self._state["_last_data_snap"] = snap
+            self._populate_menu(self._menu)
+        else:
+            self._update_countdown_label()
+
+    def _populate_menu(self, menu):
+        menu.removeAllItems()
+
+        def add(title, action=None, icon=None, key="", tag=0, status=None):
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
+            if action:
+                item.setTarget_(self)
+            else:
+                item.setEnabled_(False)
+            item.setTag_(tag)
+            if icon is not None:
+                item.setImage_(icon)
+            if status:
+                # On the name's line at the same size (not a smaller subtitle),
+                # so every line in the menu is one size.
+                item.setTitle_(f"{title} \u00B7 {status}")
+            menu.addItem_(item)
+            return item
+
+        def header(title):
+            # A plain disabled item rather than sectionHeaderWithTitle_, whose
+            # small bold style is smaller than every other line in the menu.
+            add(title)
+
+        if not self._setup_complete():
+            header("FigWatch isn\u2019t set up yet")
+            add("Finish Setting Up\u2026", b"doOpenSetup:")
+            menu.addItem_(NSMenuItem.separatorItem())
+            add("Quit FigWatch", b"doQuit:", key="q")
+            return
+
+        update = self._state.get("update_available")
+        if update:
+            tag = update.get("tag", "")
+            add(f"Update to {tag}\u2026" if tag else "Update Available\u2026",
+                b"doUpdateBanner:", _menu_icon("arrow.down.circle"))
+            menu.addItem_(NSMenuItem.separatorItem())
+
+        watched = self._state.get("watched", [])
+        statuses = self._state.get("file_statuses", {})
+        trigger_config = self._state.get("trigger_config", [])
+        triggers = " \u00b7 ".join(t.get("trigger", "") for t in trigger_config) or "@tone \u00b7 @ux"
+        if watched:
+            n = len(watched)
+            header(f"Watching {n} file{'s' if n != 1 else ''} for {triggers}")
+            for i, f in enumerate(watched):
+                icon, status, action = _file_row_look(statuses.get(f["key"], {}))
+                add(f["name"], action, icon, tag=i, status=status)
+            menu.addItem_(NSMenuItem.separatorItem())
+            self._state["_countdown_item"] = add(self._countdown_text())
+        else:
+            header("No Figma files open")
+            add("Open a file in Figma Desktop to start watching")
+            self._state["_countdown_item"] = None
+
+        menu.addItem_(NSMenuItem.separatorItem())
+        add("Settings\u2026", b"doSettings:", key=",")
+        add("Restart FigWatch", b"doRestart:")
+        add("Quit FigWatch", b"doQuit:", key="q")
+
+    def _data_snapshot(self):
+        statuses = tuple(
+            (k, s.get("status"), s.get("trigger"), s.get("user"))
+            for k, s in sorted(self._state.get("file_statuses", {}).items())
+        )
+        watched_keys = tuple(f["key"] for f in self._state.get("watched", []))
+        update = self._state.get("update_available")
+        update_tag = update.get("tag") if update else None
+        return (watched_keys, statuses, update_tag)
+
+    def _countdown_text(self):
+        file_statuses = self._state.get("file_statuses", {})
+        last_polls = [s.get("last_poll") for s in file_statuses.values() if s.get("last_poll")]
+        if not last_polls:
+            return "Starting\u2026"
+        interval = self._state.get("poll_interval", DEFAULT_INTERVAL)
+        remaining = max(0, int(interval - (time.time() - max(last_polls))))
+        return f"Checking for comments in {remaining}s" if remaining > 0 else "Checking now\u2026"
+
+    def _update_countdown_label(self):
+        item = self._state.get("_countdown_item")
+        if item is not None:
+            item.setTitle_(self._countdown_text())
+
+    # ── Setup panel ────────────────────────────────────────────
+
+    def _build_current_view(self):
+        deps = check_deps()
+        self._state["deps"] = deps
+        return build_onboarding_view(self, deps)
+
+    @objc.typedSelector(b"v@:@")
+    def doOpenSetup_(self, sender):
+        """Show the setup checklist in the glass panel under the menu bar icon."""
         try:
-            if self._state.get("popover_open"):
-                self._close_popover()
-                return
             self._state["popover_open"] = True
             self._rebuild_popover()
-            btn_screen = sender.window().convertRectToScreen_(sender.frame())
+            if not self._state.get("popover_open"):
+                return  # setup turned out to be complete
+            btn = self.statusItem.button()
+            btn_screen = btn.window().convertRectToScreen_(btn.frame())
             panel_size = self._panel.frame().size
             x = btn_screen.origin.x + btn_screen.size.width - panel_size.width
             y = btn_screen.origin.y - panel_size.height - 4
@@ -1457,20 +1342,26 @@ class FigWatch(NSObject):
                 NSLeftMouseDownMask | NSRightMouseDownMask,
                 lambda event: self._close_popover()
             )
-            self._start_refresh_timer()
-        except Exception:
-            pass
+        except Exception as e:
+            self._write_log(f"\u26a0\ufe0f Setup panel failed: {e}")
 
     @objc.typedSelector(b"v@:@")
     def rebuildPopoverFromThread_(self, _sender):
-        if self._state.get("popover_open"):
-            self._rebuild_popover()
+        self._rebuild_popover()
 
     def _rebuild_popover(self):
+        """Refresh what's on screen: the open status menu, and the setup panel
+        (closed instead once setup is complete)."""
+        if self._state.get("menu_open"):
+            self._populate_menu(self._menu)
+        if not self._state.get("popover_open"):
+            return
+        if self._setup_complete():
+            self._close_popover()
+            return
         view, h = self._build_current_view()
         content = self._panel.contentView()
         view.setFrame_(NSMakeRect(0, 0, W, h))
-        view.setDrawsBackground_(False) if hasattr(view, 'setDrawsBackground_') else None
         view.setWantsLayer_(True)
         view.layer().setBackgroundColor_(None)
         if self._glass_is_container:
@@ -1483,56 +1374,8 @@ class FigWatch(NSObject):
         new_y = old_frame.origin.y + old_frame.size.height - h
         self._panel.setFrame_display_(NSMakeRect(old_frame.origin.x, new_y, W, h), True)
 
-    def _data_snapshot(self):
-        statuses = tuple(
-            (k, s.get("status"), s.get("trigger"), s.get("user"))
-            for k, s in sorted(self._state.get("file_statuses", {}).items())
-        )
-        watched_keys = tuple(f["key"] for f in self._state.get("watched", []))
-        update = self._state.get("update_available")
-        update_tag = update.get("tag") if update else None
-        return (watched_keys, statuses, update_tag)
-
-    def _update_countdown_label(self):
-        label = self._state.get("_countdown_label")
-        if not label:
-            return
-        file_statuses = self._state.get("file_statuses", {})
-        last_polls = [s.get("last_poll") for s in file_statuses.values() if s.get("last_poll")]
-        if last_polls:
-            remaining = max(0, int(30 - (time.time() - max(last_polls))))
-            text = f"Checking for comments in {remaining}s" if remaining > 0 else "Checking now\u2026"
-        elif self._state.get("watched"):
-            text = "Starting\u2026"
-        else:
-            text = ""
-        with contextlib.suppress(Exception):
-            label.setStringValue_(text)
-
-    def _start_refresh_timer(self):
-        self._state["_last_data_snap"] = self._data_snapshot()
-        def _loop():
-            while self._state.get("popover_open"):
-                time.sleep(1)
-                if not self._state.get("popover_open"):
-                    break
-                try:
-                    snap = self._data_snapshot()
-                    if snap != self._state.get("_last_data_snap"):
-                        self._state["_last_data_snap"] = snap
-                        self._rebuild_popover()
-                    else:
-                        self._update_countdown_label()
-                except Exception:
-                    pass
-        threading.Thread(target=_loop, daemon=True).start()
-
-    def _stop_refresh_timer(self):
-        pass
-
     def _close_popover(self):
         self._state["popover_open"] = False
-        self._stop_refresh_timer()
         with contextlib.suppress(Exception):
             self._panel.orderOut_(None)
         self._remove_event_monitor()
@@ -1626,6 +1469,19 @@ class FigWatch(NSObject):
             alert.addButtonWithTitle_("OK")
             alert.runModal()
 
+    @objc.typedSelector(b"v@:@")
+    def doOpenFile_(self, sender):
+        idx = sender.tag()
+        watched = self._state.get("watched", [])
+        if idx < len(watched):
+            f = watched[idx]
+            self._close_popover()
+            ws = NSWorkspace.sharedWorkspace()
+            # Figma Desktop handles figma:// links; without it, open the web app.
+            if not ws.openURL_(NSURL.URLWithString_(f"figma://file/{f['key']}")):
+                kind = "board" if f.get("figjam") else "design"
+                ws.openURL_(NSURL.URLWithString_(f"https://www.figma.com/{kind}/{f['key']}"))
+
     # ── Token / Settings ───────────────────────────────────────
 
     @objc.typedSelector(b"v@:@")
@@ -1694,6 +1550,7 @@ class FigWatch(NSObject):
                     continue
                 name, error = _validate_token(tok)
                 if name:
+                    token_changed = tok != self._state["pat"]
                     self._state["pat"] = tok; self._state["user"] = name
                     c = _load_config(); c["figmaPat"] = tok; _save_config(c)
                     cached = self._state.get("deps")
@@ -1702,8 +1559,14 @@ class FigWatch(NSObject):
                         cached["all_required"] = _all_required(cached)
                     if not self._state.get("workers"):
                         threading.Thread(target=self._app_init, daemon=True).start()
+                    elif token_changed:
+                        # Running watchers and the audit service were built with
+                        # the old token; without a restart they keep polling with
+                        # it (401s) until the app is relaunched.
+                        self._state.pop("audit_service", None)
+                        self._restart_watchers()
                     self._rebuild_popover()
-                    self._show_toast(f"Connected as {name} ✓")
+                    self._show_toast("Connected to Figma", f"Signed in as {name}.")
                     break
                 else:
                     err = NSAlert.alloc().init()
@@ -1730,30 +1593,20 @@ class FigWatch(NSObject):
         y = 0
         config = _load_config()
 
-        def _pill(title, action, width=SW, height=28):
-            btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, width, height))
-            btn.setBordered_(False)
-            # Explicit labelColor title — a borderless layer-backed button's
-            # default title color does NOT adapt to dark mode (renders dark-on-
-            # dark). labelColor resolves per-appearance at draw time.
-            btn.setAttributedTitle_(
-                NSAttributedString.alloc().initWithString_attributes_(
-                    title,
-                    {
-                        NSForegroundColorAttributeName: NSColor.labelColor(),
-                        NSFontAttributeName: NSFont.systemFontOfSize_weight_(
-                            12, NSFontWeightMedium),
-                    }))
-            btn.setWantsLayer_(True)
-            # Raised fill + hairline border so the chip reads as a tappable button
-            # in both light and dark (labelColor@6% was ~invisible on white).
-            btn.layer().setBackgroundColor_(
-                NSColor.labelColor().colorWithAlphaComponent_(0.10).CGColor())
-            btn.layer().setCornerRadius_(height // 2)
-            btn.layer().setBorderWidth_(1)
-            btn.layer().setBorderColor_(NSColor.separatorColor().CGColor())
-            btn.setTarget_(self); btn.setAction_(action)
+        def _button(title, action, width=None):
+            # Standard push button: regular size, 13pt, drawn by the system so
+            # it adapts to dark mode (the Return-key one takes the accent colour).
+            btn = NSButton.buttonWithTitle_target_action_(title, self, action)
+            btn.sizeToFit()
+            if width:
+                btn.setFrameSize_(NSMakeSize(width, btn.frame().size.height))
             return btn
+
+        def _popup(width):
+            # Natural height, so it centres on a row like the text field next to it.
+            p = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, width, 24), False)
+            p.setFrameSize_(NSMakeSize(width, p.intrinsicContentSize().height))
+            return p
 
         def _sep():
             nonlocal y
@@ -1769,11 +1622,11 @@ class FigWatch(NSObject):
                 _sep()
             sh = 24
             h = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, sh))
-            icon = _sf_symbol(icon_name, size=12, color=NSColor.secondaryLabelColor())
+            icon = _sf_symbol(icon_name, size=BODY_SIZE, color=NSColor.secondaryLabelColor())
             if icon:
                 icon.setFrameOrigin_((0, (sh - icon.frame().size.height) / 2))
                 h.addSubview_(icon)
-            lbl = _label(title, size=12, weight=NSFontWeightSemibold)
+            lbl = _label(title, weight=NSFontWeightSemibold)
             lbl.sizeToFit()
             lbl.setFrameOrigin_((20, (sh - lbl.frame().size.height) / 2))
             h.addSubview_(lbl)
@@ -1786,22 +1639,19 @@ class FigWatch(NSObject):
 
         def _row(label_text, control):
             nonlocal y
-            lbl = _label(label_text, size=13)
-            lbl.setFrameOrigin_((0, y + 3))
+            rh = 28  # label and control centred on the same line
+            lbl = _label(label_text)
+            lbl.setFrameOrigin_((0, y + (rh - lbl.frame().size.height) / 2))
             acc.addSubview_(lbl)
             cf = control.frame()
-            control.setFrameOrigin_((SW - cf.size.width, y))
+            control.setFrameOrigin_((SW - cf.size.width, y + (rh - cf.size.height) / 2))
             acc.addSubview_(control)
-            y += 28
+            y += rh
 
         # ── Header (own panel supplies its own title; NSAlert used to) ──
-        hicon = _sf_symbol("tv", size=15, color=NSColor.secondaryLabelColor())
-        if hicon:
-            hicon.setFrameOrigin_((0, y))
-            acc.addSubview_(hicon)
-        htitle = _label("FigWatch Settings", size=15, weight=NSFontWeightBold)
+        htitle = _label("FigWatch Settings", size=TITLE_SIZE, weight=NSFontWeightBold)
         htitle.sizeToFit()
-        htitle.setFrameOrigin_((24, y + 1))
+        htitle.setFrameOrigin_((0, y + 1))
         acc.addSubview_(htitle)
         y += 26
 
@@ -1828,12 +1678,12 @@ class FigWatch(NSObject):
             intro = intro_results.get(skill_name)
             is_ok = builtin or (intro and intro.get("comment_compatible"))
             ck = _sf_symbol("checkmark.circle.fill" if is_ok else "exclamationmark.circle.fill",
-                            size=12, color=NSColor.secondaryLabelColor())
+                            size=BODY_SIZE, color=NSColor.secondaryLabelColor())
             if ck:
                 ck.setFrameOrigin_((0, (rh - ck.frame().size.height) / 2))
                 row.addSubview_(ck)
 
-            tw = _label(trigger_word, size=13, weight=NSFontWeightMedium, mono=True)
+            tw = _label(trigger_word)
             tw.sizeToFit()
             # Clamp so a long keyword truncates instead of overrunning the skill
             # name at x=100 (leaves a 4pt gap: 20 + 76 = 96).
@@ -1842,7 +1692,7 @@ class FigWatch(NSObject):
             tw.setFrameOrigin_((20, (rh - tw.frame().size.height) / 2))
             row.addSubview_(tw)
 
-            sn = _label(display, size=11, color=NSColor.secondaryLabelColor())
+            sn = _label(display, color=NSColor.secondaryLabelColor())
             sn.sizeToFit()
             sn.setFrameOrigin_((100, (rh - sn.frame().size.height) / 2))
             sn.setFrameSize_(NSMakeSize(SW - 128, sn.frame().size.height))
@@ -1852,7 +1702,7 @@ class FigWatch(NSObject):
             if not builtin:
                 rm = NSButton.alloc().initWithFrame_(NSMakeRect(SW - 20, (rh - 18) // 2, 18, 18))
                 rm.setBordered_(False); rm.setTitle_("")
-                rm_icon = _sf_symbol("xmark.circle", size=12, color=NSColor.tertiaryLabelColor())
+                rm_icon = _sf_symbol("xmark.circle", size=BODY_SIZE, color=NSColor.tertiaryLabelColor())
                 if rm_icon: rm.setImage_(rm_icon.image())
                 rm.setTag_(i)
                 rm.setTarget_(self); rm.setAction_(b"doRemoveTrigger:")
@@ -1862,20 +1712,25 @@ class FigWatch(NSObject):
             y += 28
 
         y += 12
-        add_lbl = _label("Add your own skill", size=11, color=NSColor.secondaryLabelColor())
+        # Doubles as the place Add reports problems ("Enter a keyword first").
+        add_lbl = _label("Add your own skill", color=NSColor.secondaryLabelColor())
+        add_lbl.setFrameSize_(NSMakeSize(SW, add_lbl.frame().size.height))
+        add_lbl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
         add_lbl.setFrameOrigin_((0, y))
         acc.addSubview_(add_lbl)
-        y += 20
+        y += 24
 
-        kw_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, y, 80, 24))
+        # Keyword, skill and Add share one row, sized and centred like the
+        # settings rows below.
+        add_btn = _button("Add", b"doAddTriggerInline:")
+        kw_field = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 22))
         kw_field.setPlaceholderString_("@keyword")
-        kw_field.setFont_(NSFont.monospacedSystemFontOfSize_weight_(12, NSFontWeightRegular))
-        acc.addSubview_(kw_field)
+        kw_field.setFrameSize_(NSMakeSize(100, kw_field.intrinsicContentSize().height))
 
         from figwatch.skills import find_skills as _find_skills
         available = _find_skills()
-        sk_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(88, y, SW - 88, 24), False)
-        sk_popup.setFont_(NSFont.systemFontOfSize_(11))
+        sk_x = 108
+        sk_popup = _popup(SW - sk_x - add_btn.frame().size.width - 8)
         skill_paths = []
         for s in available:
             label = s["name"] + (" (built-in)" if s["builtin"] else "")
@@ -1884,31 +1739,27 @@ class FigWatch(NSObject):
         sk_popup.addItemWithTitle_("Browse for file\u2026")
         sk_popup.setTarget_(self)
         sk_popup.setAction_(b"doSkillPopupChanged:")
-        acc.addSubview_(sk_popup)
-        y += 32
-
-        add_btn = _pill("Add", b"doAddTriggerInline:", width=SW, height=24)
-        add_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-        add_btn.setFrameOrigin_((0, y))
-        acc.addSubview_(add_btn)
-        y += 32
+        rh = 28
+        for ctl, x in ((kw_field, 0), (sk_popup, sk_x), (add_btn, SW - add_btn.frame().size.width)):
+            ctl.setFrameOrigin_((x, y + (rh - ctl.frame().size.height) / 2))
+            acc.addSubview_(ctl)
+        y += rh + 4
 
         self._add_trigger_kw = kw_field
         self._add_trigger_sk = sk_popup
         self._add_trigger_paths = skill_paths
-        self._add_trigger_btn = add_btn
+        self._add_trigger_hint = add_lbl
 
         # ── Connection ────────────────────────────────────────
-        tok_hdr_btn = _pill("Change Token\u2026", b"doToken:", width=120, height=24)
-        tok_hdr_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+        tok_hdr_btn = _button("Change Token\u2026", b"doToken:")
         _section("Connection", "link", trailing_btn=tok_hdr_btn)
 
         user = self._state.get("user")
         if user and self._state.get("pat"):
-            conn_icon = _sf_symbol("checkmark.circle.fill", size=12, color=NSColor.secondaryLabelColor())
+            conn_icon = _sf_symbol("checkmark.circle.fill", size=BODY_SIZE, color=NSColor.secondaryLabelColor())
             conn_text = f"Connected as {user}"
         else:
-            conn_icon = _sf_symbol("xmark.circle", size=12, color=NSColor.secondaryLabelColor())
+            conn_icon = _sf_symbol("xmark.circle", size=BODY_SIZE, color=NSColor.secondaryLabelColor())
             conn_text = "Not connected"
 
         crh = 20
@@ -1916,7 +1767,7 @@ class FigWatch(NSObject):
         if conn_icon:
             conn_icon.setFrameOrigin_((0, (crh - conn_icon.frame().size.height) / 2))
             conn_row.addSubview_(conn_icon)
-        conn_lbl = _label(conn_text, size=13)
+        conn_lbl = _label(conn_text)
         conn_lbl.sizeToFit()
         conn_lbl.setFrameSize_(NSMakeSize(min(conn_lbl.frame().size.width, SW - 20), conn_lbl.frame().size.height))
         conn_lbl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
@@ -1932,25 +1783,26 @@ class FigWatch(NSObject):
 
         # ── AI ────────────────────────────────────────────────
         gw = gateway_info()
-        conn_btn = _pill("Switch…" if gw else "Sign in…", b"doSwitchAI:", width=92, height=24)
-        conn_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
-        _section("AI", "cpu", trailing_btn=conn_btn)
-
         # Claude access status — company gateway (cc-switch) vs personal login.
         # Mirror the Connection row: the icon must reflect real auth state, not a
         # hard-coded checkmark. Authed = a gateway is configured OR personal login
         # succeeded (cached deps from the last check).
-        ai_ok = bool(gw) or bool(self._state.get("deps", {}) and
-                                  self._state.get("deps", {}).get("claude_auth", {}).get("ok"))
-        claude_text = f"Gateway · {gw['host']}" if gw else "Personal Claude login"
+        ai_ok = self._ai_signed_in(gw)
+        # Once signed in by any route the button changes the method, like
+        # "Change Token\u2026" above; "Sign in\u2026" only while there is none.
+        conn_btn = _button("Change Sign-in\u2026" if ai_ok else "Sign in\u2026", b"doSwitchAI:")
+        _section("AI", "cpu", trailing_btn=conn_btn)
+
+        claude_text = (f"Gateway · {gw['host']}" if gw
+                       else "Personal Claude login" if ai_ok else "Not signed in")
         crh = 20
         cr = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, crh))
         cic = _sf_symbol("checkmark.circle.fill" if ai_ok else "xmark.circle",
-                         size=12, color=NSColor.secondaryLabelColor())
+                         size=BODY_SIZE, color=NSColor.secondaryLabelColor())
         if cic:
             cic.setFrameOrigin_((0, (crh - cic.frame().size.height) / 2))
             cr.addSubview_(cic)
-        cl = _label(claude_text, size=13)
+        cl = _label(claude_text)
         cl.sizeToFit()
         cl.setFrameSize_(NSMakeSize(min(cl.frame().size.width, SW - 20), cl.frame().size.height))
         cl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
@@ -1964,7 +1816,7 @@ class FigWatch(NSObject):
             # so the picker can't imply an override that the gateway would reject.
             model_popup = None
             mval = _label((gw.get("model") or "gateway default") + "  (from gateway)",
-                          size=12, color=NSColor.secondaryLabelColor())
+                          color=NSColor.secondaryLabelColor())
             mval.sizeToFit()
             # Cap so a long gateway model id truncates instead of running off the
             # left edge (the row right-aligns the value at SW - width).
@@ -1972,7 +1824,7 @@ class FigWatch(NSObject):
             mval.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
             _row("Model", mval)
         else:
-            model_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 180, 24), False)
+            model_popup = _popup(180)
             model_popup.addItemWithTitle_("Sonnet (recommended)")
             model_popup.addItemWithTitle_("Opus (most capable)")
             model_popup.addItemWithTitle_("Haiku (cheapest)")
@@ -1980,24 +1832,24 @@ class FigWatch(NSObject):
             model_popup.selectItemAtIndex_(model_map.get(self._state.get("model", "sonnet"), 0))
             _row("Model", model_popup)
 
-        lang_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 180, 24), False)
+        lang_popup = _popup(180)
         lang_popup.addItemWithTitle_("English")
         lang_popup.addItemWithTitle_("\u4e2d\u6587 (Chinese)")
         lang_map = {"en": 0, "cn": 1}
         lang_popup.selectItemAtIndex_(lang_map.get(self._state.get("reply_lang", "en"), 0))
         _row("Reply language", lang_popup)
 
-        tone_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 80, 24), False)
+        tone_popup = _popup(80)
         for n in range(1, 6): tone_popup.addItemWithTitle_(str(n))
         tone_popup.selectItemAtIndex_(config.get("workersTone", 2) - 1)
         _row("Tone workers", tone_popup)
 
-        ux_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 80, 24), False)
+        ux_popup = _popup(80)
         for n in range(1, 6): ux_popup.addItemWithTitle_(str(n))
         ux_popup.selectItemAtIndex_(config.get("workersUx", 1) - 1)
         _row("UX workers", ux_popup)
 
-        interval_popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 120, 24), False)
+        interval_popup = _popup(120)
         for s in INTERVAL_PRESETS: interval_popup.addItemWithTitle_(f"{s} seconds")
         # poll_interval is coerced into INTERVAL_PRESETS at config load, so it is
         # always a valid member here.
@@ -2010,11 +1862,10 @@ class FigWatch(NSObject):
         _row("Reply follow-ups (@figwatch)", followups_switch)
 
         # ── About ─────────────────────────────────────────────
-        upd_hdr_btn = _pill("Check for Updates", b"doCheckUpdate:", width=140, height=24)
-        upd_hdr_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
+        upd_hdr_btn = _button("Check for Updates", b"doCheckUpdate:")
         _section("About", "info.circle", trailing_btn=upd_hdr_btn)
 
-        ver = _label(f"FigWatch v{VERSION}", size=12, color=NSColor.secondaryLabelColor())
+        ver = _label(f"FigWatch v{VERSION}", color=NSColor.secondaryLabelColor())
         ver.setFrameOrigin_((0, y))
         acc.addSubview_(ver)
         y += 20
@@ -2032,10 +1883,12 @@ class FigWatch(NSObject):
 
         # ── Footer: Save / Cancel ─────────────────────────────
         _sep()
-        cancel_btn = _pill("Cancel", b"doSettingsCancel:", width=90, height=28)
+        cancel_btn = _button("Cancel", b"doSettingsCancel:", width=90)
+        cancel_btn.setKeyEquivalent_(chr(27))  # Escape
         cancel_btn.setFrameOrigin_((SW - 90 * 2 - 8, y))
         acc.addSubview_(cancel_btn)
-        save_btn = _pill("Save", b"doSettingsSave:", width=90, height=28)
+        save_btn = _button("Save", b"doSettingsSave:", width=90)
+        save_btn.setKeyEquivalent_(chr(13))  # Return: the default button, in the accent colour
         save_btn.setFrameOrigin_((SW - 90, y))
         acc.addSubview_(save_btn)
         y += 28 + PAD
@@ -2058,11 +1911,26 @@ class FigWatch(NSObject):
             panel.setHasShadow_(True)
             panel.setOpaque_(False)
             panel.setBackgroundColor_(NSColor.clearColor())
+            # Borderless has no title bar to grab, so drag by the background.
+            panel.setMovableByWindowBackground_(True)
             glass, self._settings_glass_container = _make_glass_view(pw, ph)
-            panel.setContentView_(glass)
+            glass.setAutoresizingMask_(NSViewWidthSizable | NSViewHeightSizable)
+            # A near-invisible rounded fill behind the glass gives the window a
+            # rounded shape. Without it, macOS outlines the focused borderless
+            # window as a square around the glass's rounded corners.
+            holder = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ph))
+            holder.setWantsLayer_(True)
+            holder.layer().setCornerRadius_(POPOVER_CORNER_RADIUS)
+            holder.layer().setBackgroundColor_(
+                NSColor.colorWithCalibratedWhite_alpha_(1.0, 0.02).CGColor())
+            holder.addSubview_(glass)
+            panel.setContentView_(holder)
             self._settings_panel = panel
-        self._host_settings_content(acc, height)
-        panel.center()
+            self._settings_glass = glass
+            self._host_settings_content(acc, height)
+            panel.center()  # first open only; later opens keep where it was dragged
+        else:
+            self._host_settings_content(acc, height)
         NSApp.activateIgnoringOtherApps_(True)
         panel.makeKeyAndOrderFront_(None)
 
@@ -2075,7 +1943,7 @@ class FigWatch(NSObject):
         """
         pw = acc.frame().size.width + SETTINGS_MARGIN_X * 2
         ph = height + SETTINGS_MARGIN_Y * 2
-        glass = self._settings_panel.contentView()
+        glass = self._settings_glass
         wrapper = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ph))
         acc.setFrameOrigin_((SETTINGS_MARGIN_X, SETTINGS_MARGIN_Y))
         wrapper.addSubview_(acc)
@@ -2091,6 +1959,7 @@ class FigWatch(NSObject):
         new_y = f.origin.y + f.size.height - ph
         self._settings_panel.setFrame_display_(
             NSMakeRect(f.origin.x, new_y, pw, ph), True)
+        self._settings_panel.invalidateShadow()
 
     def _refresh_settings(self):
         """Rebuild the settings body in place (trigger added/removed)."""
@@ -2148,13 +2017,7 @@ class FigWatch(NSObject):
         _save_config(c)
 
         if needs_restart and self._state.get("watchers"):
-            self._stop_all_watchers()
-            self._start_workers()
-            watched = self._state.get("watched", [])
-            n = len(watched)
-            for i, f in enumerate(watched):
-                delay = (self._state.get("poll_interval", DEFAULT_INTERVAL) / n) * i if n > 1 else 0
-                self._start_watcher(f, initial_delay=delay)
+            self._restart_watchers()
 
         if getattr(self, "_settings_panel", None) is not None:
             self._settings_panel.orderOut_(None)
@@ -2205,12 +2068,12 @@ class FigWatch(NSObject):
                 return
 
         if not keyword:
-            self._flash_add_button("Enter a keyword first")
+            self._flash_add_hint("Enter a keyword first")
             return
         if not keyword.startswith("@"):
             keyword = "@" + keyword
         if any(t.get("trigger") == keyword for t in self._state.get("trigger_config", [])):
-            self._flash_add_button(f"{keyword} already added")
+            self._flash_add_hint(f"{keyword} already added")
             return
 
         # Commit, then rebuild the panel body in place so the new trigger appears
@@ -2218,29 +2081,23 @@ class FigWatch(NSObject):
         self._commit_trigger(keyword, skill_path)
         self._refresh_settings()
 
-    def _set_add_button_title(self, text):
-        btn = getattr(self, "_add_trigger_btn", None)
-        if btn is None:
-            return
-        btn.setAttributedTitle_(
-            NSAttributedString.alloc().initWithString_attributes_(
-                text, {
-                    NSForegroundColorAttributeName: NSColor.labelColor(),
-                    NSFontAttributeName: NSFont.systemFontOfSize_weight_(12, NSFontWeightMedium),
-                }))
+    def _set_add_hint(self, text):
+        hint = getattr(self, "_add_trigger_hint", None)
+        if hint is not None:
+            hint.setStringValue_(text)
 
-    def _flash_add_button(self, text):
-        """Briefly show a status on the Add button, then revert to "Add"."""
-        self._set_add_button_title(text)
+    def _flash_add_hint(self, text):
+        """Briefly show a status in place of the "Add your own skill" caption."""
+        self._set_add_hint(text)
         threading.Timer(
             1.8,
             lambda: self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"resetAddButtonTitle:", None, False),
+                b"resetAddHint:", None, False),
         ).start()
 
     @objc.typedSelector(b"v@:@")
-    def resetAddButtonTitle_(self, _):
-        self._set_add_button_title("Add")
+    def resetAddHint_(self, _):
+        self._set_add_hint("Add your own skill")
 
     def _commit_trigger(self, keyword, skill_path):
         if not keyword or not skill_path:
@@ -2287,12 +2144,18 @@ class FigWatch(NSObject):
     # download + quit + relaunch. The same glass panel doubles as a general
     # confirmation toast (_show_toast) for other success paths.
 
-    def _show_toast(self, message):
-        """Brief glass confirmation panel, dismissed with Done. Used where a
-        success would otherwise be silent (NSUserNotification does nothing on
-        modern macOS) and there's no persistent control to flash inline."""
-        self._show_update_hud(message, spinning=False,
-                              button="Done", button_action=b"hudDismiss:")
+    def _show_toast(self, title, info=""):
+        """Confirm a success that would otherwise be silent (NSUserNotification
+        does nothing on modern macOS) and has no persistent control to flash
+        inline. A standard alert, like "You're up to date": app icon, bold
+        title, detail line, accent-coloured OK."""
+        NSApp.activateIgnoringOtherApps_(True)
+        alert = NSAlert.alloc().init()
+        alert.setMessageText_(title)
+        if info:
+            alert.setInformativeText_(info)
+        alert.addButtonWithTitle_("OK")
+        alert.runModal()
 
     def _show_update_hud(self, message, *, spinning=True, button=None, button_action=None):
         """Show (or update) the glass update HUD with a status line. Main thread.
@@ -2341,7 +2204,7 @@ class FigWatch(NSObject):
         glass, is_container = _make_glass_view(w, h)
         inner = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, w, h))
 
-        title = _label("FigWatch", size=12, weight=NSFontWeightMedium,
+        title = _label("FigWatch", weight=NSFontWeightSemibold,
                        color=NSColor.secondaryLabelColor())
         title.setAlignment_(NSTextAlignmentCenter)
         title.setFrame_(NSMakeRect(0, 20, w, 16))
@@ -2354,7 +2217,7 @@ class FigWatch(NSObject):
         bar.setMinValue_(0.0); bar.setMaxValue_(1.0)
         inner.addSubview_(bar)
 
-        label = _label("", size=13)
+        label = _label("")
         label.setAlignment_(NSTextAlignmentCenter)
         label.setFrame_(NSMakeRect(16, 82, w - 32, 20))
         inner.addSubview_(label)
@@ -2663,21 +2526,8 @@ class FigWatch(NSObject):
     # ── Power / Quit ───────────────────────────────────────────
 
     @objc.typedSelector(b"v@:@")
-    def doPowerMenu_(self, sender):
-        self._close_popover()
-        NSApp.activateIgnoringOtherApps_(True)
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_("FigWatch")
-        alert.setInformativeText_("What would you like to do?")
-        alert.addButtonWithTitle_("Restart")
-        alert.addButtonWithTitle_("Quit")
-        alert.addButtonWithTitle_("Cancel")
-        r = alert.runModal()
-        if r == NSAlertFirstButtonReturn:
-            self._relaunch()
-        elif r == NSAlertSecondButtonReturn:
-            self._stop_all_watchers()
-            NSApp.terminate_(None)
+    def doRestart_(self, sender):
+        self._relaunch()
 
     def _relaunch(self):
         """Restart the app reliably.
@@ -2722,6 +2572,12 @@ class FigWatch(NSObject):
         NSWorkspace.sharedWorkspace().openURL_(
             NSURL.URLWithString_("https://docs.anthropic.com/en/docs/claude-code/getting-started"))
 
+    def _ai_signed_in(self, gw=None):
+        """A gateway is configured, or the last check found a personal login."""
+        if gw:
+            return True
+        return bool((self._state.get("deps") or {}).get("claude_auth", {}).get("ok"))
+
     @objc.typedSelector(b"v@:@")
     def doSwitchAI_(self, sender):
         # Close the settings panel, then show the backend chooser as its own
@@ -2735,15 +2591,18 @@ class FigWatch(NSObject):
         from figwatch.gateway import read_manual_gateway
         gw = gateway_info()
         manual = read_manual_gateway() is not None
+        signed_in = self._ai_signed_in(gw)
         if gw and manual:
             current = "Currently using a manually-entered gateway."
         elif gw:
             current = "Currently using the company gateway (cc-switch)."
-        else:
+        elif signed_in:
             current = "Currently using personal Claude login."
+        else:
+            current = "FigWatch isn\u2019t signed in to Claude yet."
 
         alert = NSAlert.alloc().init()
-        alert.setMessageText_("Switch AI backend")
+        alert.setMessageText_("Change Claude sign-in" if signed_in else "Sign in to Claude")
         alert.setInformativeText_(f"{current}\n\nChoose how FigWatch connects to Claude.")
         alert.setIcon_(_emoji_icon("🔀"))
         alert.addButtonWithTitle_("Company gateway (cc-switch)")
@@ -2763,7 +2622,7 @@ class FigWatch(NSObject):
     def doClaudeAuth_(self, sender):
         subprocess.run([
             'osascript', '-e',
-            'tell application "Terminal" to do script "claude login"'
+            'tell application "Terminal" to do script "claude auth login"'
         ], capture_output=True)
 
     @objc.typedSelector(b"v@:@")
@@ -2807,14 +2666,14 @@ class FigWatch(NSObject):
         acc_w = 360
         LEFT = 4
         cw = acc_w - LEFT * 2
-        lbl_h, fh, gap = 16, 24, 12
+        lbl_h, fh, gap = 18, 24, 12
         existing = read_manual_gateway() or {}
         acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, acc_w, 3 * (lbl_h + fh + gap)))
         _fy = 0
 
         def _field(label_text, placeholder, value):
             nonlocal _fy
-            lbl = _label(label_text, size=11, color=NSColor.secondaryLabelColor())
+            lbl = _label(label_text)
             lbl.setFrameOrigin_((LEFT, _fy)); acc.addSubview_(lbl)
             _fy += lbl_h
             tf = NSTextField.alloc().initWithFrame_(NSMakeRect(LEFT, _fy, cw, fh))
@@ -2859,7 +2718,7 @@ class FigWatch(NSObject):
         if self._state["deps"].get("all_required") and not self._state.get("workers"):
             threading.Thread(target=self._app_init, daemon=True).start()
         self._rebuild_popover()
-        self._show_toast("Gateway connected ✓")
+        self._show_toast("Gateway connected", f"FigWatch will use {base_url}.")
 
     @objc.typedSelector(b"v@:@")
     def doCheckDeps_(self, sender):
@@ -2873,7 +2732,7 @@ class FigWatch(NSObject):
     @objc.typedSelector(b"v@:@")
     def doShowSetup_(self, sender):
         self._state["force_onboarding"] = True
-        self._refresh_popover()
+        self.doOpenSetup_(sender)
 
 
 # ── Entry ───────────────────────────────────────────────────────────

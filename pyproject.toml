@@ -7,14 +7,16 @@ requires-python = ">=3.9"
 # server both drive Claude through the Anthropic Messages API, so `anthropic`
 # (and its transitive deps) must be installed wherever figwatch runs — including
 # the py2app build env, which bundles it into FigWatch.app.
+# Held below 1.0: anthropic 2.x swaps httpx for httpx2, which the explicit
+# package list in macos/setup.py doesn't cover, so the app build breaks.
 dependencies = [
-    "anthropic",
+    "anthropic<1",
 ]
 
 [project.optional-dependencies]
 # pip install -e ".[server]"  — installs API clients for server/Docker deployment
 server = [
-    "anthropic",
+    "anthropic<1",
     "google-genai",
     "opentelemetry-api",
     "opentelemetry-sdk",
