@@ -810,6 +810,7 @@ class FigWatch(NSObject):
 
         self._state["watched"] = list(merged.values())
 
+    @objc.python_method  # not a selector: PyObjC would read "_stagger" as taking 0 args
     def _stagger(self, i, n):
         """Initial delay for the i-th of n watchers, spreading polls over the interval."""
         return self._state.get("poll_interval", DEFAULT_INTERVAL) / n * i if n > 1 else 0
