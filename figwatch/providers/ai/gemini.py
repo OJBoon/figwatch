@@ -1,6 +1,15 @@
 """Google Gen AI (Gemini) provider."""
 
+import functools
+
 from figwatch.providers.ai import as_image_list, media_type_for, with_retry
+
+
+@functools.lru_cache(maxsize=4)
+def _client(api_key):
+    """One SDK client per key, so its connection pool is reused."""
+    from google import genai
+    return genai.Client(api_key=api_key)
 
 
 class GeminiProvider:
@@ -14,7 +23,6 @@ class GeminiProvider:
 
     def call(self, prompt: str, image_path: 'str | list[str] | None') -> str:
         try:
-            from google import genai
             from google.genai import types
         except ImportError as err:
             raise RuntimeError(
@@ -24,7 +32,7 @@ class GeminiProvider:
         if self._rate_limiter:
             self._rate_limiter.acquire()
 
-        client = genai.Client(api_key=self._api_key)
+        client = _client(self._api_key)
 
         # One path, a list (journey review), or None; a single str == 1-element list.
         contents = [prompt]

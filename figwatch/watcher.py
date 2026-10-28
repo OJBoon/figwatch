@@ -1,22 +1,23 @@
 """FigWatch comment watcher — polls Figma for trigger comments and dispatches audits."""
 
-import json
 import logging
 import os
+import re
 import threading
 from collections import OrderedDict
 
+from figwatch.config_store import config_dir, load_config, load_json, save_json
 from figwatch.domain import Audit, Comment, ThreadMessage, TriggerMatch, match_trigger
 from figwatch.log_context import new_audit_id
+from figwatch.messages import ack_message, error_kind, error_reply, is_bot_message
 from figwatch.providers.figma import figma_get
 from figwatch.trigger_config import load_trigger_config
 
 logger = logging.getLogger(__name__)
 
-_EM_DASH = '\u2014'
-_OWN_REPLY_MARKERS = (_EM_DASH + ' figwatch',)
-
 _PROCESSED_MAXLEN = 500
+# The set every watcher in a process shares covers all watched files at once.
+_SHARED_PROCESSED_MAXLEN = 5000
 
 # Cap the refinement transcript so a long thread can't blow the prompt budget
 # (the node tree already has its own 40k cap). Oldest turns are dropped first.
@@ -26,78 +27,83 @@ _THREAD_TRANSCRIPT_CHAR_LIMIT = 6000
 # ── Bounded set ───────────────────────────────────────────────────────
 
 class BoundedSet:
-    """Set with a maximum size. Oldest entries evicted on overflow."""
+    """Thread-safe set with a maximum size. Oldest entries evicted on overflow."""
 
     def __init__(self, maxlen=_PROCESSED_MAXLEN):
         self._maxlen = maxlen
         self._data = OrderedDict()
+        self._lock = threading.Lock()
 
     def add(self, item):
-        if item in self._data:
-            self._data.move_to_end(item)
-            return
-        if len(self._data) >= self._maxlen:
-            self._data.popitem(last=False)
-        self._data[item] = None
+        with self._lock:
+            if item in self._data:
+                self._data.move_to_end(item)
+                return
+            if len(self._data) >= self._maxlen:
+                self._data.popitem(last=False)
+            self._data[item] = None
 
     def __contains__(self, item):
-        return item in self._data
+        with self._lock:
+            return item in self._data
 
     def __len__(self):
-        return len(self._data)
+        with self._lock:
+            return len(self._data)
 
     def __iter__(self):
-        return iter(self._data)
+        with self._lock:
+            return iter(list(self._data))
 
     def update(self, items):
         for item in items:
             self.add(item)
 
     def clear(self):
-        self._data.clear()
+        with self._lock:
+            self._data.clear()
 
 
 # ── Processed comment tracking ────────────────────────────────────────
 
-_processed_path_cache = None
-
-
 def _processed_path():
-    global _processed_path_cache
-    if _processed_path_cache:
-        return _processed_path_cache
-    config_dir = os.path.join(os.path.expanduser('~'), '.figwatch')
-    os.makedirs(config_dir, exist_ok=True)
-    _processed_path_cache = os.path.join(config_dir, '.processed-comments.json')
-    return _processed_path_cache
+    return os.path.join(config_dir(), '.processed-comments.json')
 
 
-def load_processed():
-    try:
-        with open(_processed_path()) as f:
-            ids = json.load(f)
-            bounded = BoundedSet()
-            bounded.update(ids)
-            return bounded
-    except Exception:
-        return BoundedSet()
+_save_lock = threading.Lock()
+_shared_processed = None
+_shared_lock = threading.Lock()
+
+
+def load_processed(maxlen=_PROCESSED_MAXLEN):
+    bounded = BoundedSet(maxlen)
+    bounded.update(load_json(_processed_path(), []) or [])
+    return bounded
 
 
 def save_processed(ids):
-    with open(_processed_path(), 'w') as f:
-        json.dump(list(ids), f)
+    with _save_lock:
+        save_json(_processed_path(), list(ids), indent=None)
+
+
+def shared_processed():
+    """The process-wide processed-comment set every watcher shares.
+
+    One set per process, not per watcher: separate sets each saved over the same
+    file (last writer wins), so a restarted watcher could reload a set missing
+    another watcher's comments and audit them again.
+    """
+    global _shared_processed
+    with _shared_lock:
+        if _shared_processed is None:
+            _shared_processed = load_processed(_SHARED_PROCESSED_MAXLEN)
+        return _shared_processed
 
 
 # ── Trigger detection (fast path — 1 API call) ────────────────────────
 
-def _is_bot_message(message):
-    low = (message or '').lower()
-    return any(m in low for m in _OWN_REPLY_MARKERS)
-
-
 def _strip_mention(message, mention):
     """Drop the @figwatch mention token from a follow-up so the model sees the ask."""
-    import re
     out = re.sub(re.escape(mention), '', message, flags=re.IGNORECASE)
     return ' '.join(out.split()).strip()
 
@@ -107,7 +113,7 @@ def _strip_bot_chrome(message):
     everything from the '— FigWatch' sign-off onward."""
     body = []
     for ln in (message or '').splitlines():
-        if _is_bot_message(ln):   # sign-off line reached
+        if is_bot_message(ln):   # sign-off line reached
             break
         if ln.strip().startswith('\U0001f5e3'):  # 🗣️ header line
             continue
@@ -128,7 +134,7 @@ def _build_thread_history(thread, follow_up, created_key):
         if xc and fu_created and xc > fu_created:
             continue  # created after the follow-up — not part of its context
         raw = x.get('message') or ''
-        is_bot = _is_bot_message(raw)
+        is_bot = is_bot_message(raw)
         text = _strip_bot_chrome(raw) if is_bot else raw.strip()
         if not text:
             continue
@@ -154,18 +160,18 @@ def _detect_follow_ups(comments, comment_map, processed_ids, trigger_config,
         if not root_id or c['id'] in processed_ids or c.get('resolved_at'):
             continue
         msg = c.get('message') or ''
-        if mention_lower not in msg.lower() or _is_bot_message(msg):
+        if mention_lower not in msg.lower() or is_bot_message(msg):
             continue
 
         # Thread = root comment + all its replies (comments are flat with parent_id).
         thread = [x for x in comments if x['id'] == root_id or x.get('parent_id') == root_id]
         # Only engage if FigWatch has already audited this thread.
-        if not any(_is_bot_message(x.get('message')) for x in thread):
+        if not any(is_bot_message(x.get('message')) for x in thread):
             continue
         # Recover the original skill from the human trigger still in the thread.
         orig = None
         for x in sorted(thread, key=_created):
-            if _is_bot_message(x.get('message')):
+            if is_bot_message(x.get('message')):
                 continue
             orig = match_trigger(x.get('message') or '', trigger_config)
             if orig:
@@ -216,10 +222,10 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log,
 
     comment_map = {c['id']: c for c in comments}
 
+    # A thread FigWatch has already replied in is done: never audit its root again.
     replied_to = set()
     for c in comments:
-        msg_lower = (c.get('message') or '').lower()
-        if c.get('parent_id') and any(m in msg_lower for m in _OWN_REPLY_MARKERS):
+        if c.get('parent_id') and is_bot_message(c.get('message')):
             replied_to.add(c['parent_id'])
             processed_ids.add(c['parent_id'])
 
@@ -237,42 +243,29 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log,
             file_key, follow_up_mention, log=log,
         ))
 
-    candidates = []
-    for c in comments:
-        if c['id'] in processed_ids or c.get('resolved_at'):
-            continue
-        if not c.get('parent_id'):
-            if (c.get('client_meta') or {}).get('node_id'):
-                candidates.append(c)
-        else:
-            msg_lower = (c.get('message') or '').lower()
-            if not any(m in msg_lower for m in _OWN_REPLY_MARKERS):
-                candidates.append(c)
-
-    for comment in candidates:
+    for comment in comments:
+        parent_id = comment.get('parent_id')
+        node_id = (comment.get('client_meta') or {}).get('node_id')
         if comment['id'] in processed_ids or comment['id'] in replied_to:
             continue
-        if comment.get('parent_id') and comment['parent_id'] in replied_to:
+        if comment.get('resolved_at'):
+            continue
+        if parent_id and (parent_id in replied_to or is_bot_message(comment.get('message'))):
+            continue
+        if not parent_id and not node_id:
             continue
 
         trigger_match = match_trigger(comment.get('message', ''), trigger_config)
         if not trigger_match:
             continue
 
-        node_id = (comment.get('client_meta') or {}).get('node_id')
-        comment['id']
-        parent_id = None
-        if comment.get('parent_id'):
-            parent = comment_map.get(comment['parent_id'])
-            if parent:
-                node_id = node_id or (parent.get('client_meta') or {}).get('node_id')
-            parent_id = comment['parent_id']
-
+        processed_ids.add(comment['id'])
+        if parent_id:
+            parent = comment_map.get(parent_id) or {}
+            node_id = node_id or (parent.get('client_meta') or {}).get('node_id')
         if not node_id:
-            processed_ids.add(comment['id'])
             continue
 
-        processed_ids.add(comment['id'])
         user_handle = comment.get('user', {}).get('handle', 'unknown')
 
         audit = Audit(
@@ -304,7 +297,7 @@ class FigmaWatcher:
     def __init__(self, file_key, pat, *, audit_service,
                  interval=30, log=print,
                  trigger_config=None, dispatch=None, on_poll=None,
-                 initial_delay=0, event_listener=None, follow_up_mention=None):
+                 initial_delay=0, follow_up_mention=None):
         self.file_key = file_key
         self.pat = pat
         self.audit_service = audit_service
@@ -314,11 +307,10 @@ class FigmaWatcher:
         self.dispatch = dispatch
         self.on_poll = on_poll
         self.initial_delay = initial_delay
-        self._event_listener = event_listener
         self.follow_up_mention = follow_up_mention
         self._stop_event = threading.Event()
         self._thread = None
-        self._processed = load_processed()
+        self._processed = shared_processed()
 
     def start(self):
         self._stop_event.clear()
@@ -365,30 +357,15 @@ class FigmaWatcher:
             self._stop_event.wait(timeout=self.interval)
 
     def _execute_audit(self, audit):
-        """Execute audit via AuditService and notify event listener."""
-        trigger_name = audit.trigger_match.trigger.keyword.lstrip('@')
-        ack_id = self.audit_service.post_ack(
-            audit,
-            f'\u23f3 {trigger_name} audit received \u2014 working on it\u2026',
-        )
-
+        """Run an audit inline (no dispatcher): ack, audit, reply."""
+        svc = self.audit_service
+        trigger = audit.trigger_match.trigger.keyword
+        ack_id = svc.post_ack(audit, ack_message(trigger))
         try:
-            response = self.audit_service.execute(audit)
-            self.audit_service.delete_ack(audit, ack_id)
-            self.audit_service.post_reply(audit, response)
+            svc.execute_and_reply(audit, ack_id)
         except Exception as err:
-            self.audit_service.delete_ack(audit, ack_id)
-            try:
-                self.audit_service.post_reply(
-                    audit,
-                    f'Audit failed: {err}\n\n{_EM_DASH} FigWatch',
-                )
-            except Exception:
-                logger.exception('error reply post also failed')
-
-        if self._event_listener:
-            for event in audit.collect_events():
-                self._event_listener(event, audit)
+            logger.warning('audit failed', extra={'error': str(err)})
+            svc.reply_with_error(audit, ack_id, error_reply(error_kind(err), trigger))
 
 
 # ── CLI entry point ───────────────────────────────────────────────────
@@ -414,21 +391,7 @@ if __name__ == '__main__':
     has_interval = interval_idx >= 0 and interval_idx + 1 < len(args)
     interval = int(args[interval_idx + 1]) if has_interval else 30
 
-    home = os.path.expanduser('~')
-    pat = None
-    for config_path in [
-        os.path.join(home, '.figwatch', 'config.json'),
-        os.path.join(home, '.figma-ds-cli', 'config.json'),
-    ]:
-        try:
-            with open(config_path) as f:
-                config = json.load(f)
-                if config.get('figmaPat'):
-                    pat = config['figmaPat']
-                    break
-        except Exception:
-            pass
-
+    pat = load_config().get('figmaPat')
     if not pat:
         print('\u274c No Figma PAT found in ~/.figwatch/config.json')
         sys.exit(1)

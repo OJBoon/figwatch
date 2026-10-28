@@ -8,6 +8,7 @@ import pytest
 _VALID_ENV = {
     'FIGMA_PAT': 'test-pat',
     'FIGWATCH_WEBHOOK_PASSCODE': 'test-passcode',
+    'GOOGLE_API_KEY': 'test-google-key',
 }
 
 
@@ -29,7 +30,9 @@ def _run_main(env):
          mock.patch('server.load_trigger_config', return_value=[]), \
          mock.patch('server.load_processed', return_value=set()), \
          mock.patch('server.AckUpdater'), \
-         mock.patch('server.HTTPServer'), \
+         mock.patch('server.ThreadingHTTPServer'), \
+         mock.patch('server.configure_limiters'), \
+         mock.patch('server.gateway_info', return_value=None), \
          mock.patch('server.threading.Thread'), \
          mock.patch('signal.signal'):
         import server
@@ -46,6 +49,22 @@ def test_invalid_model_exits():
 
 def test_valid_model_accepted():
     _run_main(_env(FIGWATCH_MODEL='gemini-flash'))
+
+
+def test_gemini_model_without_google_key_exits():
+    env = _env(FIGWATCH_MODEL='gemini-flash')
+    del env['GOOGLE_API_KEY']
+    with pytest.raises(SystemExit):
+        _run_main(env)
+
+
+def test_claude_model_without_anthropic_key_exits():
+    with pytest.raises(SystemExit):
+        _run_main(_env(FIGWATCH_MODEL='sonnet'))
+
+
+def test_claude_model_with_anthropic_key_accepted():
+    _run_main(_env(FIGWATCH_MODEL='sonnet', ANTHROPIC_API_KEY='sk-test'))
 
 
 # ── FIGWATCH_LOCALE ───────────────────────────────────────────────────
@@ -67,6 +86,11 @@ def test_valid_locale_accepted():
 def test_workers_zero_exits():
     with pytest.raises(SystemExit):
         _run_main(_env(FIGWATCH_WORKERS='0'))
+
+
+def test_workers_not_integer_exits():
+    with pytest.raises(SystemExit):
+        _run_main(_env(FIGWATCH_WORKERS='four'))
 
 
 def test_workers_valid():

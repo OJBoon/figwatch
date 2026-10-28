@@ -5,6 +5,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT is set. Falls back to noop (zero overhead)
 when the endpoint is not configured.
 """
 
+import contextlib
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -92,6 +93,39 @@ def format_trace_line(otel_context=None) -> str:
     return f'\ntrace id: {tid}' if tid else ''
 
 
+def capture_context():
+    """The current OTel context (to hand to another thread), or None."""
+    try:
+        from opentelemetry import context
+        return context.get_current()
+    except ImportError:
+        return None
+
+
+@contextlib.contextmanager
+def attached_context(ctx):
+    """Run the block inside a context from capture_context() (no-op for None)."""
+    if ctx is None:
+        yield
+        return
+    from opentelemetry import context
+    token = context.attach(ctx)
+    try:
+        yield
+    finally:
+        context.detach(token)
+
+
+def mark_error(span, err):
+    """Record err on the span and set its status to ERROR."""
+    span.record_exception(err)
+    try:
+        from opentelemetry.trace import StatusCode
+        span.set_status(StatusCode.ERROR, str(err))
+    except ImportError:
+        pass
+
+
 class _NoopSpan:
     """Minimal stand-in when opentelemetry is not installed."""
 
@@ -122,17 +156,10 @@ class TracedThreadPoolExecutor(ThreadPoolExecutor):
     """ThreadPoolExecutor that propagates OTel context to worker threads."""
 
     def submit(self, fn, /, *args, **kwargs):
-        try:
-            from opentelemetry import context
-            ctx = context.get_current()
+        ctx = capture_context()
 
-            def _wrapped():
-                token = context.attach(ctx)
-                try:
-                    return fn(*args, **kwargs)
-                finally:
-                    context.detach(token)
+        def _wrapped():
+            with attached_context(ctx):
+                return fn(*args, **kwargs)
 
-            return super().submit(_wrapped)
-        except ImportError:
-            return super().submit(fn, *args, **kwargs)
+        return super().submit(_wrapped)

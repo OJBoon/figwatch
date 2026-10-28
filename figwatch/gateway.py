@@ -54,6 +54,8 @@ import json
 import os
 from urllib.parse import urlparse
 
+from figwatch.config_store import load_json
+
 # ── Detection source paths (precedence order) ─────────────────────────────
 CLAUDE_SETTINGS_PATH = os.path.expanduser(os.path.join("~", ".claude", "settings.json"))
 CLAUDE_SETTINGS_LOCAL_PATH = os.path.expanduser(
@@ -107,11 +109,7 @@ def _load_json_dict(path):
     raise, hand back a dict or nothing" file-reading contract lives; every
     JSON reader below builds on it.
     """
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return None
+    data = load_json(path)
     return data if isinstance(data, dict) else None
 
 

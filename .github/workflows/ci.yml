@@ -68,6 +68,7 @@ jobs:
             -e FIGMA_PAT=figd_placeholder \
             -e FIGWATCH_WEBHOOK_PASSCODE=placeholder \
             -e FIGWATCH_SKIP_TOKEN_CHECK=1 \
+            -e GOOGLE_API_KEY=placeholder \
             -p 8080:8080 \
             figwatch:ci
           sleep 5

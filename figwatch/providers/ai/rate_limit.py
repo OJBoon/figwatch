@@ -33,6 +33,11 @@ class TokenBucket:
         self._last_refill = now()
         self._lock = threading.Lock()
 
+    @classmethod
+    def per_minute(cls, rpm: int, **kwargs) -> 'TokenBucket':
+        """A bucket allowing `rpm` requests a minute, with a one-minute burst."""
+        return cls(capacity=rpm, refill_per_second=rpm / 60, **kwargs)
+
     def acquire(self, tokens: int = 1) -> None:
         """Block until `tokens` tokens are available, then consume them."""
         while True:
@@ -55,6 +60,12 @@ class TokenBucket:
                 self._tokens -= tokens
                 return True
             return False
+
+    def drain(self, seconds: float) -> None:
+        """Empty the bucket so the next acquire waits about `seconds` (e.g. after a 429)."""
+        with self._lock:
+            self._refill()
+            self._tokens = -(self._refill_rate * seconds)
 
     def _refill(self) -> None:
         now = self._now()

@@ -37,9 +37,7 @@ class DesignDataRepository(Protocol):
         """Fetch design data. Returns (data_dict, tree_data_or_None)."""
         ...
 
-    def fetch_journey_screenshots(
-        self, file_key: str, node_id: str, tree_data: dict,
-    ) -> list:
+    def fetch_journey_screenshots(self, file_key: str, tree_data: dict) -> list:
         """Enumerate + screenshot a multi-screen board's child screens.
 
         Returns an ordered list of {id, name, path} for a whole-journey review.

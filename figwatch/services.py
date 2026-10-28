@@ -83,6 +83,22 @@ class AuditService:
                 message,
             )
 
+    def execute_and_reply(self, audit: Audit, ack_id: Optional[str]) -> str:
+        """Run the audit, then swap the ack for the reply. Raises on failure
+        (ack left in place) so the caller picks the failure policy."""
+        response = self.execute(audit)
+        self.delete_ack(audit, ack_id)
+        self.post_reply(audit, response)
+        return response
+
+    def reply_with_error(self, audit: Audit, ack_id: Optional[str], message: str) -> None:
+        """Replace the ack with an error reply. Never raises."""
+        try:
+            self.delete_ack(audit, ack_id)
+            self.post_reply(audit, message)
+        except Exception:
+            logger.exception('error reply post failed')
+
     def execute(self, audit: Audit) -> str:
         """Run skill for an audit. Returns cleaned reply string.
 

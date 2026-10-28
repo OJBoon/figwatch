@@ -686,7 +686,8 @@ class _RecordingProvider:
 def introspect_env(monkeypatch, tmp_path):
     """Hermetic introspect_skill: fake provider, no cache I/O, a real skill file."""
     _RecordingProvider.last = None
-    monkeypatch.setattr(skills, "AnthropicProvider", _RecordingProvider)
+    import figwatch.providers.ai.anthropic as anthropic_provider
+    monkeypatch.setattr(anthropic_provider, "AnthropicProvider", _RecordingProvider)
     monkeypatch.setattr(skills, "_load_skill_cache", lambda: {})
     monkeypatch.setattr(skills, "_save_skill_cache", lambda cache: None)
     skill_file = tmp_path / "skill.md"
@@ -695,10 +696,10 @@ def introspect_env(monkeypatch, tmp_path):
 
 
 def test_introspect_skill_api_uses_gateway_when_active(introspect_env, monkeypatch):
-    monkeypatch.setattr(skills, "gateway_api_config", lambda: {
-        "base_url": "http://llm-gw.jd.local/anthropic",
-        "model": "Claude-Opus-4.8-joybuilder",
-        "auth_token": "gw-tok",
+    monkeypatch.setattr(skills, "effective_gateway_env", lambda: {
+        "ANTHROPIC_BASE_URL": "http://llm-gw.jd.local/anthropic",
+        "ANTHROPIC_MODEL": "Claude-Opus-4.8-joybuilder",
+        "ANTHROPIC_AUTH_TOKEN": "gw-tok",
     })
     result = skills.introspect_skill(str(introspect_env), "api")
     rec = _RecordingProvider.last
@@ -710,7 +711,7 @@ def test_introspect_skill_api_uses_gateway_when_active(introspect_env, monkeypat
 
 
 def test_introspect_skill_api_stays_plain_without_gateway(introspect_env, monkeypatch):
-    monkeypatch.setattr(skills, "gateway_api_config", lambda: None)
+    monkeypatch.setattr(skills, "effective_gateway_env", lambda: {})
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-plain")
     skills.introspect_skill(str(introspect_env), "api")
     rec = _RecordingProvider.last

@@ -13,15 +13,10 @@ if _repo_root not in sys.path:
 import json
 import queue
 import re
-import ssl
 import subprocess
 import threading
 import time
 import urllib.request
-
-import certifi
-
-_SSL_CTX = ssl.create_default_context(cafile=certifi.where())
 
 import objc
 from AppKit import *
@@ -29,13 +24,18 @@ from Foundation import *
 from PyObjCTools import AppHelper
 
 import figwatch.handlers as handlers
+from figwatch.config_store import config_dir, load_json, save_json
+from figwatch.config_store import load_config as _load_config
+from figwatch.config_store import save_config as _save_config
 from figwatch.domain import (
     STATUS_LIVE,
     AuditStatus,
 )
+from figwatch.messages import ack_message, error_kind, error_reply
+from figwatch.providers.figma import SSL_CTX, validate_token
+from figwatch.trigger_config import skill_label
 
 # String status values for UI state tracking
-STATUS_DETECTED = AuditStatus.DETECTED.value
 STATUS_PROCESSING = AuditStatus.PROCESSING.value
 STATUS_REPLIED = AuditStatus.REPLIED.value
 STATUS_ERROR = AuditStatus.ERROR.value
@@ -51,13 +51,9 @@ RELEASES_API = "https://api.github.com/repos/OJBoon/figwatch/releases/latest"
 RELEASES_URL = "https://github.com/OJBoon/figwatch/releases/latest"
 
 HOME = os.path.expanduser("~")
-CONFIG_DIR = os.path.join(HOME, ".figwatch")
-CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
-RECENTS_PATH = os.path.join(CONFIG_DIR, "recent-watches.json")
-WATCHED_PATH = os.path.join(CONFIG_DIR, "watched-files.json")
+RECENTS_PATH = os.path.join(config_dir(), "recent-watches.json")
+WATCHED_PATH = os.path.join(config_dir(), "watched-files.json")
 FIGMA_SETTINGS_PATH = os.path.join(HOME, "Library", "Application Support", "Figma", "settings.json")
-
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # Resolve claude CLI path — evaluated lazily so it picks up installs that
 # happened after FigWatch launched, and so it can search more locations.
@@ -128,6 +124,11 @@ SETTINGS_MARGIN_Y = 16
 INTERVAL_PRESETS = [15, 30, 45, 60]
 DEFAULT_INTERVAL = 30
 
+# Settings popups: (stored value, title), in menu order.
+MODEL_CHOICES = [("sonnet", "Sonnet (recommended)"), ("opus", "Opus (most capable)"),
+                 ("haiku", "Haiku (cheapest)")]
+LANG_CHOICES = [("en", "English"), ("cn", "\u4e2d\u6587 (Chinese)")]
+
 # Lightweight mention that engages the bot for a conversational follow-up in a
 # thread it has already audited (see figwatch/watcher.py detect_triggers).
 FOLLOWUP_MENTION = "@figwatch"
@@ -140,72 +141,32 @@ except Exception:
     _GLASS_CLS = None
 
 
-def _load_config():
-    for path in [CONFIG_PATH, os.path.join(HOME, ".figma-ds-cli", "config.json")]:
-        try:
-            with open(path) as f:
-                config = json.load(f)
-                if config.get("figmaPat"):
-                    return config
-        except Exception:
-            pass
-    return {}
-
-def _save_config(c):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(c, f, indent=2)
-
-
 # ── Watched files persistence ──────────────────────────────────────
+# Files the user added by hand ({"key", "name", "figjam"}); migrated from the
+# older recent-watches list on first launch.
 
 def _load_watched():
-    """Load watched files list. Returns list of {"key": str, "name": str, "figjam": bool}."""
-    try:
-        with open(WATCHED_PATH) as f:
-            return json.load(f)
-    except Exception:
-        return []
-
-def _save_watched(files):
-    os.makedirs(CONFIG_DIR, exist_ok=True)
-    with open(WATCHED_PATH, "w") as f:
-        json.dump(files, f, indent=2)
-
-def _add_watched(key, name, figjam=False):
-    """Upsert a file into the watched list."""
-    files = [f for f in _load_watched() if f["key"] != key]
-    files.insert(0, {"key": key, "name": name, "figjam": figjam})
-    _save_watched(files)
-
-def _remove_watched(key):
-    """Remove a file from the watched list."""
-    files = [f for f in _load_watched() if f["key"] != key]
-    _save_watched(files)
-
-
-# ── Recents (kept for migration) ──────────────────────────────────
-
-def _load_recents():
-    try:
-        with open(RECENTS_PATH) as f:
-            return json.load(f)
-    except Exception:
-        return []
+    return load_json(WATCHED_PATH, [])
 
 
 # ── Figma file detection ──────────────────────────────────────────
 
+_figma_settings_cache = {"mtime": None, "files": []}
+
+
 def _scan_figma_files():
     """Read Figma Desktop's settings.json to find open files.
 
-    Returns list of {"key": str, "name": str, "figjam": bool}.
+    Returns list of {"key": str, "name": str, "figjam": bool}. Called every sync
+    tick, so the file is only re-parsed when it has changed.
     """
     try:
-        with open(FIGMA_SETTINGS_PATH, encoding='utf-8') as f:
-            settings = json.load(f)
-    except Exception:
+        mtime = os.stat(FIGMA_SETTINGS_PATH).st_mtime_ns
+    except OSError:
         return []
+    if mtime == _figma_settings_cache["mtime"]:
+        return list(_figma_settings_cache["files"])
+    settings = load_json(FIGMA_SETTINGS_PATH, {})
 
     files = []
     seen = set()
@@ -223,25 +184,11 @@ def _scan_figma_files():
                     "name": title or key,
                     "figjam": editor == "figjam" or "/board/" in path,
                 })
-    return files
+    _figma_settings_cache.update(mtime=mtime, files=files)
+    return list(files)
 
 
 # ── Helpers ────────────────────────────────────────────────────────
-
-def _extract_key(s):
-    m = re.search(r"figma\.com/(?:design|file|board)/([a-zA-Z0-9]+)", s)
-    if m:
-        return m.group(1)
-    s = s.strip()
-    return s if re.match(r"^[a-zA-Z0-9]{10,}$", s) else None
-
-def _figma_get(path, pat):
-    try:
-        req = urllib.request.Request(f"https://api.figma.com/v1{path}", headers={"X-Figma-Token": pat})
-        with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as r:
-            return json.loads(r.read())
-    except Exception:
-        return None
 
 def _parse_version(s):
     try:
@@ -256,7 +203,7 @@ def _fetch_latest_release():
             "Accept": "application/vnd.github+json",
             "User-Agent": "FigWatch",
         })
-        with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as r:
+        with urllib.request.urlopen(req, timeout=10, context=SSL_CTX) as r:
             d = json.loads(r.read())
         zip_url = next(
             (a.get("browser_download_url") for a in d.get("assets", [])
@@ -275,55 +222,10 @@ def _fetch_latest_release():
         return None
 
 
-def _fallback_reply(kind, lang, trigger):
-    """Localized ack / error text posted to Figma. The AI audit text is localized
-    by the skill; these fixed status and fallback messages are localized here too
-    so they honour the reply-language setting (`en` / `cn`)."""
-    cn = lang == "cn"
-    if kind == "ack":
-        if cn:
-            return f"⏳ 已收到 {trigger} 审查请求，正在处理…"
-        return f"⏳ {trigger} audit received — working on it…"
-    if kind == "too_large":
-        if cn:
-            return (
-                f"⚠️ 无法截取该画面的截图，它可能太大或太复杂，Figma 无法一次性渲染。"
-                f"如果这是完整的用户旅程，请在其中某个具体页面上触发 @{trigger}，我会单独审查。"
-                f"\n\n— FigWatch"
-            )
-        return (
-            f"⚠️ I couldn't capture a screenshot of this frame — it may be too large or "
-            f"complex for Figma to render as a single image. For a big user journey, "
-            f"trigger @{trigger} on a specific screen inside it and I'll review that.\n\n— FigWatch"
-        )
-    if cn:
-        return (
-            f"⚠️ 暂时无法完成 {trigger} 审查。该画面的设计数据可能暂不可用，或服务繁忙。"
-            f"请重新触发以重试。\n\n— FigWatch"
-        )
-    return (
-        f"⚠️ Couldn't complete the {trigger} audit right now. This frame's design data "
-        f"may be unavailable, or the service was busy. Re-trigger to retry.\n\n— FigWatch"
-    )
-
-
 def _validate_token(pat):
     """Return (handle, None) on success or (None, error_string) on failure."""
     try:
-        req = urllib.request.Request(
-            "https://api.figma.com/v1/me",
-            headers={"X-Figma-Token": pat},
-        )
-        with urllib.request.urlopen(req, timeout=10, context=_SSL_CTX) as r:
-            d = json.loads(r.read())
-        handle = d.get("handle")
-        if handle:
-            return handle, None
-        return None, f"Unexpected API response: {d}"
-    except urllib.error.HTTPError as e:
-        return None, f"HTTP {e.code}: {e.reason}"
-    except urllib.error.URLError as e:
-        return None, f"Network error: {e.reason}"
+        return validate_token(pat), None
     except Exception as e:
         return None, str(e)
 
@@ -407,21 +309,20 @@ class FlippedView(NSView):
 
 # ── UI Builder ──────────────────────────────────────────────────────
 
-def _skill_display_name(skill_path):
-    """Human name for a custom skill path.
+def _pick_md_file():
+    """Ask for a skill .md file with the open panel; its path, or None if cancelled.
 
-    Custom skills live at <dir>/<name>/skill.md, so when the file is the
-    conventional skill.md/SKILL.md the parent folder is the skill's name —
-    os.path.basename(path) would just say "skill.md". For a loose .md file
-    (not the conventional name) use its own filename stem instead.
+    Activates the app first — a menu-bar (agent) app isn't frontmost, so the panel
+    would otherwise open behind everything or not at all.
     """
-    fname = os.path.basename(skill_path)
-    stem, _ = os.path.splitext(fname)
-    if fname.lower() in ("skill.md", "skill.markdown"):
-        parent = os.path.basename(os.path.dirname(skill_path))
-        if parent:
-            return parent
-    return stem
+    panel = NSOpenPanel.alloc().init()
+    panel.setCanChooseFiles_(True)
+    panel.setCanChooseDirectories_(False)
+    panel.setAllowedFileTypes_(["md"])
+    NSApp.activateIgnoringOtherApps_(True)
+    if panel.runModal() == NSModalResponseOK and panel.URLs():
+        return panel.URLs()[0].path()
+    return None
 
 
 def _label(text, size=BODY_SIZE, weight=NSFontWeightRegular, color=None):
@@ -509,9 +410,6 @@ def _file_row_look(info):
         return (_menu_icon("arrow.triangle.2.circlepath", NSColor.systemOrangeColor()),
                 f"Running {trigger or 'audit'}{f' for {user}' if user else ''}\u2026",
                 b"doOpenFile:")
-    if status == STATUS_DETECTED:
-        return (_menu_icon("bolt.fill", NSColor.systemOrangeColor()),
-                f"{trigger} comment found" if trigger else "Comment found", b"doOpenFile:")
     if status == STATUS_REPLIED:
         return (_menu_icon("checkmark.circle.fill", NSColor.whiteColor(), NSColor.systemGreenColor()),
                 "Replied", b"doOpenFile:")
@@ -612,7 +510,6 @@ def build_onboarding_view(app, deps):
             "name": "Claude Code",
             "desc": "Powers the AI audits (personal login)",
             "ok": deps["claude"]["ok"],
-            "installing": app._state.get("installing_claude"),
             "action": b"doInstallClaude:",
         })
     items.append({
@@ -620,7 +517,6 @@ def build_onboarding_view(app, deps):
         "name": auth_name,
         "desc": auth_desc,
         "ok": auth["ok"],
-        "installing": False,
         "action": b"doClaudeAuth:",
         # When not signed in, offer all three paths: company gateway (cc-switch),
         # manual gateway entry, and personal Claude login.
@@ -635,12 +531,11 @@ def build_onboarding_view(app, deps):
         "name": "Figma Token",
         "desc": "Connects to your Figma files",
         "ok": deps["pat"]["ok"],
-        "installing": False,
         "action": b"doToken:",
     })
 
     for item in items:
-        has_actions = bool(item.get("actions")) and not item["ok"] and not item["installing"]
+        has_actions = bool(item.get("actions")) and not item["ok"]
         # A two-button auth row is taller so the buttons get their own line and
         # never overlap the (long) description text.
         row_h = 68 if has_actions else 44
@@ -650,9 +545,7 @@ def build_onboarding_view(app, deps):
         # flipped, so the larger y is the upper line.
         name_y, desc_y = (46, 30) if has_actions else (24, 6)
 
-        if item["installing"]:
-            icon = _label("\u23F3", size=BODY_SIZE)
-        elif item["ok"]:
+        if item["ok"]:
             icon = _sf_symbol("checkmark.circle.fill", size=BODY_SIZE, color=NSColor.systemGreenColor())
         else:
             icon = _sf_symbol("xmark.circle.fill", size=BODY_SIZE, color=NSColor.systemRedColor())
@@ -665,7 +558,7 @@ def build_onboarding_view(app, deps):
 
         # Available text width: full width when the buttons sit on their own line
         # (has_actions) or the row is complete (ok, no trailing control); otherwise
-        # reserve the right side for the Install/Set Up button or "Installing…".
+        # reserve the right side for the Install/Set Up button.
         text_w = (cw - 32) if (has_actions or item["ok"]) else (cw - 108)
 
         nl = _label(item["name"])
@@ -690,17 +583,13 @@ def build_onboarding_view(app, deps):
                 b.setFrameOrigin_((bx, 8))
                 row.addSubview_(b)
                 bx -= 8
-        elif not item["ok"] and not item["installing"]:
+        elif not item["ok"]:
             btn_title = "Set Up" if item["key"] == "pat" else "Install"
             btn = NSButton.buttonWithTitle_target_action_(btn_title, app, item["action"])
             btn.sizeToFit()
             bf = btn.frame().size
             btn.setFrameOrigin_((cw - 8 - bf.width, (row_h - bf.height) / 2))
             row.addSubview_(btn)
-        elif item["installing"]:
-            il = _label("Installing\u2026", size=CAPTION_SIZE, color=NSColor.secondaryLabelColor())
-            il.setFrameOrigin_((cw - 76, 12))
-            row.addSubview_(il)
 
         root.addSubview_(row)
         y += row_h
@@ -750,12 +639,11 @@ class FigWatch(NSObject):
             "watched": [],
             "watchers": {},
             "file_statuses": {},
-            "work_queue_tone": queue.Queue(),
-            "work_queue_ux": queue.Queue(),
+            # Audit queues by worker pool: @tone gets its own, everything else "ux".
+            "work_queues": {"tone": queue.Queue(), "ux": queue.Queue()},
+            "worker_counts": {},
             "workers": [],
             "trigger_config": [],
-            "installing_claude": False,
-            "force_onboarding": False,
             "deps": None,
             "excluded_keys": [],
             "update_available": None,
@@ -852,14 +740,15 @@ class FigWatch(NSObject):
         self._state["trigger_config"] = load_trigger_config()
 
         if not os.path.exists(WATCHED_PATH) and os.path.exists(RECENTS_PATH):
-            recents = _load_recents()
+            recents = load_json(RECENTS_PATH, [])
             if recents:
-                _save_watched(recents)
+                save_json(WATCHED_PATH, recents)
 
-        self._check_for_update()
-
+        # Start watching first; the update check is a GitHub round trip (up to
+        # 10s) and must not delay the first comment poll.
         self._start_workers()
         self._sync_watchers()
+        threading.Thread(target=self._check_for_update, daemon=True).start()
         threading.Thread(target=self._sync_loop, daemon=True).start()
 
     def _check_for_update(self):
@@ -896,8 +785,9 @@ class FigWatch(NSObject):
 
     def _sync_watchers(self):
         detected = _scan_figma_files()
-        manual = self._state.get("_manual_watched", _load_watched())
-        self._state["_manual_watched"] = manual
+        if "_manual_watched" not in self._state:
+            self._state["_manual_watched"] = _load_watched()
+        manual = self._state["_manual_watched"]
         excluded = set(self._state.get("excluded_keys", []))
 
         merged = {}
@@ -911,45 +801,29 @@ class FigWatch(NSObject):
         current_keys = set(self._state.get("watchers", {}).keys())
 
         new_keys = desired_keys - current_keys
-        if new_keys:
-            n = len(new_keys)
-            for i, key in enumerate(new_keys):
-                delay = (self._state.get("poll_interval", DEFAULT_INTERVAL) / n) * i if n > 1 else 0
-                self._start_watcher(merged[key], initial_delay=delay)
+        for i, key in enumerate(new_keys):
+            self._start_watcher(merged[key], initial_delay=self._stagger(i, len(new_keys)))
 
-        manual_keys = {f["key"] for f in manual}
-        stale_keys = current_keys - desired_keys
-        for key in stale_keys:
-            if key not in manual_keys:
-                self._stop_watcher(key)
+        # Manual files are always in desired_keys, so anything stale was detected.
+        for key in current_keys - desired_keys:
+            self._stop_watcher(key)
 
-        ordered = list(manual)
-        seen = {f["key"] for f in manual}
-        for f in detected:
-            if f["key"] not in seen and f["key"] not in excluded:
-                ordered.append(f)
-                seen.add(f["key"])
-        self._state["watched"] = ordered
+        self._state["watched"] = list(merged.values())
 
-        if new_keys or stale_keys:
-            self._schedule_refresh()
+    def _stagger(self, i, n):
+        """Initial delay for the i-th of n watchers, spreading polls over the interval."""
+        return self._state.get("poll_interval", DEFAULT_INTERVAL) / n * i if n > 1 else 0
 
     def _start_workers(self):
         config = _load_config()
-        tone_count = config.get("workersTone", 2)
-        ux_count = config.get("workersUx", 1)
-        self._state["_tone_worker_count"] = tone_count
-        self._state["_ux_worker_count"] = ux_count
-
-        for _ in range(tone_count):
-            t = threading.Thread(target=self._worker_loop, args=(self._state["work_queue_tone"],), daemon=True)
-            t.start()
-            self._state["workers"].append(t)
-
-        for _ in range(ux_count):
-            t = threading.Thread(target=self._worker_loop, args=(self._state["work_queue_ux"],), daemon=True)
-            t.start()
-            self._state["workers"].append(t)
+        counts = {"tone": config.get("workersTone", 2), "ux": config.get("workersUx", 1)}
+        self._state["worker_counts"] = counts
+        for pool, n in counts.items():
+            for _ in range(n):
+                t = threading.Thread(target=self._worker_loop,
+                                     args=(self._state["work_queues"][pool],), daemon=True)
+                t.start()
+                self._state["workers"].append(t)
 
     def _set_file_status(self, key, status, *, trigger=None, user=None, error=None,
                          revert_after=None):
@@ -965,34 +839,22 @@ class FigWatch(NSObject):
         if user is not None:
             fs["user"] = user
         fs["error"] = error
-        self._schedule_refresh()
         self._update_icon_state()
         if revert_after is not None:
             def _revert():
                 cur = self._state.get("file_statuses", {}).get(key)
                 if cur is not None and cur.get("status") == status:
                     cur["status"] = STATUS_LIVE
-                    self._schedule_refresh()
                     self._update_icon_state()
             threading.Timer(revert_after, _revert).start()
 
     def _worker_loop(self, q):
-        seen = set()
         while True:
             item = q.get()
             if item is None:
                 break
             audit, ack_id = item
-            comment_id = audit.comment.comment_id
             svc = self._state.get("audit_service")
-            if comment_id in seen:
-                # The ack was already posted at dispatch; delete it so a skipped
-                # duplicate doesn't leave a dangling "working on it\u2026" reply.
-                if ack_id and svc:
-                    with contextlib.suppress(Exception):
-                        svc.delete_ack(audit, ack_id)
-                continue
-            seen.add(comment_id)
             if not svc:
                 continue
             trigger_name = audit.trigger_match.trigger.keyword.lstrip('@')
@@ -1005,12 +867,8 @@ class FigWatch(NSObject):
                 user=audit.comment.user_handle,
             )
             try:
-                response = svc.execute(audit)
-                self._write_log(f"\u2705 Audit complete ({len(response)} chars)")
-                if ack_id:
-                    svc.delete_ack(audit, ack_id)
-                svc.post_reply(audit, response)
-                self._write_log("\u2709\ufe0f  Reply posted")
+                response = svc.execute_and_reply(audit, ack_id)
+                self._write_log(f"\u2709\ufe0f  Reply posted ({len(response)} chars)")
                 self._set_file_status(file_key, STATUS_REPLIED, revert_after=4.0)
             except Exception as e:
                 self._write_log(f"\u26a0\ufe0f Audit failed: {e}")
@@ -1018,16 +876,8 @@ class FigWatch(NSObject):
                 # Post a short reply instead of going silent: the reviewer gets
                 # feedback, and because the trigger now has a reply it won't be
                 # re-audited on the next poll (avoids a bad frame clogging the worker).
-                # A screenshot-capture miss is usually a too-large multi-screen frame;
-                # everything else gets the generic "busy, re-trigger" reply.
-                err = str(e)
-                kind = "too_large" if ("required data" in err and "screenshot" in err) else "generic"
-                reply = _fallback_reply(kind, self._state.get("reply_lang", "en"), trigger_name)
-                with contextlib.suppress(Exception):
-                    if ack_id:
-                        svc.delete_ack(audit, ack_id)
-                    svc.post_reply(audit, reply)
-                    self._write_log("✉️  Error reply posted")
+                svc.reply_with_error(audit, ack_id, error_reply(
+                    error_kind(e), trigger_name, self._state.get("reply_lang", "en")))
 
     def _build_audit_service(self):
         """Construct AuditService for macOS polling path."""
@@ -1068,7 +918,6 @@ class FigWatch(NSObject):
 
         def dispatch(audit):
             trigger_kw = audit.trigger_match.trigger.keyword
-            trigger_name = trigger_kw.lstrip("@")
             # Post the ack the instant the poll detects the trigger, on the poll
             # thread -- NOT when a worker dequeues it. Otherwise a busy worker
             # (audits take 30-120s) makes the "working on it" reply wait behind
@@ -1078,14 +927,13 @@ class FigWatch(NSObject):
             if svc:
                 try:
                     ack_id = svc.post_ack(
-                        audit,
-                        _fallback_reply("ack", self._state.get("reply_lang", "en"), trigger_name),
+                        audit, ack_message(trigger_kw, self._state.get("reply_lang", "en")),
                     )
                     self._write_log("✉️  Ack posted")
                 except Exception as e:
                     self._write_log(f"⚠️ Ack failed: {e}")
-            q_key = "work_queue_tone" if trigger_kw == "@tone" else "work_queue_ux"
-            self._state[q_key].put((audit, ack_id))
+            pool = "tone" if trigger_kw == "@tone" else "ux"
+            self._state["work_queues"][pool].put((audit, ack_id))
 
         def on_poll():
             if key in self._state["file_statuses"]:
@@ -1120,10 +968,9 @@ class FigWatch(NSObject):
             w.stop()
         self._state["file_statuses"].clear()
 
-        for _ in range(self._state.get("_tone_worker_count", 0)):
-            self._state["work_queue_tone"].put(None)
-        for _ in range(self._state.get("_ux_worker_count", 0)):
-            self._state["work_queue_ux"].put(None)
+        for pool, n in self._state["worker_counts"].items():
+            for _ in range(n):
+                self._state["work_queues"][pool].put(None)
         self._state["workers"].clear()
         self._update_icon_state()
 
@@ -1133,26 +980,14 @@ class FigWatch(NSObject):
         self._stop_all_watchers()
         self._start_workers()
         watched = self._state.get("watched", [])
-        n = len(watched)
         for i, f in enumerate(watched):
-            delay = (self._state.get("poll_interval", DEFAULT_INTERVAL) / n) * i if n > 1 else 0
-            self._start_watcher(f, initial_delay=delay)
+            self._start_watcher(f, initial_delay=self._stagger(i, len(watched)))
 
     def _update_icon_state(self):
-        active = any(
-            s.get("status") in (STATUS_PROCESSING, STATUS_DETECTED)
-            for s in self._state.get("file_statuses", {}).values()
-        )
-        if not active:
-            active = len(self._state.get("watchers", {})) > 0
+        # Filled while anything is being watched (a file mid-audit always is).
+        active = bool(self._state.get("watchers"))
         self.performSelectorOnMainThread_withObject_waitUntilDone_(
             b"setIconActive:", active, False)
-
-    def _schedule_refresh(self):
-        pass
-
-    def _refresh_popover(self):
-        self._rebuild_popover()
 
     # ── Icon ───────────────────────────────────────────────────
 
@@ -1196,8 +1031,6 @@ class FigWatch(NSObject):
     # ── Status menu ────────────────────────────────────────────
 
     def _setup_complete(self):
-        if self._state.get("force_onboarding"):
-            return False
         cached = self._state.get("deps")
         if not (cached and cached["all_required"]):
             self._state["deps"] = check_deps()
@@ -1288,7 +1121,7 @@ class FigWatch(NSObject):
 
         menu.addItem_(NSMenuItem.separatorItem())
         add("Settings\u2026", b"doSettings:", key=",")
-        add("Restart FigWatch", b"doRestart:")
+        add("Check for Updates\u2026", b"doCheckUpdate:")
         add("Quit FigWatch", b"doQuit:", key="q")
 
     def _data_snapshot(self):
@@ -1316,11 +1149,6 @@ class FigWatch(NSObject):
             item.setTitle_(self._countdown_text())
 
     # ── Setup panel ────────────────────────────────────────────
-
-    def _build_current_view(self):
-        deps = check_deps()
-        self._state["deps"] = deps
-        return build_onboarding_view(self, deps)
 
     @objc.typedSelector(b"v@:@")
     def doOpenSetup_(self, sender):
@@ -1356,10 +1184,12 @@ class FigWatch(NSObject):
             self._populate_menu(self._menu)
         if not self._state.get("popover_open"):
             return
-        if self._setup_complete():
+        # One fresh check serves both the "done?" test and the checklist.
+        deps = self._state["deps"] = check_deps()
+        if deps["all_required"]:
             self._close_popover()
             return
-        view, h = self._build_current_view()
+        view, h = build_onboarding_view(self, deps)
         content = self._panel.contentView()
         view.setFrame_(NSMakeRect(0, 0, W, h))
         view.setWantsLayer_(True)
@@ -1388,70 +1218,6 @@ class FigWatch(NSObject):
             self._state["event_monitor"] = None
 
     # ── File Actions ───────────────────────────────────────────
-
-    @objc.typedSelector(b"v@:@")
-    def doAddFileInline_(self, sender):
-        root = sender.superview()
-        url_field = None
-        for subview in root.subviews():
-            if isinstance(subview, NSTextField) and subview.tag() == 9000:
-                url_field = subview
-                break
-        if not url_field:
-            return
-        url_str = url_field.stringValue().strip()
-        key = _extract_key(url_str)
-        if key:
-            self._resolve_and_watch(key)
-
-    @objc.typedSelector(b"v@:@")
-    def doAddFile_(self, sender):
-        self.popover.close()
-        NSApp.activateIgnoringOtherApps_(True)
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_("Watch a Figma File")
-        alert.setInformativeText_("Paste a Figma file URL to start watching.")
-        alert.addButtonWithTitle_("Watch"); alert.addButtonWithTitle_("Cancel")
-        inp = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 400, 24))
-        inp.setPlaceholderString_("https://www.figma.com/design/...")
-        alert.setAccessoryView_(inp)
-        alert.window().setInitialFirstResponder_(inp)
-        if alert.runModal() == NSAlertFirstButtonReturn:
-            key = _extract_key(inp.stringValue().strip())
-            if key:
-                self._resolve_and_watch(key)
-
-    def _resolve_and_watch(self, key):
-        def resolve():
-            d = _figma_get(f"/files/{key}?depth=1", self._state["pat"])
-            name = d.get("name", key) if d else key
-            _add_watched(key, name, figjam=False)
-            excluded = self._state.get("excluded_keys", [])
-            if key in excluded:
-                excluded.remove(key)
-                self._save_excluded()
-            self._sync_watchers()
-        threading.Thread(target=resolve, daemon=True).start()
-
-    @objc.typedSelector(b"v@:@")
-    def doRemoveFile_(self, sender):
-        idx = sender.tag()
-        watched = self._state.get("watched", [])
-        if idx < len(watched):
-            key = watched[idx]["key"]
-            self._stop_watcher(key)
-            _remove_watched(key)
-            excluded = self._state.setdefault("excluded_keys", [])
-            if key not in excluded:
-                excluded.append(key)
-                self._save_excluded()
-            self._state["watched"] = [f for f in watched if f["key"] != key]
-            self._refresh_popover()
-
-    def _save_excluded(self):
-        c = _load_config()
-        c["excludedFiles"] = self._state.get("excluded_keys", [])
-        _save_config(c)
 
     @objc.typedSelector(b"v@:@")
     def doShowError_(self, sender):
@@ -1608,6 +1374,14 @@ class FigWatch(NSObject):
             p.setFrameSize_(NSMakeSize(width, p.intrinsicContentSize().height))
             return p
 
+        def _choice_popup(width, choices, current):
+            p = _popup(width)
+            for _, title in choices:
+                p.addItemWithTitle_(title)
+            values = [v for v, _ in choices]
+            p.selectItemAtIndex_(values.index(current) if current in values else 0)
+            return p
+
         def _sep():
             nonlocal y
             y += 12
@@ -1637,6 +1411,25 @@ class FigWatch(NSObject):
             acc.addSubview_(h)
             y += sh + 4
 
+        def _status_row(ok, text):
+            # Icon + one line of status text, e.g. "Connected as …".
+            nonlocal y
+            crh = 20
+            row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, crh))
+            icon = _sf_symbol("checkmark.circle.fill" if ok else "xmark.circle",
+                              size=BODY_SIZE, color=NSColor.secondaryLabelColor())
+            if icon:
+                icon.setFrameOrigin_((0, (crh - icon.frame().size.height) / 2))
+                row.addSubview_(icon)
+            lbl = _label(text)
+            lbl.sizeToFit()
+            lbl.setFrameSize_(NSMakeSize(min(lbl.frame().size.width, SW - 20), lbl.frame().size.height))
+            lbl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
+            lbl.setFrameOrigin_((20, (crh - lbl.frame().size.height) / 2))
+            row.addSubview_(lbl)
+            acc.addSubview_(row)
+            y += 24
+
         def _row(label_text, control):
             nonlocal y
             rh = 28  # label and control centred on the same line
@@ -1665,12 +1458,7 @@ class FigWatch(NSObject):
             trigger_word = tc.get("trigger", "")
             skill_name = tc.get("skill", "")
             builtin = skill_name.startswith("builtin:")
-            if builtin:
-                display = f"{skill_name.replace('builtin:', '')} (built-in)"
-            else:
-                # A custom skill path is <dir>/<name>/skill.md — basename() would
-                # just say "skill.md", so show the skill's folder name instead.
-                display = _skill_display_name(skill_name)
+            display = skill_label(skill_name) + (" (built-in)" if builtin else "")
 
             rh = 28
             row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, rh))
@@ -1755,31 +1543,8 @@ class FigWatch(NSObject):
         _section("Connection", "link", trailing_btn=tok_hdr_btn)
 
         user = self._state.get("user")
-        if user and self._state.get("pat"):
-            conn_icon = _sf_symbol("checkmark.circle.fill", size=BODY_SIZE, color=NSColor.secondaryLabelColor())
-            conn_text = f"Connected as {user}"
-        else:
-            conn_icon = _sf_symbol("xmark.circle", size=BODY_SIZE, color=NSColor.secondaryLabelColor())
-            conn_text = "Not connected"
-
-        crh = 20
-        conn_row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, crh))
-        if conn_icon:
-            conn_icon.setFrameOrigin_((0, (crh - conn_icon.frame().size.height) / 2))
-            conn_row.addSubview_(conn_icon)
-        conn_lbl = _label(conn_text)
-        conn_lbl.sizeToFit()
-        conn_lbl.setFrameSize_(NSMakeSize(min(conn_lbl.frame().size.width, SW - 20), conn_lbl.frame().size.height))
-        conn_lbl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
-        conn_lbl.setFrameOrigin_((20, (crh - conn_lbl.frame().size.height) / 2))
-        conn_row.addSubview_(conn_lbl)
-        acc.addSubview_(conn_row)
-        y += 24
-
-        tok_input = NSTextField.alloc().initWithFrame_(NSMakeRect(0, -100, 0, 0))
-        if self._state.get("pat"):
-            tok_input.setStringValue_(self._state["pat"])
-        acc.addSubview_(tok_input)
+        connected = bool(user and self._state.get("pat"))
+        _status_row(connected, f"Connected as {user}" if connected else "Not connected")
 
         # ── AI ────────────────────────────────────────────────
         gw = gateway_info()
@@ -1793,23 +1558,8 @@ class FigWatch(NSObject):
         conn_btn = _button("Change Sign-in\u2026" if ai_ok else "Sign in\u2026", b"doSwitchAI:")
         _section("AI", "cpu", trailing_btn=conn_btn)
 
-        claude_text = (f"Gateway · {gw['host']}" if gw
-                       else "Personal Claude login" if ai_ok else "Not signed in")
-        crh = 20
-        cr = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, crh))
-        cic = _sf_symbol("checkmark.circle.fill" if ai_ok else "xmark.circle",
-                         size=BODY_SIZE, color=NSColor.secondaryLabelColor())
-        if cic:
-            cic.setFrameOrigin_((0, (crh - cic.frame().size.height) / 2))
-            cr.addSubview_(cic)
-        cl = _label(claude_text)
-        cl.sizeToFit()
-        cl.setFrameSize_(NSMakeSize(min(cl.frame().size.width, SW - 20), cl.frame().size.height))
-        cl.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
-        cl.setFrameOrigin_((20, (crh - cl.frame().size.height) / 2))
-        cr.addSubview_(cl)
-        acc.addSubview_(cr)
-        y += 24
+        _status_row(ai_ok, f"Gateway · {gw['host']}" if gw
+                    else "Personal Claude login" if ai_ok else "Not signed in")
 
         if gw:
             # The model is dictated by the gateway (cc-switch); show it read-only
@@ -1824,19 +1574,10 @@ class FigWatch(NSObject):
             mval.cell().setLineBreakMode_(NSLineBreakByTruncatingTail)
             _row("Model", mval)
         else:
-            model_popup = _popup(180)
-            model_popup.addItemWithTitle_("Sonnet (recommended)")
-            model_popup.addItemWithTitle_("Opus (most capable)")
-            model_popup.addItemWithTitle_("Haiku (cheapest)")
-            model_map = {"sonnet": 0, "opus": 1, "haiku": 2}
-            model_popup.selectItemAtIndex_(model_map.get(self._state.get("model", "sonnet"), 0))
+            model_popup = _choice_popup(180, MODEL_CHOICES, self._state.get("model", "sonnet"))
             _row("Model", model_popup)
 
-        lang_popup = _popup(180)
-        lang_popup.addItemWithTitle_("English")
-        lang_popup.addItemWithTitle_("\u4e2d\u6587 (Chinese)")
-        lang_map = {"en": 0, "cn": 1}
-        lang_popup.selectItemAtIndex_(lang_map.get(self._state.get("reply_lang", "en"), 0))
+        lang_popup = _choice_popup(180, LANG_CHOICES, self._state.get("reply_lang", "en"))
         _row("Reply language", lang_popup)
 
         tone_popup = _popup(80)
@@ -1978,15 +1719,13 @@ class FigWatch(NSObject):
         ctl = getattr(self, "_settings_ctl", None)
         if not ctl:
             return
-        rmap = {0: "sonnet", 1: "opus", 2: "haiku"}
         model_popup = ctl["model"]
         if model_popup is not None:
-            new_model = rmap.get(model_popup.indexOfSelectedItem(), "sonnet")
+            new_model = MODEL_CHOICES[model_popup.indexOfSelectedItem()][0]
         else:
             # Gateway mode: model is fixed by cc-switch, leave it unchanged.
             new_model = self._state.get("model", "sonnet")
-        lrmap = {0: "en", 1: "cn"}
-        new_lang = lrmap.get(ctl["lang"].indexOfSelectedItem(), "en")
+        new_lang = LANG_CHOICES[ctl["lang"].indexOfSelectedItem()][0]
         new_tone_workers = ctl["tone"].indexOfSelectedItem() + 1
         new_ux_workers = ctl["ux"].indexOfSelectedItem() + 1
         new_interval = INTERVAL_PRESETS[ctl["interval"].indexOfSelectedItem()]
@@ -2028,18 +1767,11 @@ class FigWatch(NSObject):
     def doSkillPopupChanged_(self, sender):
         # "Browse for file…" is the last item (index == number of real skills).
         # Selecting it opens the macOS file picker immediately; the chosen file is
-        # added to the popup and selected, so "Add" then commits it. Activate the
-        # app first — a menu-bar (agent) app isn't frontmost, so without this the
-        # open panel opens behind everything or not at all.
+        # added to the popup and selected, so "Add" then commits it.
         if sender.indexOfSelectedItem() != len(self._add_trigger_paths):
             return
-        panel = NSOpenPanel.alloc().init()
-        panel.setCanChooseFiles_(True)
-        panel.setCanChooseDirectories_(False)
-        panel.setAllowedFileTypes_(["md"])
-        NSApp.activateIgnoringOtherApps_(True)
-        if panel.runModal() == NSModalResponseOK and panel.URLs():
-            path = panel.URLs()[0].path()
+        path = _pick_md_file()
+        if path:
             idx = len(self._add_trigger_paths)
             sender.insertItemWithTitle_atIndex_(os.path.basename(path), idx)
             self._add_trigger_paths.append(path)
@@ -2053,19 +1785,10 @@ class FigWatch(NSObject):
         sel = self._add_trigger_sk.indexOfSelectedItem()
         paths = self._add_trigger_paths
 
-        if sel < len(paths):
-            skill_path = paths[sel]
-        else:
-            # Fallback: "Browse for file…" still selected (e.g. picker cancelled).
-            NSApp.activateIgnoringOtherApps_(True)
-            panel = NSOpenPanel.alloc().init()
-            panel.setCanChooseFiles_(True)
-            panel.setCanChooseDirectories_(False)
-            panel.setAllowedFileTypes_(["md"])
-            if panel.runModal() == NSModalResponseOK:
-                skill_path = panel.URLs()[0].path()
-            else:
-                return
+        # Fallback: "Browse for file…" still selected (e.g. picker cancelled).
+        skill_path = paths[sel] if sel < len(paths) else _pick_md_file()
+        if not skill_path:
+            return
 
         if not keyword:
             self._flash_add_hint("Enter a keyword first")
@@ -2100,16 +1823,9 @@ class FigWatch(NSObject):
         self._set_add_hint("Add your own skill")
 
     def _commit_trigger(self, keyword, skill_path):
-        if not keyword or not skill_path:
-            return
-        if not keyword.startswith("@"):
-            keyword = "@" + keyword
         tc = self._state.get("trigger_config", [])
         tc.append({"trigger": keyword, "skill": skill_path})
-        self._state["trigger_config"] = tc
-        self._save_trigger_config(tc)
-        for w in self._state.get("watchers", {}).values():
-            w.reload_trigger_config(tc)
+        self._apply_triggers(tc)
         threading.Thread(
             target=self._introspect_new_trigger, args=(skill_path,), daemon=True
         ).start()
@@ -2126,17 +1842,18 @@ class FigWatch(NSObject):
         tc = self._state.get("trigger_config", [])
         if idx < len(tc):
             tc.pop(idx)
-            self._state["trigger_config"] = tc
-            self._save_trigger_config(tc)
-            for w in self._state.get("watchers", {}).values():
-                w.reload_trigger_config(tc)
+            self._apply_triggers(tc)
             # Rebuild the panel body in place so the row disappears immediately.
             self._refresh_settings()
 
-    def _save_trigger_config(self, trigger_config):
+    def _apply_triggers(self, trigger_config):
+        """Save the trigger list and hot-reload it into every running watcher."""
+        self._state["trigger_config"] = trigger_config
         c = _load_config()
         c["triggers"] = trigger_config
         _save_config(c)
+        for w in self._state.get("watchers", {}).values():
+            w.reload_trigger_config(trigger_config)
 
     # ── Update progress HUD ────────────────────────────────────
     # System notifications (NSUserNotification) are dead on modern macOS, so the
@@ -2294,12 +2011,11 @@ class FigWatch(NSObject):
         self._update_result = latest
         self.showUpdateResult_(None)
 
+    @objc.typedSelector(b"v@:@")
     def doCheckUpdate_(self, sender):
-        try:
-            NSApp.abortModal()
-            NSApp.keyWindow().orderOut_(None)
-        except Exception:
-            pass
+        # Reached from the status menu and from Settings; close Settings so the
+        # result alert isn't stacked on it.
+        self.doSettingsCancel_(None)
         threading.Thread(target=self._run_update_check, daemon=True).start()
 
     def _run_update_check(self):
@@ -2381,7 +2097,7 @@ class FigWatch(NSObject):
             # means a genuinely stalled connection fails fast (→ error dialog +
             # manual-download fallback) instead of spinning indefinitely.
             req = urllib.request.Request(zip_url, headers={"User-Agent": "FigWatch"})
-            with urllib.request.urlopen(req, timeout=60, context=_SSL_CTX) as r, \
+            with urllib.request.urlopen(req, timeout=60, context=SSL_CTX) as r, \
                     open(zip_path, "wb") as f:
                 total = int(r.headers.get("Content-Length") or 0)
                 got = 0
@@ -2524,40 +2240,6 @@ class FigWatch(NSObject):
                 NSURL.URLWithString_(RELEASES_URL))
 
     # ── Power / Quit ───────────────────────────────────────────
-
-    @objc.typedSelector(b"v@:@")
-    def doRestart_(self, sender):
-        self._relaunch()
-
-    def _relaunch(self):
-        """Restart the app reliably.
-
-        `open <bundle>` while we're still running only activates the existing
-        instance — it won't start a new one — so the old code quit without ever
-        relaunching. Spawn a detached helper that waits for THIS process to exit,
-        then forces a fresh instance with `open -n`. Watchers are daemon threads
-        that die with the process, so skip the blocking graceful stop (it froze
-        the main thread up to ~5s per watched file).
-        """
-        bundle = NSBundle.mainBundle().bundlePath()
-        cache = os.path.join(HOME, "Library", "Caches", "FigWatch")
-        os.makedirs(cache, exist_ok=True)
-        script_path = os.path.join(cache, "relaunch.sh")
-        script = (
-            "#!/bin/bash\n"
-            f'PID={os.getpid()}\n'
-            'for i in $(seq 1 40); do kill -0 "$PID" 2>/dev/null || break; sleep 0.25; done\n'
-            f'open -n "{bundle}"\n'
-        )
-        with open(script_path, "w") as f:
-            f.write(script)
-        os.chmod(script_path, 0o755)
-        subprocess.Popen(
-            ["/bin/bash", script_path],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-        NSApp.terminate_(None)
 
     @objc.typedSelector(b"v@:@")
     def doQuit_(self, sender):
@@ -2722,17 +2404,11 @@ class FigWatch(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def doCheckDeps_(self, sender):
-        self._refresh_popover()
+        self._rebuild_popover()
 
     @objc.typedSelector(b"v@:@")
     def doContinueSetup_(self, sender):
-        self._state["force_onboarding"] = False
-        self._refresh_popover()
-
-    @objc.typedSelector(b"v@:@")
-    def doShowSetup_(self, sender):
-        self._state["force_onboarding"] = True
-        self.doOpenSetup_(sender)
+        self._rebuild_popover()
 
 
 # ── Entry ───────────────────────────────────────────────────────────

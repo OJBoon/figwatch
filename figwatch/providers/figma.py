@@ -30,7 +30,7 @@ def _ssl_context():
         return ssl.create_default_context()
 
 
-_SSL_CTX = _ssl_context()
+SSL_CTX = _ssl_context()
 
 
 class FigmaTokenExpired(Exception):
@@ -54,6 +54,15 @@ def urllib_quote(s):
     return urllib.parse.quote(s, safe='')
 
 
+def extract_file_key(s):
+    """File key from a Figma file URL, or a bare key; None if neither."""
+    m = re.search(r'figma\.com/(?:design|file|board)/([a-zA-Z0-9]+)', s)
+    if m:
+        return m.group(1)
+    s = s.strip()
+    return s if re.match(r'^[a-zA-Z0-9]{10,}$', s) else None
+
+
 def _temp_path(prefix, node_id, ext):
     """A stable /tmp path for a node's exported asset."""
     return os.path.join(tempfile.gettempdir(), f'{prefix}-{node_id.replace(":", "-")}.{ext}')
@@ -62,8 +71,10 @@ def _temp_path(prefix, node_id, ext):
 def _download_capped(url, out_path):
     """Download an image URL to out_path if it fits _MAX_IMAGE_BYTES; return the
     path, or None if oversized. Raises (e.g. socket.timeout) so callers decide."""
-    with urllib.request.urlopen(url, timeout=30, context=_SSL_CTX) as r:
-        img = r.read()
+    with urllib.request.urlopen(url, timeout=30, context=SSL_CTX) as r:
+        # Read one byte past the cap: enough to know it's too big without
+        # buffering an oversized render in full.
+        img = r.read(_MAX_IMAGE_BYTES + 1)
     if len(img) > _MAX_IMAGE_BYTES:
         return None
     with open(out_path, 'wb') as f:
@@ -120,9 +131,9 @@ class FigmaRateLimiter:
             raise ValueError(f'Unknown plan/seat combination: {key!r}')
         tier1_rpm, tier2_rpm, tier3_rpm = _RATE_LIMITS[key]
         self._buckets = {
-            TIER_1: TokenBucket(capacity=max(tier1_rpm, 1), refill_per_second=tier1_rpm / 60),
-            TIER_2: TokenBucket(capacity=tier2_rpm, refill_per_second=tier2_rpm / 60),
-            TIER_3: TokenBucket(capacity=tier3_rpm, refill_per_second=tier3_rpm / 60),
+            TIER_1: TokenBucket.per_minute(tier1_rpm),
+            TIER_2: TokenBucket.per_minute(tier2_rpm),
+            TIER_3: TokenBucket.per_minute(tier3_rpm),
         }
 
     def acquire(self, path: str) -> None:
@@ -131,16 +142,8 @@ class FigmaRateLimiter:
         self._buckets[tier].acquire()
 
     def backoff(self, path: str, retry_after: float) -> None:
-        """Drain the tier bucket after a 429, forcing other threads to wait.
-
-        Sets the bucket's token count to negative so threads must wait for
-        refill_rate * retry_after seconds before proceeding.
-        """
-        tier = endpoint_tier(path)
-        bucket = self._buckets[tier]
-        with bucket._lock:
-            # Drain tokens so subsequent acquires block for ~retry_after seconds
-            bucket._tokens = -(bucket._refill_rate * retry_after)
+        """Drain the tier bucket after a 429 so other threads wait ~retry_after seconds."""
+        self._buckets[endpoint_tier(path)].drain(retry_after)
 
 
 # ── REST helpers ──────────────────────────────────────────────────────
@@ -160,7 +163,7 @@ def _check_token_expired(e):
         ) from e
 
 
-def _make_request(url, pat, method='GET', body=None):
+def _make_request(url, pat, method='GET', body=None, timeout=15):
     headers = {'X-Figma-Token': pat}
     data = None
     if body is not None:
@@ -168,7 +171,7 @@ def _make_request(url, pat, method='GET', body=None):
         data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=15, context=_SSL_CTX) as r:
+        with urllib.request.urlopen(req, timeout=timeout, context=SSL_CTX) as r:
             if method == 'DELETE':
                 return None
             return json.loads(r.read())
@@ -225,18 +228,14 @@ def figma_get_retry(path, pat, retries=1, timeout=15, limiter=None):
             limiter.acquire(path)
         for attempt in range(retries + 1):
             try:
-                req = urllib.request.Request(
-                    f'{FIGMA_API}{path}',
-                    headers={'X-Figma-Token': pat},
-                )
-                with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as r:
-                    span.set_attribute('figma.status_code', r.status)
-                    span.set_attribute('figma.retry_count', attempt)
-                    return json.loads(r.read())
+                data = _make_request(f'{FIGMA_API}{path}', pat, timeout=timeout)
+                span.set_attribute('figma.status_code', 200)
+                span.set_attribute('figma.retry_count', attempt)
+                return data
             except urllib.error.HTTPError as e:
+                # _make_request already turned a 403 token-expiry into FigmaTokenExpired.
                 span.set_attribute('figma.status_code', e.code)
                 span.set_attribute('figma.retry_count', attempt)
-                _check_token_expired(e)
                 if e.code == 429 and attempt < retries:
                     try:
                         wait = int(e.headers.get('Retry-After', '0') or 0)
@@ -254,6 +253,8 @@ def figma_get_retry(path, pat, retries=1, timeout=15, limiter=None):
                 logger.warning('figma API error',
                                extra={'path': path, 'status': e.code})
                 return None
+            except FigmaTokenExpired:
+                raise
             except (socket.timeout, TimeoutError):
                 span.set_attribute('figma.retry_count', attempt)
                 span.record_exception(socket.timeout('timeout'))
@@ -486,6 +487,33 @@ def order_screens(screens, tree_data=None):
     return _reading_order(screens)
 
 
+class _RenderTimedOut(Exception):
+    """/images timed out twice: Figma is stuck on this render."""
+
+
+def _render_images(file_key, ids_param, pat, limiter, *, scale, fmt, timeout, log_extra):
+    """One /images render → {node_id: url}, or None if Figma refused it.
+
+    Figma renders large frames server-side and caches the result, so a cold render
+    can exceed one request's timeout while the follow-up hits the warm cache and
+    returns fast. A timeout is retried once; a second one raises _RenderTimedOut.
+    """
+    path = f'/images/{file_key}?ids={ids_param}&scale={scale}&format={fmt}'
+    for retry in range(2):
+        try:
+            data = figma_get_retry(path, pat, timeout=timeout, limiter=limiter)
+        except (socket.timeout, TimeoutError):
+            if retry == 0:
+                logger.info('render timed out — retrying (warm cache)', extra=log_extra)
+                continue
+            logger.warning('render timed out after retry', extra=log_extra)
+            raise _RenderTimedOut() from None
+        if not data or data.get('err') or data.get('status') == 400:
+            return None
+        return data.get('images') or {}
+    return None
+
+
 def fetch_screenshots_batch(file_key, node_ids, pat, limiter=None, *, scale=1, fmt='png'):
     """Render multiple nodes in ONE /images call → {node_id: file_path}.
 
@@ -500,27 +528,15 @@ def fetch_screenshots_batch(file_key, node_ids, pat, limiter=None, *, scale=1, f
         'figma.file_key': file_key, 'figma.count': len(node_ids),
     }):
         enc_ids = ','.join(urllib_quote(n) for n in node_ids)
-        images = {}
-        for retry in range(2):
-            try:
-                data = figma_get_retry(
-                    f'/images/{file_key}?ids={enc_ids}&scale={scale}&format={fmt}',
-                    pat, timeout=60, limiter=limiter,
-                )
-                if not data or data.get('err') or data.get('status') == 400:
-                    return {}
-                images = data.get('images') or {}
-                break
-            except (socket.timeout, TimeoutError):
-                if retry == 0:
-                    logger.info('journey render timed out — retrying (warm cache)',
-                                extra={'file_key': file_key, 'count': len(node_ids)})
-                    continue
-                logger.warning('journey render timed out after retry',
-                               extra={'file_key': file_key})
-                return {}
-            except Exception:
-                return {}
+        try:
+            images = _render_images(
+                file_key, enc_ids, pat, limiter, scale=scale, fmt=fmt, timeout=60,
+                log_extra={'file_key': file_key, 'count': len(node_ids)},
+            )
+        except Exception:
+            return {}
+        if not images:
+            return {}
         out = {}
         for nid in node_ids:
             url = images.get(nid)
@@ -535,7 +551,7 @@ def fetch_screenshots_batch(file_key, node_ids, pat, limiter=None, *, scale=1, f
         return out
 
 
-def fetch_journey_screenshots(file_key, node_id, tree_data, pat, limiter=None,
+def fetch_journey_screenshots(file_key, tree_data, pat, limiter=None,
                               *, max_screens=JOURNEY_MAX_SCREENS):
     """Enumerate → order → batch-render a board's child screens.
 
@@ -579,47 +595,24 @@ def fetch_screenshot(file_key, node_id, pat, limiter=None):
         attempts = [('png', 1), ('png', 0.5), ('jpg', 1), ('jpg', 0.5), ('jpg', 0.25)]
 
         for fmt, scale in attempts:
-            out_path = _temp_path('figwatch-screenshot', node_id, fmt)
-            # Figma renders large frames server-side and caches the result, so a
-            # cold render of a big multi-screen frame can exceed one request's
-            # timeout while the follow-up hits the warm cache and returns fast.
-            # Retry a timeout once; if even the warm retry times out, Figma is
-            # genuinely stuck and smaller scales (which render slower, not faster)
-            # won't help — abort the chain. Non-timeout misses (400 / too big)
-            # still fall through to the next, smaller scale.
-            for retry in range(2):
-                try:
-                    data = figma_get_retry(
-                        f'/images/{file_key}?ids={enc_id}&scale={scale}&format={fmt}',
-                        pat,
-                        timeout=30,
-                        limiter=limiter,
-                    )
-                    if not data or data.get('err') or data.get('status') == 400:
-                        break
-                    url = (data.get('images') or {}).get(node_id)
-                    if not url:
-                        break
-                    path = _download_capped(url, out_path)
+            # If even the warm retry times out, Figma is genuinely stuck and smaller
+            # scales (which render slower, not faster) won't help — abort the chain.
+            # Non-timeout misses (400 / too big) fall through to the next scale.
+            try:
+                images = _render_images(
+                    file_key, enc_id, pat, limiter, scale=scale, fmt=fmt, timeout=30,
+                    log_extra={'file_key': file_key, 'node_id': node_id,
+                               'format': fmt, 'scale': scale},
+                )
+                url = (images or {}).get(node_id)
+                if url:
+                    path = _download_capped(url, _temp_path('figwatch-screenshot', node_id, fmt))
                     if path:
                         return path
-                    break  # too big at this scale → try the next, smaller one
-                except (socket.timeout, TimeoutError):
-                    if retry == 0:
-                        logger.info(
-                            'screenshot render timed out — retrying (warm cache)',
-                            extra={'file_key': file_key, 'node_id': node_id,
-                                   'format': fmt, 'scale': scale},
-                        )
-                        continue
-                    logger.warning(
-                        'screenshot render timed out after retry — aborting fallback chain',
-                        extra={'file_key': file_key, 'node_id': node_id,
-                               'format': fmt, 'scale': scale},
-                    )
-                    return None
-                except Exception:
-                    break
+            except _RenderTimedOut:
+                return None
+            except Exception:
+                pass
         return None
 
 
@@ -668,6 +661,17 @@ def fetch_node_name(file_key, node_id, pat, limiter=None):
         return None
 
 
+# Data points that are a single REST call each ({fk} = file key, {node} = node id).
+_DATA_ENDPOINTS = {
+    'dev_resources': '/files/{fk}/dev_resources?node_ids={node}',
+    'variables_local': '/files/{fk}/variables/local',
+    'variables_published': '/files/{fk}/variables/published',
+    'styles': '/files/{fk}/styles',
+    'components': '/files/{fk}/components',
+    'file_structure': '/files/{fk}?depth=2',
+}
+
+
 def fetch_figma_data(required_data, file_key, node_id, pat, limiter=None):
     """Fetch only the declared data points from Figma API in parallel.
 
@@ -694,27 +698,12 @@ def fetch_figma_data(required_data, file_key, node_id, pat, limiter=None):
                 futures['_tree'] = pool.submit(
                     fetch_node_tree, file_key, node_id, pat, limiter=limiter,
                 )
-            def _submit(endpoint):
-                return pool.submit(figma_get_retry, endpoint, pat, limiter=limiter)
-
-            if 'dev_resources' in required_data:
-                futures['dev_resources'] = _submit(
-                    f'/files/{file_key}/dev_resources?node_ids={enc_id}',
-                )
-            if 'variables_local' in required_data:
-                futures['variables_local'] = _submit(
-                    f'/files/{file_key}/variables/local',
-                )
-            if 'variables_published' in required_data:
-                futures['variables_published'] = _submit(
-                    f'/files/{file_key}/variables/published',
-                )
-            if 'styles' in required_data:
-                futures['styles'] = _submit(f'/files/{file_key}/styles')
-            if 'components' in required_data:
-                futures['components'] = _submit(f'/files/{file_key}/components')
-            if 'file_structure' in required_data:
-                futures['file_structure'] = _submit(f'/files/{file_key}?depth=2')
+            for key, endpoint in _DATA_ENDPOINTS.items():
+                if key in required_data:
+                    futures[key] = pool.submit(
+                        figma_get_retry, endpoint.format(fk=file_key, node=enc_id),
+                        pat, limiter=limiter,
+                    )
 
             for key, future in futures.items():
                 try:
@@ -743,10 +732,16 @@ def fetch_figma_data(required_data, file_key, node_id, pat, limiter=None):
 class FigmaCommentRepository:
     """CommentRepository implementation backed by the Figma REST API."""
 
-    def __init__(self, pat: str):
+    def __init__(self, pat: str, limiter: 'FigmaRateLimiter | None' = None):
         self._pat = pat
+        self._limiter = limiter
+
+    def _acquire(self, path):
+        if self._limiter:
+            self._limiter.acquire(path)
 
     def post_reply(self, file_key: str, parent_comment_id: str, message: str):
+        self._acquire(f'/files/{file_key}/comments')
         resp = figma_post(f'/files/{file_key}/comments', {
             'message': message,
             'comment_id': parent_comment_id,
@@ -755,6 +750,7 @@ class FigmaCommentRepository:
 
     def delete_comment(self, file_key: str, comment_id: str) -> None:
         with contextlib.suppress(Exception):
+            self._acquire(f'/files/{file_key}/comments')
             figma_delete(f'/files/{file_key}/comments/{comment_id}', self._pat)
 
     def comment_exists(self, file_key: str, comment_id: str) -> bool:
@@ -768,6 +764,7 @@ class FigmaCommentRepository:
         return False
 
     def fetch_comments(self, file_key: str) -> list:
+        self._acquire(f'/files/{file_key}/comments')
         data = figma_get(f'/files/{file_key}/comments', self._pat)
         return (data or {}).get('comments', [])
 
@@ -782,10 +779,8 @@ class FigmaDesignDataRepository:
     def fetch(self, required_data: list, file_key: str, node_id: str) -> tuple:
         return fetch_figma_data(required_data, file_key, node_id, self._pat, limiter=self._limiter)
 
-    def fetch_journey_screenshots(self, file_key: str, node_id: str, tree_data: dict) -> list:
-        return fetch_journey_screenshots(
-            file_key, node_id, tree_data, self._pat, limiter=self._limiter,
-        )
+    def fetch_journey_screenshots(self, file_key: str, tree_data: dict) -> list:
+        return fetch_journey_screenshots(file_key, tree_data, self._pat, limiter=self._limiter)
 
     def fetch_node_name(self, file_key: str, node_id: str) -> 'str | None':
         return fetch_node_name(file_key, node_id, self._pat, limiter=self._limiter)
