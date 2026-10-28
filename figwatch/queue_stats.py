@@ -2,10 +2,10 @@
 FIFO mirror used by the ack updater to compute per-audit queue positions.
 """
 
-import contextlib
 import queue
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -48,17 +48,15 @@ class InstrumentedQueue:
         self._queue: queue.Queue = queue.Queue()
         self._stats_lock = threading.Lock()
         self._stats = QueueStats()
-        # FIFO mirror keyed by audit_id for O(1) find and O(n) position lookup.
-        # Duplicate audit_ids are not supported — audit_ids are UUID-derived
-        # and should always be unique per run.
-        self._ordered_ids: list[str] = []
-        self._items_by_id: dict = {}
+        # FIFO mirror keyed by audit_id: O(1) find and removal, insertion order
+        # gives positions. Duplicate audit_ids are not supported — audit_ids are
+        # UUID-derived and should always be unique per run.
+        self._items_by_id: OrderedDict = OrderedDict()
 
     def put(self, queued: Any) -> None:
         with self._stats_lock:
             self._stats.enqueued += 1
             if isinstance(queued, QueuedItem):
-                self._ordered_ids.append(queued.audit_id)
                 self._items_by_id[queued.audit_id] = queued
         self._queue.put(queued)
 
@@ -70,8 +68,6 @@ class InstrumentedQueue:
         with self._stats_lock:
             self._stats.dequeued += 1
             if isinstance(queued, QueuedItem):
-                with contextlib.suppress(ValueError):
-                    self._ordered_ids.remove(queued.audit_id)
                 self._items_by_id.pop(queued.audit_id, None)
         if isinstance(queued, QueuedItem):
             queued.waited_seconds = time.monotonic() - queued.enqueued_at
@@ -91,10 +87,6 @@ class InstrumentedQueue:
     def depth(self) -> int:
         return self.stats().depth
 
-    def qsize(self) -> int:
-        """Pass-through to underlying queue.Queue.qsize() — approximate."""
-        return self._queue.qsize()
-
     def snapshot_order(self) -> list[QueuedItem]:
         """Return a FIFO snapshot of currently queued items.
 
@@ -102,11 +94,7 @@ class InstrumentedQueue:
         under the stats lock.
         """
         with self._stats_lock:
-            return [
-                self._items_by_id[aid]
-                for aid in self._ordered_ids
-                if aid in self._items_by_id
-            ]
+            return list(self._items_by_id.values())
 
     def find(self, audit_id: str) -> Optional[QueuedItem]:
         """Return the QueuedItem for a given audit_id if still queued."""

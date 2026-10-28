@@ -43,20 +43,29 @@ if _gemini_override:
     for _k in GEMINI_MODELS:
         GEMINI_MODELS[_k] = _gemini_override
 
-# Shared rate limiters, lazy-initialized from env vars.
-# Set FIGWATCH_{PROVIDER}_RPM=0 to disable rate limiting for that provider.
+# Shared rate limiters. The server injects its validated FIGWATCH_{PROVIDER}_RPM
+# values via configure_limiters() at startup; other entry points (macOS app, CLI)
+# fall back to reading the env var lazily. RPM=0 disables limiting.
 _UNSET = object()
 _gemini_limiter: Optional[TokenBucket] = _UNSET
 _anthropic_limiter: Optional[TokenBucket] = _UNSET
 _limiter_lock = threading.Lock()
 
 
+def _limiter_for(rpm: int) -> Optional[TokenBucket]:
+    return TokenBucket.per_minute(rpm) if rpm > 0 else None
+
+
 def _build_limiter(env_var: str, default_rpm: int) -> Optional[TokenBucket]:
-    rpm = int(os.environ.get(env_var, str(default_rpm)))
-    if rpm <= 0:
-        return None
-    # Capacity equals rpm so the bucket can absorb a one-minute burst.
-    return TokenBucket(capacity=rpm, refill_per_second=rpm / 60)
+    return _limiter_for(int(os.environ.get(env_var, str(default_rpm))))
+
+
+def configure_limiters(*, gemini_rpm: int, anthropic_rpm: int) -> None:
+    """Install limiters built from already-validated RPM values."""
+    global _gemini_limiter, _anthropic_limiter
+    with _limiter_lock:
+        _gemini_limiter = _limiter_for(gemini_rpm)
+        _anthropic_limiter = _limiter_for(anthropic_rpm)
 
 
 def get_gemini_limiter() -> Optional[TokenBucket]:
@@ -141,6 +150,7 @@ def as_image_list(image_path: 'str | list[str] | None') -> list:
 
 def make_provider(
     model: str, claude_path: str, *, skill_dir: str = '', gateway: 'dict | None' = None,
+    gateway_env: 'dict | None' = None,
 ) -> AIProvider:
     """Return the appropriate AI provider for the given model and claude_path.
 
@@ -148,7 +158,9 @@ def make_provider(
     Claude-CLI gateway (e.g. a cc-switch company profile) is active, else None.
     When truthy on the `api` path, the provider is built against the gateway via
     the Anthropic Messages API (no CLI); it also selects the CLI gateway mode.
-    The Docker server passes gateway=None, keeping its api-path behavior intact.
+    `gateway_env` is the env `gateway` was resolved from, so the gateway sources
+    aren't walked a second time. Note that the server resolves the gateway the
+    same way, so a container with ANTHROPIC_BASE_URL + a key runs in gateway mode.
     """
     from figwatch.providers.ai.anthropic import AnthropicProvider
     from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
@@ -164,11 +176,10 @@ def make_provider(
     if claude_path == 'api':
         # Gateway active (e.g. a cc-switch company profile or an Option-B manual
         # config): drive the gateway through the Anthropic Messages API directly
-        # — no CLI. Gated on `gateway` being truthy so the Docker server path
-        # (gateway=None) is byte-identical to the original behavior below.
+        # — no CLI.
         if gateway:
             from figwatch.gateway import gateway_api_config
-            cfg = gateway_api_config()
+            cfg = gateway_api_config(gateway_env)
             if cfg:
                 return AnthropicProvider(
                     cfg.get('model') or CLAUDE_API_MODELS.get(model, model),

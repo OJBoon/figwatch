@@ -7,8 +7,9 @@ import time
 
 import pytest
 
-from figwatch.ack_updater import AckUpdater, PendingUpdate, _position_message
+from figwatch.ack_updater import AckUpdater, PendingUpdate
 from figwatch.domain import Audit, Comment, Trigger, TriggerMatch
+from figwatch.messages import queue_message
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
 
 # ── Helpers ───────────────────────────────────────────────────────────
@@ -64,30 +65,30 @@ def repo():
     return FakeCommentRepo()
 
 
-# ── _position_message formatting ─────────────────────────────────────
+# ── queue_message formatting ──────────────────────────────────────
 
 def test_position_message_zero():
-    msg = _position_message('@ux', 0, '\ntrace id: abc12345')
+    msg = queue_message('@ux', 0, '\ntrace id: abc12345')
     assert 'starting shortly' in msg
     assert 'ux' in msg
     assert 'trace id: abc12345' in msg
 
 
 def test_position_message_one():
-    assert '1 ahead of you' in _position_message('@ux', 1, '\ntrace id: abc12345')
+    assert '1 ahead of you' in queue_message('@ux', 1, '\ntrace id: abc12345')
 
 
 def test_position_message_many():
-    assert '5 ahead of you' in _position_message('@tone', 5, '\ntrace id: abc12345')
-    assert 'tone' in _position_message('@tone', 5, '\ntrace id: abc12345')
+    assert '5 ahead of you' in queue_message('@tone', 5, '\ntrace id: abc12345')
+    assert 'tone' in queue_message('@tone', 5, '\ntrace id: abc12345')
 
 
 def test_position_message_strips_trigger_prefix():
-    assert '@ux' not in _position_message('@ux', 2, '\ntrace id: abc12345')
+    assert '@ux' not in queue_message('@ux', 2, '\ntrace id: abc12345')
 
 
 def test_position_message_empty_trace():
-    msg = _position_message('@ux', 0, '')
+    msg = queue_message('@ux', 0, '')
     assert 'trace id' not in msg
     assert 'starting shortly' in msg
 

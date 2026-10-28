@@ -208,6 +208,9 @@ class _FakeAnthropicClient:
 
 def _patch_anthropic(monkeypatch):
     import anthropic
+
+    from figwatch.providers.ai import anthropic as anthropic_provider
+    anthropic_provider._client.cache_clear()
     _FakeAnthropicClient.last_kwargs = None
     monkeypatch.setattr(anthropic, "Anthropic", _FakeAnthropicClient)
 

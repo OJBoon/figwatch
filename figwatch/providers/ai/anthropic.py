@@ -1,8 +1,26 @@
 """Anthropic Messages API provider."""
 
 import base64
+import functools
 
 from figwatch.providers.ai import as_image_list, media_type_for, with_retry
+
+
+@functools.lru_cache(maxsize=8)
+def _client(base_url, api_key, auth_token):
+    """One SDK client per credential set, so its connection pool is reused."""
+    import anthropic
+
+    # A custom base_url + bearer token targets an Anthropic-compatible
+    # gateway (e.g. a cc-switch company profile); otherwise use the API key.
+    kwargs: dict = {}
+    if base_url:
+        kwargs['base_url'] = base_url
+    if auth_token:
+        kwargs['auth_token'] = auth_token
+    else:
+        kwargs['api_key'] = api_key
+    return anthropic.Anthropic(**kwargs)
 
 
 def _image_block(path):
@@ -30,7 +48,7 @@ class AnthropicProvider:
 
     def call(self, prompt: str, image_path: 'str | list[str] | None') -> str:
         try:
-            import anthropic
+            import anthropic  # noqa: F401
         except ImportError as err:
             raise RuntimeError(
                 'anthropic package not installed — run: pip install anthropic',
@@ -39,16 +57,7 @@ class AnthropicProvider:
         if self._rate_limiter:
             self._rate_limiter.acquire()
 
-        # A custom base_url + bearer token targets an Anthropic-compatible
-        # gateway (e.g. a cc-switch company profile); otherwise use the API key.
-        client_kwargs: dict = {}
-        if self._base_url:
-            client_kwargs['base_url'] = self._base_url
-        if self._auth_token:
-            client_kwargs['auth_token'] = self._auth_token
-        else:
-            client_kwargs['api_key'] = self._api_key
-        client = anthropic.Anthropic(**client_kwargs)
+        client = _client(self._base_url, self._api_key, self._auth_token)
 
         # One path, a list of paths (journey review), or None. A single str is a
         # 1-element list, so the single-image request is byte-identical.

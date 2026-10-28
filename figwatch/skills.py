@@ -11,13 +11,13 @@ import tempfile
 import time
 from pathlib import Path
 
-from figwatch.gateway import gateway_api_config, gateway_info
-from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS, make_provider
-from figwatch.providers.ai.anthropic import AnthropicProvider
-from figwatch.providers.ai.claude_cli import ClaudeCLIProvider
-from figwatch.providers.ai.gemini import GeminiProvider
+from figwatch.config_store import config_dir, load_json, save_json
+from figwatch.gateway import effective_gateway_env, gateway_info
+from figwatch.messages import SIGN_OFF
+from figwatch.providers.ai import make_provider
 from figwatch.providers.figma import is_journey_frame
 from figwatch.tracing import format_trace_line, get_tracer
+from figwatch.trigger_config import skill_file_in, skill_label
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,14 @@ def _extract_bundled_skills():
 
 _RESOLVED_BUNDLED_SKILLS = _extract_bundled_skills()
 
+
+class MissingDesignData(RuntimeError):
+    """Figma didn't return data the skill needs; `missing` names which (e.g. 'screenshot')."""
+
+    def __init__(self, missing):
+        self.missing = list(missing)
+        super().__init__(f'Failed to fetch required data: {", ".join(self.missing)}')
+
 # Node tree is embedded inline for API providers — cap to avoid token limit blowout.
 _NODE_TREE_CHAR_LIMIT = 40_000
 # Copy reviews (tone) need to see ALL the text on a page, not the first N nodes —
@@ -78,22 +86,15 @@ _TEXT_NODES_CHAR_LIMIT = 15_000
 # ── Skill cache ──────────────────────────────────────────────────────
 
 def _skill_cache_path():
-    return _HOME / '.figwatch' / 'skill-cache.json'
+    return os.path.join(config_dir(), 'skill-cache.json')
 
 
 def _load_skill_cache():
-    try:
-        with open(_skill_cache_path(), encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    return load_json(_skill_cache_path(), {})
 
 
 def _save_skill_cache(cache):
-    cache_path = _skill_cache_path()
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(cache_path, 'w', encoding='utf-8') as f:
-        json.dump(cache, f, indent=2)
+    save_json(_skill_cache_path(), cache)
 
 
 # ── Skill discovery ──────────────────────────────────────────────────
@@ -109,7 +110,7 @@ def find_skills():
     search_dirs = [
         (_HOME / '.claude' / 'skills', False),
         (Path(os.getcwd()) / '.claude' / 'skills', False),
-        (_HOME / '.figwatch' / 'skills', False),
+        (Path(config_dir()) / 'skills', False),
         (_RESOLVED_BUNDLED_SKILLS, True),
     ]
 
@@ -118,18 +119,10 @@ def find_skills():
             continue
         for entry in os.listdir(base_dir):
             skill_dir = base_dir / entry
-            if not skill_dir.is_dir():
-                continue
-            for fname in ['skill.md', 'SKILL.md']:
-                skill_path = skill_dir / fname
-                if skill_path.exists() and str(skill_path) not in seen:
-                    seen.add(str(skill_path))
-                    skills.append({
-                        'path': str(skill_path),
-                        'name': entry,
-                        'builtin': builtin,
-                    })
-                    break
+            skill_path = skill_file_in(skill_dir) if skill_dir.is_dir() else None
+            if skill_path and str(skill_path) not in seen:
+                seen.add(str(skill_path))
+                skills.append({'path': str(skill_path), 'name': entry, 'builtin': builtin})
 
     return skills
 
@@ -137,10 +130,9 @@ def find_skills():
 def _resolve_builtin_skill(skill_ref):
     name = skill_ref.replace('builtin:', '')
     for base in [_RESOLVED_BUNDLED_SKILLS, _HOME / '.claude' / 'skills']:
-        for fname in ['skill.md', 'SKILL.md']:
-            path = base / name / fname
-            if path.exists():
-                return str(path)
+        path = skill_file_in(base / name)
+        if path:
+            return str(path)
     return None
 
 
@@ -214,31 +206,11 @@ def introspect_skill(skill_path, claude_path, model=None):
 
     prompt = _INTROSPECTION_PROMPT + skill_content
 
-    # Always use the cheapest model for introspection.
-    if (model or '').startswith('gemini'):
-        provider = GeminiProvider(
-            GEMINI_MODELS['gemini-flash'], os.environ.get('GOOGLE_API_KEY', ''),
-        )
-    elif claude_path == 'api':
-        # In gateway mode, introspection must go through the gateway too — the
-        # gateway typically rejects public model aliases and a Finder-launched
-        # .app carries no ANTHROPIC_API_KEY, so a bare public-API call would
-        # fail. When no gateway is active (e.g. the Docker server, which sets
-        # ANTHROPIC_API_KEY but no base URL) this is byte-identical to before.
-        cfg = gateway_api_config()
-        if cfg:
-            provider = AnthropicProvider(
-                cfg.get('model') or CLAUDE_API_MODELS['haiku'],
-                cfg.get('api_key', ''),
-                base_url=cfg['base_url'],
-                auth_token=cfg.get('auth_token'),
-            )
-        else:
-            provider = AnthropicProvider(
-                CLAUDE_API_MODELS['haiku'], os.environ.get('ANTHROPIC_API_KEY', ''),
-            )
-    else:
-        provider = ClaudeCLIProvider('haiku', claude_path, gateway=gateway_info())
+    # Always use the cheapest model for introspection, through the same factory
+    # (and rate limiters) as audits — including the gateway when one is active.
+    env = effective_gateway_env()
+    cheap = 'gemini-flash' if (model or '').startswith('gemini') else 'haiku'
+    provider = make_provider(cheap, claude_path, gateway=gateway_info(env), gateway_env=env)
 
     try:
         stdout = provider.call(prompt, None)
@@ -277,6 +249,8 @@ def _prompt_preamble(audit, config):
     """The reviewer-context + reply-language bits shared by both prompt builders."""
     extra = audit.trigger_match.extra
     extra_ctx = f'\nAdditional context from reviewer: "{extra}"' if extra else ''
+    if config and config.locale:
+        extra_ctx = f'\n- Locale: {config.locale}{extra_ctx}'
     lang_instruction = (
         '\nIMPORTANT: Write your entire reply in Simplified Chinese.'
         if (config and config.reply_lang == 'cn') else ''
@@ -311,7 +285,8 @@ def _data_section(data, tree_data, *, inline_files):
 
     if data.get('node_tree'):
         if inline_files and tree_data:
-            tree_json = json.dumps(tree_data, indent=2)
+            # Compact: indentation would spend the character budget on whitespace.
+            tree_json = json.dumps(tree_data, separators=(',', ':'))
             if len(tree_json) > _NODE_TREE_CHAR_LIMIT:
                 tree_json = tree_json[:_NODE_TREE_CHAR_LIMIT] + '\n... (truncated)'
             data_desc.append(f'Node tree:\n{tree_json}')
@@ -338,7 +313,7 @@ def _data_section(data, tree_data, *, inline_files):
     for key in ['dev_resources', 'variables_local', 'variables_published',
                 'styles', 'components', 'file_structure', 'prototype_flows', 'annotations']:
         if data.get(key):
-            data_desc.append(f'{key}: {json.dumps(data[key], indent=2)[:5000]}')
+            data_desc.append(f'{key}: {json.dumps(data[key], separators=(",", ":"))[:5000]}')
 
     return '\n\n'.join(data_desc) if data_desc else 'No data available.'
 
@@ -536,9 +511,7 @@ def execute_skill(audit, *, config, design_repo):
             # Multi-screen board: screenshot each child screen; do NOT attempt the
             # whole-board render (it can't render as one image). If capture fails,
             # 'screenshot' stays absent → the missing-data check reports it.
-            journey_screens = design_repo.fetch_journey_screenshots(
-                file_key, node_id, tree_data,
-            ) or None
+            journey_screens = design_repo.fetch_journey_screenshots(file_key, tree_data) or None
         else:
             shot_data, _ = design_repo.fetch(['screenshot'], file_key, node_id)
             data['screenshot'] = shot_data.get('screenshot')
@@ -549,7 +522,7 @@ def execute_skill(audit, *, config, design_repo):
     if journey_screens:
         missing = [k for k in missing if k != 'screenshot']  # child screens satisfy it
     if missing:
-        raise RuntimeError(f'Failed to fetch required data: {", ".join(missing)}')
+        raise MissingDesignData(missing)
 
     with open(skill_path, encoding='utf-8') as f:
         skill_content = f.read()
@@ -583,7 +556,10 @@ def execute_skill(audit, *, config, design_repo):
             except Exception:
                 frame_name = None
     frame_name = frame_name or 'Unknown frame'
-    provider = make_provider(model, claude_path, skill_dir=skill_dir, gateway=gateway_info())
+    env = effective_gateway_env()
+    provider = make_provider(
+        model, claude_path, skill_dir=skill_dir, gateway=gateway_info(env), gateway_env=env,
+    )
     logger.debug(
         'calling ai provider',
         extra={'provider': provider.model_id, 'frame': frame_name},
@@ -622,24 +598,16 @@ def execute_skill(audit, *, config, design_repo):
             'skill.journey': bool(journey_screens),
             'ai.provider': type(provider).__name__,
             'ai.model': provider.model_id,
-        }) as span:
+        }):
             reply = provider.call(prompt, image_arg)
-            if hasattr(provider, 'last_token_usage'):
-                usage = provider.last_token_usage
-                if usage:
-                    span.set_attribute('ai.tokens', usage)
         # Sign-off includes the skill that ran and how long the audit took.
-        skill_label = (
-            skill_ref.split('builtin:', 1)[1] if skill_ref.startswith('builtin:')
-            else os.path.splitext(os.path.basename(skill_ref))[0]
-        )
         elapsed = time.monotonic() - started
         duration = (
             f'{elapsed:.0f}s' if elapsed < 60
             else f'{int(elapsed) // 60}m{int(elapsed) % 60:02d}s'
         )
         signoff = (
-            f'\u2014 FigWatch \u00b7 {skill_label} skill \u00b7 {duration} '
+            f'{SIGN_OFF} \u00b7 {skill_label(skill_ref)} skill \u00b7 {duration} '
             f'\u00b7 {provider.model_id}{format_trace_line()}'
         )
         return f'{header}\n\n{reply}\n\n{signoff}'

@@ -258,7 +258,7 @@ class _FakeRepo:
             data["screenshot"] = self._shot
         return data, (self._tree if "node_tree" in req else None)
 
-    def fetch_journey_screenshots(self, file_key, node_id, tree_data):
+    def fetch_journey_screenshots(self, file_key, tree_data):
         return list(self._journey)
 
     def fetch_node_name(self, file_key, node_id):

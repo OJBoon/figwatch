@@ -232,7 +232,7 @@ def test_fetch_screenshots_batch_maps_ids_and_skips_null(monkeypatch, tmp_path):
 
     class _Resp:
         def __init__(self, data): self._d = data
-        def read(self): return self._d
+        def read(self, n=-1): return self._d if n < 0 else self._d[:n]
         def __enter__(self): return self
         def __exit__(self, *a): return False
 
@@ -249,7 +249,7 @@ def test_fetch_screenshots_batch_skips_oversized(monkeypatch, tmp_path):
 
     class _Resp:
         def __init__(self, data): self._d = data
-        def read(self): return self._d
+        def read(self, n=-1): return self._d if n < 0 else self._d[:n]
         def __enter__(self): return self
         def __exit__(self, *a): return False
 

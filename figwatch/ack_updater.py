@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from figwatch.log_context import reset_audit_context, set_audit_context
+from figwatch.messages import queue_message
 from figwatch.ports import CommentRepository
 from figwatch.providers.ai.rate_limit import TokenBucket
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
@@ -35,16 +36,6 @@ class PendingUpdate:
     audit_id: str
     new_position: int
     queued: QueuedItem  # mutable — we write new ack_id back here after posting
-
-
-def _position_message(trigger: str, position: int, trace_line: str) -> str:
-    """Build the ack body for a given position. position=0 means 'starting shortly'."""
-    name = trigger.lstrip('@')
-    if position <= 0:
-        return f'\u23f3 {name} audit queued \u2014 starting shortly\u2026{trace_line}'
-    if position == 1:
-        return f'\u23f3 {name} audit queued (1 ahead of you)\u2026{trace_line}'
-    return f'\u23f3 {name} audit queued ({position} ahead of you)\u2026{trace_line}'
 
 
 class AckUpdater:
@@ -75,12 +66,9 @@ class AckUpdater:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
-        self._limiter: Optional[TokenBucket] = None
-        if rate_per_minute > 0:
-            self._limiter = TokenBucket(
-                capacity=rate_per_minute,
-                refill_per_second=rate_per_minute / 60,
-            )
+        self._limiter: Optional[TokenBucket] = (
+            TokenBucket.per_minute(rate_per_minute) if rate_per_minute > 0 else None
+        )
 
     # ── Public API ─────────────────────────────────────────────────────
 
@@ -205,7 +193,7 @@ class AckUpdater:
         )
         try:
             trace_line = format_trace_line(queued.trace_context)
-            new_message = _position_message(trigger_kw, update.new_position, trace_line)
+            new_message = queue_message(trigger_kw, update.new_position, trace_line)
             old_ack_id = queued.ack_id
 
             # Delete old ack, post new one

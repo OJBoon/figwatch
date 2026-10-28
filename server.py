@@ -45,12 +45,11 @@ import hmac
 import json
 import logging
 import os
-import re
 import signal
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # Allow running from the repo root without installing the package
 _repo_root = os.path.dirname(os.path.abspath(__file__))
@@ -59,6 +58,7 @@ if _repo_root not in sys.path:
 
 from figwatch.ack_updater import AckUpdater
 from figwatch.domain import Audit, Comment, match_trigger
+from figwatch.gateway import gateway_info
 from figwatch.log_context import (
     clear_audit_context,
     new_audit_id,
@@ -66,24 +66,33 @@ from figwatch.log_context import (
     set_audit_context,
 )
 from figwatch.logging_config import configure_logging
+from figwatch.messages import SIGN_OFF, queue_message
 from figwatch.metrics import (
     init_metrics,
     record_token_expired,
     record_webhook_received,
     set_queue_depth_source,
 )
-from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS
+from figwatch.providers.ai import CLAUDE_API_MODELS, GEMINI_MODELS, configure_limiters
 from figwatch.providers.figma import (
     FigmaCommentRepository,
     FigmaDesignDataRepository,
     FigmaRateLimiter,
     FigmaTokenExpired,
+    extract_file_key,
     figma_get_retry,
     validate_token,
 )
 from figwatch.queue_stats import InstrumentedQueue, QueuedItem
 from figwatch.services import AuditConfig, AuditService
-from figwatch.tracing import format_trace_line, get_tracer, init_tracing
+from figwatch.tracing import (
+    attached_context,
+    capture_context,
+    format_trace_line,
+    get_tracer,
+    init_tracing,
+    mark_error,
+)
 from figwatch.trigger_config import load_trigger_config
 from figwatch.watcher import load_processed, save_processed
 
@@ -93,21 +102,14 @@ logger = logging.getLogger(__name__)
 # subsequent retries reuse the final value.
 _BACKOFFS = [30, 120, 300]
 
-_EM_DASH = '\u2014'
-
 
 def _parse_file_keys(files_str):
     """Parse FIGWATCH_FILES — comma-separated Figma URLs or bare file keys."""
     keys = set()
-    for item in files_str.split(','):
-        item = item.strip()
-        if not item:
-            continue
-        m = re.search(r'figma\.com/(?:design|file|board)/([a-zA-Z0-9]+)', item)
-        if m:
-            keys.add(m.group(1))
-        elif re.match(r'^[a-zA-Z0-9]{10,}$', item):
-            keys.add(item)
+    for item in filter(None, (i.strip() for i in files_str.split(','))):
+        key = extract_file_key(item)
+        if key:
+            keys.add(key)
         else:
             logger.warning('skipping unrecognised FIGWATCH_FILES entry',
                            extra={'entry': item})
@@ -176,24 +178,108 @@ def _build_audit(payload, comment_id, pat, allowed_file_keys, trigger_config, au
 # ── Worker loop ────────────────────────────────────────────────────────
 
 def _run_audit(audit, ack_id, audit_service):
-    """Execute via AuditService. Raises on failure."""
+    """Execute via AuditService and swap the ack for the reply. Raises on failure."""
     logger.info('running skill', extra={'skill': audit.trigger_match.trigger.skill_ref})
-    response = audit_service.execute(audit)
-    logger.info('skill returned', extra={'chars': len(response)})
+    response = audit_service.execute_and_reply(audit, ack_id)
+    logger.info('reply posted', extra={'reply_to': audit.reply_to_id, 'chars': len(response)})
 
-    audit_service.delete_ack(audit, ack_id)
-    audit_service.post_reply(audit, response)
-    logger.info('reply posted', extra={'reply_to': audit.reply_to_id})
+
+def _comment_alive(audit_service, audit):
+    try:
+        return audit_service.comment_exists(audit)
+    except Exception:
+        logger.warning('comment_exists check failed — assuming alive')
+        return True
+
+
+def _schedule_retry(queued, ack_id, audit_service, work_queue, retry_timers):
+    """Show the retry in the ack and requeue the item after the next backoff."""
+    audit = queued.audit
+    backoff = _BACKOFFS[min(queued.attempt - 1, len(_BACKOFFS) - 1)]
+    queued.ack_id = audit_service.update_ack(
+        audit, ack_id,
+        (
+            f'\u23f3 Something went wrong, trying again in {backoff}s '
+            f'(attempt {queued.attempt})\u2026'
+            f'{format_trace_line()}'
+        ),
+    )
+    audit.collect_events()  # drain stale events before retry
+    queued.attempt += 1
+
+    timer = threading.Timer(backoff, work_queue.put, args=(queued,))
+    timer.daemon = True
+    timer.start()
+    retry_timers[:] = [t for t in retry_timers if t.is_alive()] + [timer]
+
+
+def _process(queued, span, work_queue, stop_event, audit_service, retry_timers):
+    """One attempt at one audit: run it, then reply, retry, or give up."""
+    audit = queued.audit
+    trigger_kw = audit.trigger_match.trigger.keyword
+    run_started_at = time.monotonic()
+    logger.info(
+        'queue.dequeued',
+        extra={'depth': work_queue.stats().depth, 'waited': f'{queued.waited_seconds:.2f}s'},
+    )
+    ack_id = audit_service.update_ack(
+        audit, queued.ack_id,
+        f'\u23f3 Running {trigger_kw.lstrip("@")} audit\u2026{format_trace_line()}',
+    )
+
+    outcome, error = None, None
+    try:
+        _run_audit(audit, ack_id, audit_service)
+        outcome = 'completed'
+    except FigmaTokenExpired as err:
+        record_token_expired()
+        mark_error(span, err)
+        logger.error('Figma token expired — cannot retry', extra={'attempt': queued.attempt})
+        audit_service.reply_with_error(
+            audit, ack_id,
+            (
+                f'Something went wrong and we are not able to fulfil your request.'
+                f'{format_trace_line()}\n\n{SIGN_OFF}'
+            ),
+        )
+        outcome, error = 'failed', err
+    except Exception as err:
+        span.record_exception(err)
+        logger.warning('audit attempt failed', extra={'attempt': queued.attempt, 'error': str(err)})
+        if not _comment_alive(audit_service, audit):
+            logger.info('trigger comment deleted — abandoning audit')
+            audit_service.delete_ack(audit, ack_id)
+            outcome = 'abandoned'
+        elif stop_event.is_set():
+            logger.info('shutdown — not scheduling retry')
+        else:
+            _schedule_retry(queued, ack_id, audit_service, work_queue, retry_timers)
+
+    if outcome is None:
+        return
+    total_seconds = time.monotonic() - queued.enqueued_at
+    audit_service.dispatch_events(audit, total_seconds)
+    if outcome == 'abandoned':
+        return
+    timings = {
+        'queued': f'{queued.waited_seconds:.2f}s',
+        'running': f'{time.monotonic() - run_started_at:.2f}s',
+        'total': f'{total_seconds:.2f}s',
+        'attempt': queued.attempt,
+    }
+    if error is None:
+        logger.info('\u2705 audit.completed', extra=timings)
+    else:
+        logger.error('\u274c audit.failed', extra={**timings, 'last_error': str(error)})
 
 
 def _worker_loop(work_queue: InstrumentedQueue, stop_event,
                  ack_updater: AckUpdater, audit_service: AuditService):
     retry_timers: list[threading.Timer] = []
+    tracer = get_tracer()
     while not stop_event.is_set():
         queued = work_queue.get(timeout=1)
         if queued is None:
-            if stop_event.is_set():
-                break
             continue
 
         # Stop the ack updater from touching this item's ack. Do this
@@ -201,153 +287,28 @@ def _worker_loop(work_queue: InstrumentedQueue, stop_event,
         ack_updater.cancel(queued.audit_id)
 
         audit = queued.audit
-        trigger_kw = audit.trigger_match.trigger.keyword
-        ack_id = queued.ack_id
-        run_started_at = time.monotonic()
-
         # Restore trace context propagated from the webhook handler thread.
-        otel_token = None
-        try:
-            from opentelemetry import context as otel_context
-            if queued.trace_context is not None:
-                otel_token = otel_context.attach(queued.trace_context)
-        except ImportError:
-            pass
-
-        token = set_audit_context(
-            audit=queued.audit_id,
-            trigger=trigger_kw,
-            node=audit.comment.node_id,
-            file=audit.comment.file_key,
-            attempt=queued.attempt,
-        )
-        tracer = get_tracer()
-        try:
-          with tracer.start_as_current_span('audit', attributes={
-              'audit.id': queued.audit_id,
-              'audit.file_key': audit.comment.file_key,
-              'audit.node_id': audit.comment.node_id,
-              'audit.trigger': trigger_kw,
-          }) as span:
-            stats = work_queue.stats()
-            logger.info(
-                'queue.dequeued',
-                extra={'depth': stats.depth, 'waited': f'{queued.waited_seconds:.2f}s'},
+        with attached_context(queued.trace_context):
+            token = set_audit_context(
+                audit=queued.audit_id,
+                trigger=audit.trigger_match.trigger.keyword,
+                node=audit.comment.node_id,
+                file=audit.comment.file_key,
+                attempt=queued.attempt,
             )
-
-            ack_id = audit_service.update_ack(
-                audit, ack_id,
-                (
-                    f'\u23f3 Running {trigger_kw.lstrip("@")} audit\u2026'
-                    f'{format_trace_line()}'
-                ),
-            )
-
             try:
-                _run_audit(audit, ack_id, audit_service)
-                ack_id = None
-
-                running_seconds = time.monotonic() - run_started_at
-                total_seconds = time.monotonic() - queued.enqueued_at
-                audit_service.dispatch_events(audit, total_seconds)
-                logger.info(
-                    '\u2705 audit.completed',
-                    extra={
-                        'queued': f'{queued.waited_seconds:.2f}s',
-                        'running': f'{running_seconds:.2f}s',
-                        'total': f'{total_seconds:.2f}s',
-                        'attempt': queued.attempt,
-                    },
-                )
-            except FigmaTokenExpired as err:
-                record_token_expired()
-                span.record_exception(err)
-                try:
-                    from opentelemetry.trace import StatusCode
-                    span.set_status(StatusCode.ERROR, str(err))
-                except ImportError:
-                    pass
-                logger.error(
-                    'Figma token expired — cannot retry',
-                    extra={'attempt': queued.attempt},
-                )
-                audit_service.delete_ack(audit, ack_id)
-                try:
-                    audit_service.post_reply(
-                        audit,
-                        (
-                            f'Something went wrong and we are not able to fulfil '
-                            f'your request.'
-                            f'{format_trace_line()}\n\n{_EM_DASH} FigWatch'
-                        ),
-                    )
-                except Exception:
-                    logger.exception('error reply post failed')
-                running_seconds = time.monotonic() - run_started_at
-                total_seconds = time.monotonic() - queued.enqueued_at
-                audit_service.dispatch_events(audit, total_seconds)
-                logger.error(
-                    '\u274c audit.failed',
-                    extra={
-                        'queued': f'{queued.waited_seconds:.2f}s',
-                        'running': f'{running_seconds:.2f}s',
-                        'total': f'{total_seconds:.2f}s',
-                        'attempt': queued.attempt,
-                        'last_error': str(err),
-                    },
-                )
-            except Exception as err:
-                span.record_exception(err)
-                logger.warning(
-                    'audit attempt failed',
-                    extra={'attempt': queued.attempt, 'error': str(err)},
-                )
-                try:
-                    comment_alive = audit_service.comment_exists(audit)
-                except Exception:
-                    logger.warning('comment_exists check failed — assuming alive')
-                    comment_alive = True
-                if not comment_alive:
-                    logger.info('trigger comment deleted — abandoning audit')
-                    audit_service.delete_ack(audit, ack_id)
-                    running_seconds = time.monotonic() - run_started_at
-                    total_seconds = time.monotonic() - queued.enqueued_at
-                    audit_service.dispatch_events(audit, total_seconds)
-                elif stop_event.is_set():
-                    logger.info('shutdown — not scheduling retry')
-                else:
-                    backoff = _BACKOFFS[min(queued.attempt - 1, len(_BACKOFFS) - 1)]
-                    ack_id = audit_service.update_ack(
-                        audit, ack_id,
-                        (
-                            f'\u23f3 Something went wrong, trying again in {backoff}s '
-                            f'(attempt {queued.attempt})\u2026'
-                            f'{format_trace_line()}'
-                        ),
-                    )
-                    audit.collect_events()  # drain stale events before retry
-                    queued.attempt += 1
-                    queued.ack_id = ack_id
-
-                    def _requeue(item=queued):
-                        work_queue.put(item)
-
-                    timer = threading.Timer(backoff, _requeue)
-                    timer.daemon = True
-                    timer.start()
-                    retry_timers = [t for t in retry_timers if t.is_alive()]
-                    retry_timers.append(timer)
-        except Exception:
-            logger.exception('worker crashed unexpectedly')
-        finally:
-            work_queue.task_done()
-            reset_audit_context(token)
-            if otel_token is not None:
-                try:
-                    from opentelemetry import context as otel_context
-                    otel_context.detach(otel_token)
-                except ImportError:
-                    pass
+                with tracer.start_as_current_span('audit', attributes={
+                    'audit.id': queued.audit_id,
+                    'audit.file_key': audit.comment.file_key,
+                    'audit.node_id': audit.comment.node_id,
+                    'audit.trigger': audit.trigger_match.trigger.keyword,
+                }) as span:
+                    _process(queued, span, work_queue, stop_event, audit_service, retry_timers)
+            except Exception:
+                logger.exception('worker crashed unexpectedly')
+            finally:
+                work_queue.task_done()
+                reset_audit_context(token)
 
 
 # ── HTTP handler ───────────────────────────────────────────────────────
@@ -449,33 +410,15 @@ def _make_handler(pat, passcode, allowed_file_keys,
                 )
 
                 ahead = work_queue.depth
-                if ahead == 0:
-                    queue_msg = (
-                        f'\u23f3 {trigger_kw.lstrip("@")} audit queued '
-                        f'\u2014 starting shortly\u2026'
-                        f'{format_trace_line()}'
-                    )
-                else:
-                    queue_msg = (
-                        f'\u23f3 {trigger_kw.lstrip("@")} audit queued '
-                        f'({ahead} ahead of you)\u2026'
-                        f'{format_trace_line()}'
-                    )
-
-                ack_id = audit_service.post_ack(audit, queue_msg)
-
-                trace_ctx = None
-                try:
-                    from opentelemetry import context as otel_context
-                    trace_ctx = otel_context.get_current()
-                except ImportError:
-                    pass
+                ack_id = audit_service.post_ack(
+                    audit, queue_message(trigger_kw, ahead, format_trace_line()),
+                )
 
                 queued = QueuedItem(
                     audit=audit,
                     ack_id=ack_id,
                     audit_id=audit_id,
-                    trace_context=trace_ctx,
+                    trace_context=capture_context(),
                 )
                 work_queue.put(queued)
 
@@ -507,6 +450,32 @@ def _make_handler(pat, passcode, allowed_file_keys,
     return WebhookHandler
 
 
+def _fail(message, **extra):
+    logger.error(message, extra=extra)
+    sys.exit(1)
+
+
+def _env_int(name, default, *, min_value, max_value=None):
+    """Integer env var; exits on a non-integer or out-of-range value (ADR-001)."""
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        _fail(f'invalid {name}', value=raw, expected='integer')
+    if value < min_value or (max_value is not None and value > max_value):
+        bounds = {'min': min_value} if max_value is None else {'min': min_value, 'max': max_value}
+        _fail(f'invalid {name}', value=value, **bounds)
+    return value
+
+
+def _env_choice(name, default, choices):
+    """Enum env var (case-insensitive); exits on a value outside `choices` (ADR-001)."""
+    value = os.environ.get(name, default).strip().lower()
+    if value not in choices:
+        _fail(f'invalid {name}', value=value, valid=sorted(choices))
+    return value
+
+
 def main():
     configure_logging()
 
@@ -514,11 +483,9 @@ def main():
     passcode = os.environ.get('FIGWATCH_WEBHOOK_PASSCODE', '').strip()
 
     if not pat:
-        logger.error('FIGMA_PAT is required')
-        sys.exit(1)
+        _fail('FIGMA_PAT is required')
     if not passcode:
-        logger.error('FIGWATCH_WEBHOOK_PASSCODE is required')
-        sys.exit(1)
+        _fail('FIGWATCH_WEBHOOK_PASSCODE is required')
 
     if os.environ.get('FIGWATCH_SKIP_TOKEN_CHECK', '').strip().lower() in ('1', 'true', 'yes'):
         logger.warning('FIGWATCH_SKIP_TOKEN_CHECK set — skipping Figma token validation')
@@ -527,85 +494,46 @@ def main():
             handle = validate_token(pat)
             logger.info('figma token valid', extra={'user': handle})
         except FigmaTokenExpired:
-            logger.error(
+            _fail(
                 'Figma token expired — generate a new token at '
                 'https://www.figma.com/developers/api#access-tokens'
             )
-            sys.exit(1)
         except Exception as e:
-            logger.error('Figma token validation failed', extra={'error': str(e)})
-            sys.exit(1)
+            _fail('Figma token validation failed', error=str(e))
 
     files_str = os.environ.get('FIGWATCH_FILES', '').strip()
     allowed_file_keys = _parse_file_keys(files_str) if files_str else set()
 
-    model = os.environ.get('FIGWATCH_MODEL', 'gemini-flash')
-    valid_models = {*GEMINI_MODELS, *CLAUDE_API_MODELS}
-    if model not in valid_models:
-        logger.error('invalid FIGWATCH_MODEL',
-                     extra={'value': model, 'valid': sorted(valid_models)})
-        sys.exit(1)
+    model = _env_choice('FIGWATCH_MODEL', 'gemini-flash', {*GEMINI_MODELS, *CLAUDE_API_MODELS})
+    # Check the provider's credential now rather than failing on the first audit,
+    # after the "queued" ack has already been posted.
+    if model.startswith('gemini'):
+        if not os.environ.get('GOOGLE_API_KEY', '').strip():
+            _fail('GOOGLE_API_KEY is required for Gemini models', model=model)
+    elif not (os.environ.get('ANTHROPIC_API_KEY', '').strip() or gateway_info()):
+        _fail('ANTHROPIC_API_KEY is required for Claude models', model=model)
 
-    valid_locales = {'uk', 'de', 'fr', 'nl', 'benelux'}
-    locale = os.environ.get('FIGWATCH_LOCALE', 'uk')
-    if locale not in valid_locales:
-        logger.error('invalid FIGWATCH_LOCALE',
-                     extra={'value': locale, 'valid': sorted(valid_locales)})
-        sys.exit(1)
-
-    port = int(os.environ.get('FIGWATCH_PORT', '8080'))
-    if port < 1 or port > 65535:
-        logger.error('invalid FIGWATCH_PORT',
-                     extra={'value': port, 'min': 1, 'max': 65535})
-        sys.exit(1)
-
-    worker_count = int(os.environ.get('FIGWATCH_WORKERS', '4'))
-    if worker_count < 1:
-        logger.error('invalid FIGWATCH_WORKERS',
-                     extra={'value': worker_count, 'min': 1})
-        sys.exit(1)
-
-    queue_update_rpm = int(os.environ.get('FIGWATCH_QUEUE_UPDATE_RPM', '5'))
-    if queue_update_rpm < 1:
-        logger.error('invalid FIGWATCH_QUEUE_UPDATE_RPM',
-                     extra={'value': queue_update_rpm, 'min': 1})
-        sys.exit(1)
+    locale = _env_choice('FIGWATCH_LOCALE', 'uk', {'uk', 'de', 'fr', 'nl', 'benelux'})
+    port = _env_int('FIGWATCH_PORT', 8080, min_value=1, max_value=65535)
+    worker_count = _env_int('FIGWATCH_WORKERS', 4, min_value=1)
+    queue_update_rpm = _env_int('FIGWATCH_QUEUE_UPDATE_RPM', 5, min_value=1)
+    configure_limiters(
+        gemini_rpm=_env_int('FIGWATCH_GEMINI_RPM', 15, min_value=0),
+        anthropic_rpm=_env_int('FIGWATCH_ANTHROPIC_RPM', 5, min_value=0),
+    )
+    figma_plan = _env_choice(
+        'FIGWATCH_FIGMA_PLAN', 'professional',
+        {'starter', 'professional', 'organization', 'enterprise'},
+    )
+    figma_seat = _env_choice('FIGWATCH_FIGMA_SEAT', 'dev', {'dev', 'view'})
 
     claude_path = 'api'
-
-    gemini_rpm = int(os.environ.get('FIGWATCH_GEMINI_RPM', '15'))
-    if gemini_rpm < 0:
-        logger.error('invalid FIGWATCH_GEMINI_RPM',
-                     extra={'value': gemini_rpm, 'min': 0})
-        sys.exit(1)
-
-    anthropic_rpm = int(os.environ.get('FIGWATCH_ANTHROPIC_RPM', '5'))
-    if anthropic_rpm < 0:
-        logger.error('invalid FIGWATCH_ANTHROPIC_RPM',
-                     extra={'value': anthropic_rpm, 'min': 0})
-        sys.exit(1)
-
-    figma_plan = os.environ.get('FIGWATCH_FIGMA_PLAN', 'professional').strip().lower()
-    valid_plans = ('starter', 'professional', 'organization', 'enterprise')
-    if figma_plan not in valid_plans:
-        logger.error('invalid FIGWATCH_FIGMA_PLAN',
-                     extra={'value': figma_plan, 'valid': valid_plans})
-        sys.exit(1)
-
-    figma_seat = os.environ.get('FIGWATCH_FIGMA_SEAT', 'dev').strip().lower()
-    valid_seats = ('dev', 'view')
-    if figma_seat not in valid_seats:
-        logger.error('invalid FIGWATCH_FIGMA_SEAT',
-                     extra={'value': figma_seat, 'valid': valid_seats})
-        sys.exit(1)
 
     figma_limiter = FigmaRateLimiter(plan=figma_plan, seat=figma_seat)
 
     skills_dir = os.environ.get('FIGWATCH_SKILLS_DIR', '').strip() or None
     if skills_dir and not os.path.isdir(skills_dir):
-        logger.error('FIGWATCH_SKILLS_DIR does not exist or is not a directory',
-                      extra={'path': skills_dir})
-        sys.exit(1)
+        _fail('FIGWATCH_SKILLS_DIR does not exist or is not a directory', path=skills_dir)
 
     init_metrics()
     init_tracing()
@@ -614,7 +542,7 @@ def main():
     triggers_str = ', '.join(t.get('trigger', '') for t in trigger_config)
 
     # Construct repositories and application service
-    comment_repo = FigmaCommentRepository(pat)
+    comment_repo = FigmaCommentRepository(pat, limiter=figma_limiter)
     design_repo = FigmaDesignDataRepository(pat, limiter=figma_limiter)
     audit_config = AuditConfig(
         model=model, claude_path=claude_path,
@@ -661,7 +589,10 @@ def main():
         ack_updater,
         audit_service, limiter=figma_limiter,
     )
-    server = HTTPServer(('', port), handler)
+    # Threaded: a webhook's node-id lookup and ack post are Figma round trips,
+    # and must not hold up the next webhook.
+    server = ThreadingHTTPServer(('', port), handler)
+    server.daemon_threads = True
 
     def _shutdown(sig, frame):
         logger.info('\u23f9 shutting down — draining in-flight audits')
