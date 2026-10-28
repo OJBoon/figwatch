@@ -69,6 +69,10 @@ _RESOLVED_BUNDLED_SKILLS = _extract_bundled_skills()
 
 # Node tree is embedded inline for API providers — cap to avoid token limit blowout.
 _NODE_TREE_CHAR_LIMIT = 40_000
+# Copy reviews (tone) need to see ALL the text on a page, not the first N nodes —
+# a placeholder can sit deep in a content-heavy frame (158 nodes seen in the wild).
+# Budget by characters so tokens stay bounded regardless of node count.
+_TEXT_NODES_CHAR_LIMIT = 15_000
 
 
 # ── Skill cache ──────────────────────────────────────────────────────
@@ -294,15 +298,9 @@ def _critical_rules(lang_instruction, extra_bullet=''):
     )
 
 
-def _build_prompt(
-    audit, skill_content, refs_section, data, tree_data, frame_name,
-    *, inline_files, config=None,
-):
-    """Build the skill execution prompt.
-
-    inline_files=True: node tree JSON is embedded directly (for API providers).
-    inline_files=False: file paths are passed and the model reads them (Claude CLI).
-    """
+def _data_section(data, tree_data, *, inline_files):
+    """Render the 'Available data' block (screenshot ref + node tree + text nodes
+    + extra keys). Shared by the audit and refinement prompt builders."""
     data_desc = []
 
     if data.get('screenshot'):
@@ -321,10 +319,20 @@ def _build_prompt(
             data_desc.append(f'Node tree JSON at: {data["node_tree"]}')
 
     if data.get('text_nodes'):
-        text_list = '\n'.join(
-            f'  {i+1}. [{t["name"]}]: "{t["text"]}"'
-            for i, t in enumerate(data['text_nodes'][:50])
-        )
+        nodes = data['text_nodes']
+        lines, used, shown = [], 0, 0
+        for i, t in enumerate(nodes):
+            line = f'  {i+1}. [{t["name"]}]: "{t["text"]}"'
+            # Always show at least 50, then keep going up to the char budget so a
+            # placeholder deep in a long page isn't silently dropped.
+            if shown >= 50 and used + len(line) > _TEXT_NODES_CHAR_LIMIT:
+                break
+            lines.append(line)
+            used += len(line) + 1
+            shown += 1
+        text_list = '\n'.join(lines)
+        if shown < len(nodes):
+            text_list += f'\n  ... ({len(nodes) - shown} more text nodes omitted)'
         data_desc.append(f'Text nodes:\n{text_list}')
 
     for key in ['dev_resources', 'variables_local', 'variables_published',
@@ -332,7 +340,19 @@ def _build_prompt(
         if data.get(key):
             data_desc.append(f'{key}: {json.dumps(data[key], indent=2)[:5000]}')
 
-    data_section = '\n\n'.join(data_desc) if data_desc else 'No data available.'
+    return '\n\n'.join(data_desc) if data_desc else 'No data available.'
+
+
+def _build_prompt(
+    audit, skill_content, refs_section, data, tree_data, frame_name,
+    *, inline_files, config=None,
+):
+    """Build the skill execution prompt.
+
+    inline_files=True: node tree JSON is embedded directly (for API providers).
+    inline_files=False: file paths are passed and the model reads them (Claude CLI).
+    """
+    data_section = _data_section(data, tree_data, inline_files=inline_files)
 
     extra_ctx, lang_instruction = _prompt_preamble(audit, config)
     trigger_kw = audit.trigger_match.trigger.keyword
@@ -407,6 +427,63 @@ Now review this user journey:
 {_critical_rules(lang_instruction, journey_bullet)}"""
 
 
+def _format_transcript(thread_history):
+    """Render prior thread messages as a plain 'Reviewer:' / 'FigWatch:' transcript."""
+    lines = []
+    for m in thread_history:
+        who = 'FigWatch' if m.is_bot else (m.author or 'Reviewer')
+        lines.append(f'{who}: {m.text}')
+    return '\n\n'.join(lines)
+
+
+def _build_refine_prompt(
+    audit, skill_content, refs_section, data, tree_data, frame_name,
+    *, inline_files, config=None,
+):
+    """Build a conversational follow-up prompt: the current design context plus the
+    thread transcript so far, asking the model to answer the reviewer's latest
+    message and refine its prior review (not re-run the whole audit)."""
+    data_section = _data_section(data, tree_data, inline_files=inline_files)
+    _, lang_instruction = _prompt_preamble(audit, config)
+    trigger_kw = audit.trigger_match.trigger.keyword
+    transcript = _format_transcript(audit.thread_history)
+    latest = audit.trigger_match.extra or '(no message)'
+    refine_bullet = (
+        "- Address the reviewer's latest message directly; refine, clarify, or extend "
+        "your earlier review. Do NOT repeat the whole audit.\n"
+    )
+    read_instruction = (
+        'Use the attached screenshot and data'
+        if inline_files else
+        'Read any file paths provided'
+    )
+
+    return f"""You are FigWatch, continuing a review conversation in a Figma comment thread.
+You (or an earlier FigWatch run) already reviewed this design; the reviewer has followed up.
+Follow the skill's instructions, but this turn is a FOLLOW-UP: respond to the reviewer's
+latest message rather than producing a fresh full audit.
+
+{skill_content}{refs_section}
+
+The design under review:
+- Frame name: {frame_name}
+- Original trigger: {trigger_kw}
+
+Conversation so far (oldest first):
+{transcript}
+
+Reviewer's latest message:
+"{latest}"
+
+Current design data:
+{data_section}
+
+{read_instruction}, then respond with ONLY a plain-text comment reply that answers the
+reviewer's latest message.
+
+{_critical_rules(lang_instruction, refine_bullet)}"""
+
+
 # ── Skill execution ───────────────────────────────────────────────────
 
 def execute_skill(audit, *, config, design_repo):
@@ -446,7 +523,9 @@ def execute_skill(audit, *, config, design_repo):
     explicit_journey = 'journey' in (audit.trigger_match.extra or '').lower()
     journey_screens = None
 
-    if journey_capable:
+    # A conversational follow-up always uses single-screen context (a focused
+    # reply on one node), never the whole-board journey capture.
+    if journey_capable and not audit.thread_history:
         data, tree_data = design_repo.fetch(
             [k for k in required_data if k != 'screenshot'], file_key, node_id,
         )
@@ -511,7 +590,16 @@ def execute_skill(audit, *, config, design_repo):
     )
 
     audit_base = f'\U0001f5e3\ufe0f {trigger_kw}'
-    if journey_screens:
+    if audit.thread_history:
+        # Conversational follow-up: answer the reviewer's latest message with the
+        # thread in view, using the current single-screen design context.
+        prompt = _build_refine_prompt(
+            audit, skill_content, refs_section, data, tree_data, frame_name,
+            inline_files=provider.inline_files, config=config,
+        )
+        image_arg = data.get('screenshot')
+        header = f'{audit_base} Follow-up \u2014 {frame_name}'
+    elif journey_screens:
         prompt = _build_journey_prompt(
             audit, skill_content, refs_section, journey_screens, frame_name,
             inline_files=provider.inline_files, config=config,

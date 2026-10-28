@@ -6,7 +6,7 @@ import os
 import threading
 from collections import OrderedDict
 
-from figwatch.domain import Audit, Comment, match_trigger
+from figwatch.domain import Audit, Comment, ThreadMessage, TriggerMatch, match_trigger
 from figwatch.log_context import new_audit_id
 from figwatch.providers.figma import figma_get
 from figwatch.trigger_config import load_trigger_config
@@ -17,6 +17,10 @@ _EM_DASH = '\u2014'
 _OWN_REPLY_MARKERS = (_EM_DASH + ' figwatch',)
 
 _PROCESSED_MAXLEN = 500
+
+# Cap the refinement transcript so a long thread can't blow the prompt budget
+# (the node tree already has its own 40k cap). Oldest turns are dropped first.
+_THREAD_TRANSCRIPT_CHAR_LIMIT = 6000
 
 
 # ── Bounded set ───────────────────────────────────────────────────────
@@ -86,10 +90,126 @@ def save_processed(ids):
 
 # ── Trigger detection (fast path — 1 API call) ────────────────────────
 
-def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log):
+def _is_bot_message(message):
+    low = (message or '').lower()
+    return any(m in low for m in _OWN_REPLY_MARKERS)
+
+
+def _strip_mention(message, mention):
+    """Drop the @figwatch mention token from a follow-up so the model sees the ask."""
+    import re
+    out = re.sub(re.escape(mention), '', message, flags=re.IGNORECASE)
+    return ' '.join(out.split()).strip()
+
+
+def _strip_bot_chrome(message):
+    """Reduce a prior FigWatch reply to its body — drop the 🗣️ header line and
+    everything from the '— FigWatch' sign-off onward."""
+    body = []
+    for ln in (message or '').splitlines():
+        if _is_bot_message(ln):   # sign-off line reached
+            break
+        if ln.strip().startswith('\U0001f5e3'):  # 🗣️ header line
+            continue
+        body.append(ln)
+    return '\n'.join(body).strip()
+
+
+def _build_thread_history(thread, follow_up, created_key):
+    """Ordered ThreadMessage transcript of everything in the thread before the
+    follow-up, capped oldest-first to the char budget."""
+    fu_id = follow_up['id']
+    fu_created = created_key(follow_up)
+    msgs = []
+    for x in sorted(thread, key=created_key):
+        if x['id'] == fu_id:
+            continue
+        xc = created_key(x)
+        if xc and fu_created and xc > fu_created:
+            continue  # created after the follow-up — not part of its context
+        raw = x.get('message') or ''
+        is_bot = _is_bot_message(raw)
+        text = _strip_bot_chrome(raw) if is_bot else raw.strip()
+        if not text:
+            continue
+        author = 'FigWatch' if is_bot else x.get('user', {}).get('handle', 'reviewer')
+        msgs.append(ThreadMessage(is_bot=is_bot, author=author, text=text))
+    # Drop oldest turns until under the budget.
+    total = sum(len(m.text) for m in msgs)
+    while len(msgs) > 1 and total > _THREAD_TRANSCRIPT_CHAR_LIMIT:
+        total -= len(msgs.pop(0).text)
+    return tuple(msgs)
+
+
+def _detect_follow_ups(comments, comment_map, processed_ids, trigger_config,
+                       file_key, mention, *, log):
+    """Build refinement Audits for unprocessed @mention replies in audited threads."""
+    def _created(c):
+        return c.get('created_at') or ''
+
+    mention_lower = mention.lower()
+    out = []
+    for c in comments:
+        root_id = c.get('parent_id')
+        if not root_id or c['id'] in processed_ids or c.get('resolved_at'):
+            continue
+        msg = c.get('message') or ''
+        if mention_lower not in msg.lower() or _is_bot_message(msg):
+            continue
+
+        # Thread = root comment + all its replies (comments are flat with parent_id).
+        thread = [x for x in comments if x['id'] == root_id or x.get('parent_id') == root_id]
+        # Only engage if FigWatch has already audited this thread.
+        if not any(_is_bot_message(x.get('message')) for x in thread):
+            continue
+        # Recover the original skill from the human trigger still in the thread.
+        orig = None
+        for x in sorted(thread, key=_created):
+            if _is_bot_message(x.get('message')):
+                continue
+            orig = match_trigger(x.get('message') or '', trigger_config)
+            if orig:
+                break
+        if not orig:
+            continue  # can't route to a skill
+
+        root = comment_map.get(root_id, {})
+        node_id = (root.get('client_meta') or {}).get('node_id')
+        if not node_id:
+            processed_ids.add(c['id'])
+            continue
+
+        history = _build_thread_history(thread, c, _created)
+        extra = _strip_mention(msg, mention)
+        processed_ids.add(c['id'])
+        user_handle = c.get('user', {}).get('handle', 'unknown')
+        out.append(Audit(
+            audit_id=new_audit_id(),
+            comment=Comment(
+                comment_id=c['id'],
+                message=msg,
+                parent_id=root_id,
+                node_id=node_id,
+                user_handle=user_handle,
+                file_key=file_key,
+            ),
+            trigger_match=TriggerMatch(trigger=orig.trigger, extra=extra),
+            thread_history=history,
+        ))
+        log(f'\U0001f4ac {mention} follow-up by {user_handle} on node {node_id}')
+    return out
+
+
+def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log,
+                    follow_up_mention=None):
     """Fetch comments, find trigger matches, return list[Audit].
 
     Fast path: single API call, <1s. Does NOT call any AI provider.
+
+    follow_up_mention (e.g. "@figwatch"): when set, a human reply containing it in
+    a thread already audited by FigWatch becomes a *refinement* Audit carrying the
+    thread transcept and routed to the original skill. None (CLI/server) → the
+    original one-shot behaviour, byte-identical.
     """
     data = figma_get(f'/files/{file_key}/comments', pat)
     comments = data.get('comments', []) if data else []
@@ -103,6 +223,20 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log):
             replied_to.add(c['parent_id'])
             processed_ids.add(c['parent_id'])
 
+    initial_count = len(processed_ids)
+    audits = []
+
+    # ── Conversational follow-ups (@figwatch replies) ──────────────────
+    # A separate admittance channel from the keyword-trigger loop below, so the
+    # thread-poisoning that protects the original trigger from re-audit stays
+    # intact. Only human replies (no sign-off marker) that mention the bot in a
+    # thread that already has a FigWatch audit qualify.
+    if follow_up_mention:
+        audits.extend(_detect_follow_ups(
+            comments, comment_map, processed_ids, trigger_config,
+            file_key, follow_up_mention, log=log,
+        ))
+
     candidates = []
     for c in comments:
         if c['id'] in processed_ids or c.get('resolved_at'):
@@ -115,8 +249,6 @@ def detect_triggers(file_key, pat, processed_ids, trigger_config, *, log):
             if not any(m in msg_lower for m in _OWN_REPLY_MARKERS):
                 candidates.append(c)
 
-    initial_count = len(processed_ids)
-    audits = []
     for comment in candidates:
         if comment['id'] in processed_ids or comment['id'] in replied_to:
             continue
@@ -172,7 +304,7 @@ class FigmaWatcher:
     def __init__(self, file_key, pat, *, audit_service,
                  interval=30, log=print,
                  trigger_config=None, dispatch=None, on_poll=None,
-                 initial_delay=0, event_listener=None):
+                 initial_delay=0, event_listener=None, follow_up_mention=None):
         self.file_key = file_key
         self.pat = pat
         self.audit_service = audit_service
@@ -183,6 +315,7 @@ class FigmaWatcher:
         self.on_poll = on_poll
         self.initial_delay = initial_delay
         self._event_listener = event_listener
+        self.follow_up_mention = follow_up_mention
         self._stop_event = threading.Event()
         self._thread = None
         self._processed = load_processed()
@@ -217,6 +350,7 @@ class FigmaWatcher:
                 audits = detect_triggers(
                     self.file_key, self.pat, self._processed,
                     self.trigger_config, log=self.log,
+                    follow_up_mention=self.follow_up_mention,
                 )
                 for audit in audits:
                     if self.dispatch:

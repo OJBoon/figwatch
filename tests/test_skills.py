@@ -2,16 +2,21 @@
 
 import os
 
-from figwatch.domain import Audit, Comment, Trigger, TriggerMatch
+from figwatch.domain import Audit, Comment, ThreadMessage, Trigger, TriggerMatch
 from figwatch.services import AuditConfig
-from figwatch.skills import _build_prompt, _resolve_builtin_skill, find_skills
+from figwatch.skills import (
+    _build_prompt,
+    _build_refine_prompt,
+    _resolve_builtin_skill,
+    find_skills,
+)
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
 def _make_audit(**kwargs):
     defaults = dict(
         trigger_keyword="@ux", skill_ref="builtin:ux",
-        extra="", reply_lang="en",
+        extra="", reply_lang="en", thread_history=(),
     )
     defaults.update(kwargs)
     return Audit(
@@ -27,6 +32,7 @@ def _make_audit(**kwargs):
             ),
             extra=defaults["extra"],
         ),
+        thread_history=defaults["thread_history"],
     )
 
 
@@ -173,6 +179,17 @@ def test_build_prompt_text_nodes_listed():
     assert "Here is your dashboard" in prompt
 
 
+def test_build_prompt_shows_text_node_beyond_first_50():
+    # Regression: a placeholder deep in a content-heavy page (node #90 of 158)
+    # was dropped by the old first-50 cap, so audits missed it. It must now appear.
+    audit = _make_audit()
+    nodes = [{"name": f"n{i}", "text": f"label {i}"} for i in range(158)]
+    nodes[90] = {"name": "Subtitle", "text": "Subtitle subtitle subtitle subtitle"}
+    prompt = _build_prompt(audit, SKILL_CONTENT, REFS, {"text_nodes": nodes}, None,
+                           FRAME_NAME, inline_files=True, config=_make_config())
+    assert "Subtitle subtitle subtitle subtitle" in prompt
+
+
 # ── find_skills ───────────────────────────────────────────────────────
 
 def test_find_skills_returns_list():
@@ -317,4 +334,39 @@ def test_execute_skill_resolves_name_without_tree(monkeypatch):
     assert "Sony SiS demo" in result
     assert "Unknown frame" not in result
     assert repo.name_calls == [("abc", "2:3")]
+
+
+# ── Refinement / follow-up ────────────────────────────────────────────
+
+_HISTORY = (
+    ThreadMessage(is_bot=False, author="alice", text="@ux please review"),
+    ThreadMessage(is_bot=True, author="FigWatch", text="Contrast is low on the CTA."),
+)
+
+
+def test_build_refine_prompt_includes_transcript_and_latest():
+    audit = _make_audit(extra="focus on the CTA copy", thread_history=_HISTORY)
+    data = {"screenshot": "/tmp/s.png", "node_tree": "/tmp/t.json"}
+    prompt = _build_refine_prompt(audit, SKILL_CONTENT, REFS, data, TREE_DATA, FRAME_NAME,
+                                  inline_files=True, config=_make_config())
+    assert "FOLLOW-UP" in prompt
+    assert "focus on the CTA copy" in prompt          # latest message
+    assert "Contrast is low on the CTA." in prompt     # prior bot turn
+    assert "FigWatch:" in prompt and "alice:" in prompt
+    assert "Do NOT repeat the whole audit" in prompt
+
+
+def test_execute_skill_refinement_header_and_prompt(monkeypatch):
+    prov = _FakeProvider()
+    monkeypatch.setattr(_skills, "make_provider", lambda *a, **k: prov)
+    tree = {"name": "Home", "type": "FRAME", "children": []}
+    repo = _FakeRepo(tree, screenshot="/tmp/shot.png")
+    audit = _make_audit(extra="also check error states", thread_history=_HISTORY)
+    result = _skills.execute_skill(audit, config=_make_config(), design_repo=repo)
+    assert "Follow-up" in result and "Audit —" not in result
+    prompt, image_arg = prov.calls[0]
+    assert "also check error states" in prompt
+    assert "Contrast is low on the CTA." in prompt   # thread transcript threaded in
+    assert image_arg == "/tmp/shot.png"              # single-screen context, re-fetched
+
 

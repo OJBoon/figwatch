@@ -115,11 +115,19 @@ PAD = 12
 ROW_H = 28
 MAX_FILE_ROWS = 12  # scroll if more than this
 POPOVER_CORNER_RADIUS = 16  # match macOS Tahoe native menu/popover rounding
+# Insets between the settings glass edge and its content (NSAlert used to supply
+# these; our own panel must add them or the rows run flush to the glass edge).
+SETTINGS_MARGIN_X = 20
+SETTINGS_MARGIN_Y = 16
 
 # Auto-watch poll interval choices (seconds), offered in Settings. 15s is the
 # floor — shorter risks Figma rate limits when many files are watched.
 INTERVAL_PRESETS = [15, 30, 45, 60]
 DEFAULT_INTERVAL = 30
+
+# Lightweight mention that engages the bot for a conversational follow-up in a
+# thread it has already audited (see figwatch/watcher.py detect_triggers).
+FOLLOWUP_MENTION = "@figwatch"
 
 # macOS 26 (Tahoe) Liquid Glass container; None on older macOS (we fall back to
 # NSVisualEffectView). Looked up dynamically so the app still runs pre-Tahoe.
@@ -438,20 +446,21 @@ class HoverRow(NSButton):
 
 # ── UI Builder ──────────────────────────────────────────────────────
 
-def _load_menu_icon():
-    bundle = NSBundle.mainBundle()
-    paths = [
-        bundle.pathForResource_ofType_("FigWatch-icon", "pdf"),
-        os.path.join(_THIS_DIR, "FigWatch-icon.pdf"),
-    ]
-    for p in paths:
-        if p and os.path.exists(p):
-            img = NSImage.alloc().initWithContentsOfFile_(p)
-            if img:
-                img.setSize_(NSMakeSize(18, 18))
-                img.setTemplate_(True)
-                return img
-    return None
+def _skill_display_name(skill_path):
+    """Human name for a custom skill path.
+
+    Custom skills live at <dir>/<name>/skill.md, so when the file is the
+    conventional skill.md/SKILL.md the parent folder is the skill's name —
+    os.path.basename(path) would just say "skill.md". For a loose .md file
+    (not the conventional name) use its own filename stem instead.
+    """
+    fname = os.path.basename(skill_path)
+    stem, _ = os.path.splitext(fname)
+    if fname.lower() in ("skill.md", "skill.markdown"):
+        parent = os.path.basename(os.path.dirname(skill_path))
+        if parent:
+            return parent
+    return stem
 
 
 def _label(text, size=13, weight=NSFontWeightRegular, color=None, mono=False):
@@ -982,7 +991,6 @@ class FigWatch(NSObject):
 
     def applicationDidFinishLaunching_(self, notif):
         self._watcher_log_file = None
-        self._cached_menu_icon = None
         self._tick_count = 0
         self._state = {
             "pat": None, "user": None, "locale": "uk",
@@ -1008,6 +1016,7 @@ class FigWatch(NSObject):
         self._state["reply_lang"] = config.get("replyLang", "en")
         iv = config.get("watchInterval", DEFAULT_INTERVAL)
         self._state["poll_interval"] = iv if iv in INTERVAL_PRESETS else DEFAULT_INTERVAL
+        self._state["thread_followups"] = config.get("threadFollowups", True)
 
         menubar = NSMenu.alloc().init()
         edit_menu = NSMenu.alloc().initWithTitle_("Edit")
@@ -1055,7 +1064,7 @@ class FigWatch(NSObject):
             _save_config(c)
             # Stays until the user clicks Done — no auto-hide to race the button.
             self._show_update_hud(f"Updated to {pending} ✓", spinning=False,
-                                  button="Done", button_action=b"_hide_update_hud:")
+                                  button="Done", button_action=b"hudDismiss:")
 
     # ── Logging ─────────────────────────────────────────────────
 
@@ -1114,7 +1123,7 @@ class FigWatch(NSObject):
         self._state["update_available"] = rel if newer else None
         if newer and self._state.get("popover_open"):
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"_rebuildPopoverFromThread:", None, False)
+                b"rebuildPopoverFromThread:", None, False)
 
     def _sync_loop(self):
         last_update_check = time.time()
@@ -1334,6 +1343,8 @@ class FigWatch(NSObject):
             on_poll=on_poll,
             initial_delay=initial_delay,
             interval=self._state.get("poll_interval", DEFAULT_INTERVAL),
+            follow_up_mention=(FOLLOWUP_MENTION
+                               if self._state.get("thread_followups", True) else None),
         )
         w.start()
         self._state["watchers"][key] = w
@@ -1383,13 +1394,12 @@ class FigWatch(NSObject):
 
     def _set_icon(self, active):
         btn = self.statusItem.button()
-        if self._cached_menu_icon is None:
-            self._cached_menu_icon = _load_menu_icon()
-        base = self._cached_menu_icon
-        if not base:
-            name = "bubble.left.fill" if active else "bubble.left"
-            base = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, "FigWatch")
-            if base: base.setTemplate_(True)
+        # Official menu-bar icon: the SF Symbol speech bubble (filled when active).
+        # A template image tints itself for light/dark automatically.
+        name = "bubble.left.fill" if active else "bubble.left"
+        base = NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, "FigWatch")
+        if base:
+            base.setTemplate_(True)
 
         if not base:
             btn.setTitle_("\u25C9" if active else "\u25CB")
@@ -1452,7 +1462,7 @@ class FigWatch(NSObject):
             pass
 
     @objc.typedSelector(b"v@:@")
-    def _rebuildPopoverFromThread_(self, _sender):
+    def rebuildPopoverFromThread_(self, _sender):
         if self._state.get("popover_open"):
             self._rebuild_popover()
 
@@ -1710,10 +1720,13 @@ class FigWatch(NSObject):
     @objc.typedSelector(b"v@:@")
     def doSettings_(self, sender):
         self._close_popover()
-        NSApp.activateIgnoringOtherApps_(True)
+        acc, height = self._build_settings_content()
+        self._present_settings(acc, height)
 
+    def _build_settings_content(self):
+        """Build the Settings content view (glass-panel body). Returns (view, height)."""
         SW = 420
-        acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, SW, 800))
+        acc = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, SW, 900))
         y = 0
         config = _load_config()
 
@@ -1781,6 +1794,17 @@ class FigWatch(NSObject):
             acc.addSubview_(control)
             y += 28
 
+        # ── Header (own panel supplies its own title; NSAlert used to) ──
+        hicon = _sf_symbol("tv", size=15, color=NSColor.secondaryLabelColor())
+        if hicon:
+            hicon.setFrameOrigin_((0, y))
+            acc.addSubview_(hicon)
+        htitle = _label("FigWatch Settings", size=15, weight=NSFontWeightBold)
+        htitle.sizeToFit()
+        htitle.setFrameOrigin_((24, y + 1))
+        acc.addSubview_(htitle)
+        y += 26
+
         # ── Triggers ──────────────────────────────────────────
         _section("Triggers", "bolt.fill")
 
@@ -1791,7 +1815,12 @@ class FigWatch(NSObject):
             trigger_word = tc.get("trigger", "")
             skill_name = tc.get("skill", "")
             builtin = skill_name.startswith("builtin:")
-            display = f"{skill_name.replace('builtin:', '')} (built-in)" if builtin else os.path.basename(skill_name)
+            if builtin:
+                display = f"{skill_name.replace('builtin:', '')} (built-in)"
+            else:
+                # A custom skill path is <dir>/<name>/skill.md — basename() would
+                # just say "skill.md", so show the skill's folder name instead.
+                display = _skill_display_name(skill_name)
 
             rh = 28
             row = NSView.alloc().initWithFrame_(NSMakeRect(0, y, SW, rh))
@@ -1976,6 +2005,10 @@ class FigWatch(NSObject):
             INTERVAL_PRESETS.index(self._state.get("poll_interval", DEFAULT_INTERVAL)))
         _row("Check interval", interval_popup)
 
+        followups_switch = NSSwitch.alloc().initWithFrame_(NSMakeRect(0, 0, 40, 20))
+        followups_switch.setState_(1 if self._state.get("thread_followups", True) else 0)
+        _row("Reply follow-ups (@figwatch)", followups_switch)
+
         # ── About ─────────────────────────────────────────────
         upd_hdr_btn = _pill("Check for Updates", b"doCheckUpdate:", width=140, height=24)
         upd_hdr_btn.setFont_(NSFont.systemFontOfSize_weight_(11, NSFontWeightMedium))
@@ -1986,76 +2019,145 @@ class FigWatch(NSObject):
         acc.addSubview_(ver)
         y += 20
 
+        # Controls the Save handler reads after the panel is shown (they used to
+        # be closure locals consumed inline by the NSAlert modal).
+        self._settings_ctl = {
+            "model": model_popup,      # None in gateway mode (model is fixed)
+            "lang": lang_popup,
+            "tone": tone_popup,
+            "ux": ux_popup,
+            "interval": interval_popup,
+            "followups": followups_switch,
+        }
+
+        # ── Footer: Save / Cancel ─────────────────────────────
+        _sep()
+        cancel_btn = _pill("Cancel", b"doSettingsCancel:", width=90, height=28)
+        cancel_btn.setFrameOrigin_((SW - 90 * 2 - 8, y))
+        acc.addSubview_(cancel_btn)
+        save_btn = _pill("Save", b"doSettingsSave:", width=90, height=28)
+        save_btn.setFrameOrigin_((SW - 90, y))
+        acc.addSubview_(save_btn)
+        y += 28 + PAD
+
         acc.setFrameSize_(NSMakeSize(SW, y))
+        return acc, y
 
-        alert = NSAlert.alloc().init()
-        alert.setMessageText_("FigWatch Settings")
-        alert.setInformativeText_("")
-        alert.setIcon_(_emoji_icon("📺"))
-        alert.addButtonWithTitle_("Save")
-        alert.addButtonWithTitle_("Cancel")
-        alert.setAccessoryView_(acc)
+    def _present_settings(self, acc, height):
+        """Show the Settings content in our own liquid-glass panel."""
+        pw = acc.frame().size.width + SETTINGS_MARGIN_X * 2
+        ph = height + SETTINGS_MARGIN_Y * 2
+        panel = getattr(self, "_settings_panel", None)
+        if panel is None:
+            panel = KeyPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(0, 0, pw, ph),
+                NSWindowStyleMaskBorderless,
+                NSBackingStoreBuffered, False)
+            panel.setLevel_(NSFloatingWindowLevel)
+            panel.setReleasedWhenClosed_(False)
+            panel.setHasShadow_(True)
+            panel.setOpaque_(False)
+            panel.setBackgroundColor_(NSColor.clearColor())
+            glass, self._settings_glass_container = _make_glass_view(pw, ph)
+            panel.setContentView_(glass)
+            self._settings_panel = panel
+        self._host_settings_content(acc, height)
+        panel.center()
+        NSApp.activateIgnoringOtherApps_(True)
+        panel.makeKeyAndOrderFront_(None)
 
-        alert.layout()
-        buttons = alert.buttons()
-        if len(buttons) >= 2:
-            win_w = alert.window().frame().size.width
-            save_b = buttons[0]
-            sf = save_b.frame()
-            save_b.setFrameOrigin_(NSMakePoint(win_w - sf.size.width - 20, sf.origin.y))
-            cancel_b = buttons[1]
-            cf = cancel_b.frame()
-            cancel_b.setFrameOrigin_(NSMakePoint(win_w - sf.size.width - cf.size.width - 28, cf.origin.y))
+    def _host_settings_content(self, acc, height):
+        """Install (or swap) the content inside the settings glass + resize.
 
-        # Reset before the modal so a Switch-AI click (which sets it True and
-        # stops the modal) is detected on return without a stale value.
-        self._want_ai_switch = False
-        resp = alert.runModal()
-        if self._want_ai_switch:
-            self._want_ai_switch = False
-            self._show_ai_switch_chooser()
+        The content view is inset by SETTINGS_MARGIN_* inside a wrapper that
+        fills the glass, so rows don't run flush to the rounded edge (NSAlert
+        used to supply this padding).
+        """
+        pw = acc.frame().size.width + SETTINGS_MARGIN_X * 2
+        ph = height + SETTINGS_MARGIN_Y * 2
+        glass = self._settings_panel.contentView()
+        wrapper = FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, pw, ph))
+        acc.setFrameOrigin_((SETTINGS_MARGIN_X, SETTINGS_MARGIN_Y))
+        wrapper.addSubview_(acc)
+        if self._settings_glass_container:
+            glass.setContentView_(wrapper)  # NSGlassEffectView hosts a single view
+        else:
+            for sub in list(glass.subviews()):
+                sub.removeFromSuperview()
+            glass.setFrameSize_(NSMakeSize(pw, ph))
+            glass.addSubview_(wrapper)
+        f = self._settings_panel.frame()
+        # Keep the top-left corner fixed as height changes (rows added/removed).
+        new_y = f.origin.y + f.size.height - ph
+        self._settings_panel.setFrame_display_(
+            NSMakeRect(f.origin.x, new_y, pw, ph), True)
+
+    def _refresh_settings(self):
+        """Rebuild the settings body in place (trigger added/removed)."""
+        if getattr(self, "_settings_panel", None) is None:
             return
-        if resp == NSAlertFirstButtonReturn:
-            rmap = {0: "sonnet", 1: "opus", 2: "haiku"}
-            if model_popup is not None:
-                new_model = rmap.get(model_popup.indexOfSelectedItem(), "sonnet")
-            else:
-                # Gateway mode: model is fixed by cc-switch, leave it unchanged.
-                new_model = self._state.get("model", "sonnet")
-            lrmap = {0: "en", 1: "cn"}
-            new_lang = lrmap.get(lang_popup.indexOfSelectedItem(), "en")
-            new_tone_workers = tone_popup.indexOfSelectedItem() + 1
-            new_ux_workers = ux_popup.indexOfSelectedItem() + 1
-            new_interval = INTERVAL_PRESETS[interval_popup.indexOfSelectedItem()]
+        acc, height = self._build_settings_content()
+        self._host_settings_content(acc, height)
 
-            needs_restart = False
-            c = _load_config()
-            if new_model != self._state.get("model"):
-                self._state["model"] = new_model
-                c["aiModel"] = new_model
-                needs_restart = True
-            if new_lang != self._state.get("reply_lang"):
-                self._state["reply_lang"] = new_lang
-                c["replyLang"] = new_lang
-                needs_restart = True
-            if new_tone_workers != c.get("workersTone", 2) or new_ux_workers != c.get("workersUx", 1):
-                c["workersTone"] = new_tone_workers
-                c["workersUx"] = new_ux_workers
-                needs_restart = True
-            if new_interval != self._state.get("poll_interval"):
-                self._state["poll_interval"] = new_interval
-                c["watchInterval"] = new_interval
-                needs_restart = True
-            _save_config(c)
+    @objc.typedSelector(b"v@:@")
+    def doSettingsCancel_(self, sender):
+        if getattr(self, "_settings_panel", None) is not None:
+            self._settings_panel.orderOut_(None)
 
-            if needs_restart and self._state.get("watchers"):
-                self._stop_all_watchers()
-                self._start_workers()
-                watched = self._state.get("watched", [])
-                n = len(watched)
-                for i, f in enumerate(watched):
-                    delay = (self._state.get("poll_interval", DEFAULT_INTERVAL) / n) * i if n > 1 else 0
-                    self._start_watcher(f, initial_delay=delay)
+    @objc.typedSelector(b"v@:@")
+    def doSettingsSave_(self, sender):
+        ctl = getattr(self, "_settings_ctl", None)
+        if not ctl:
+            return
+        rmap = {0: "sonnet", 1: "opus", 2: "haiku"}
+        model_popup = ctl["model"]
+        if model_popup is not None:
+            new_model = rmap.get(model_popup.indexOfSelectedItem(), "sonnet")
+        else:
+            # Gateway mode: model is fixed by cc-switch, leave it unchanged.
+            new_model = self._state.get("model", "sonnet")
+        lrmap = {0: "en", 1: "cn"}
+        new_lang = lrmap.get(ctl["lang"].indexOfSelectedItem(), "en")
+        new_tone_workers = ctl["tone"].indexOfSelectedItem() + 1
+        new_ux_workers = ctl["ux"].indexOfSelectedItem() + 1
+        new_interval = INTERVAL_PRESETS[ctl["interval"].indexOfSelectedItem()]
+        new_followups = bool(ctl["followups"].state())
+
+        needs_restart = False
+        c = _load_config()
+        if new_model != self._state.get("model"):
+            self._state["model"] = new_model
+            c["aiModel"] = new_model
+            needs_restart = True
+        if new_lang != self._state.get("reply_lang"):
+            self._state["reply_lang"] = new_lang
+            c["replyLang"] = new_lang
+            needs_restart = True
+        if new_tone_workers != c.get("workersTone", 2) or new_ux_workers != c.get("workersUx", 1):
+            c["workersTone"] = new_tone_workers
+            c["workersUx"] = new_ux_workers
+            needs_restart = True
+        if new_interval != self._state.get("poll_interval"):
+            self._state["poll_interval"] = new_interval
+            c["watchInterval"] = new_interval
+            needs_restart = True
+        if new_followups != self._state.get("thread_followups", True):
+            self._state["thread_followups"] = new_followups
+            c["threadFollowups"] = new_followups
+            needs_restart = True  # watchers pick up follow_up_mention on restart
+        _save_config(c)
+
+        if needs_restart and self._state.get("watchers"):
+            self._stop_all_watchers()
+            self._start_workers()
+            watched = self._state.get("watched", [])
+            n = len(watched)
+            for i, f in enumerate(watched):
+                delay = (self._state.get("poll_interval", DEFAULT_INTERVAL) / n) * i if n > 1 else 0
+                self._start_watcher(f, initial_delay=delay)
+
+        if getattr(self, "_settings_panel", None) is not None:
+            self._settings_panel.orderOut_(None)
 
     # ── Trigger management ─────────────────────────────────────
 
@@ -2111,13 +2213,10 @@ class FigWatch(NSObject):
             self._flash_add_button(f"{keyword} already added")
             return
 
-        # NSUserNotification is dead on modern macOS (see the HUD note) and the
-        # open modal's trigger list doesn't refresh, so a successful Add used to
-        # look like nothing happened. Confirm inline on the button instead.
+        # Commit, then rebuild the panel body in place so the new trigger appears
+        # immediately (with its real skill name) — no reopen, no NSAlert relayout.
         self._commit_trigger(keyword, skill_path)
-        self._add_trigger_kw.setStringValue_("")
-        self._add_trigger_sk.selectItemAtIndex_(0)
-        self._flash_add_button(f"✓ Added {keyword}")
+        self._refresh_settings()
 
     def _set_add_button_title(self, text):
         btn = getattr(self, "_add_trigger_btn", None)
@@ -2136,11 +2235,11 @@ class FigWatch(NSObject):
         threading.Timer(
             1.8,
             lambda: self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"_resetAddButtonTitle:", None, False),
+                b"resetAddButtonTitle:", None, False),
         ).start()
 
     @objc.typedSelector(b"v@:@")
-    def _resetAddButtonTitle_(self, _):
+    def resetAddButtonTitle_(self, _):
         self._set_add_button_title("Add")
 
     def _commit_trigger(self, keyword, skill_path):
@@ -2174,11 +2273,8 @@ class FigWatch(NSObject):
             self._save_trigger_config(tc)
             for w in self._state.get("watchers", {}).values():
                 w.reload_trigger_config(tc)
-            try:
-                NSApp.stopModal()
-                self._settings_panel.orderOut_(None)
-            except Exception:
-                pass
+            # Rebuild the panel body in place so the row disappears immediately.
+            self._refresh_settings()
 
     def _save_trigger_config(self, trigger_config):
         c = _load_config()
@@ -2196,14 +2292,14 @@ class FigWatch(NSObject):
         success would otherwise be silent (NSUserNotification does nothing on
         modern macOS) and there's no persistent control to flash inline."""
         self._show_update_hud(message, spinning=False,
-                              button="Done", button_action=b"_hide_update_hud:")
+                              button="Done", button_action=b"hudDismiss:")
 
     def _show_update_hud(self, message, *, spinning=True, button=None, button_action=None):
         """Show (or update) the glass update HUD with a status line. Main thread.
 
         button/button_action drive the action button: "Cancel" (b"doCancelUpdate:")
         while downloading so a half-done download can be aborted, "Done"
-        (b"_hide_update_hud:") on the completion toast so the window can be
+        (b"hudDismiss:") on the completion toast so the window can be
         dismissed. Pass button=None to hide it (e.g. mid-install, when there's
         nothing safe to cancel).
         """
@@ -2221,7 +2317,7 @@ class FigWatch(NSObject):
         btn = self._hud_button
         if button:
             btn.setTitle_(button)
-            btn.setAction_(button_action or b"_hide_update_hud:")
+            btn.setAction_(button_action or b"hudDismiss:")
             btn.setTarget_(self)
             btn.setHidden_(False)
         else:
@@ -2247,7 +2343,7 @@ class FigWatch(NSObject):
 
         title = _label("FigWatch", size=12, weight=NSFontWeightMedium,
                        color=NSColor.secondaryLabelColor())
-        title.setAlignment_(2)  # NSTextAlignmentCenter
+        title.setAlignment_(NSTextAlignmentCenter)
         title.setFrame_(NSMakeRect(0, 20, w, 16))
         inner.addSubview_(title)
 
@@ -2259,11 +2355,11 @@ class FigWatch(NSObject):
         inner.addSubview_(bar)
 
         label = _label("", size=13)
-        label.setAlignment_(2)  # NSTextAlignmentCenter
+        label.setAlignment_(NSTextAlignmentCenter)
         label.setFrame_(NSMakeRect(16, 82, w - 32, 20))
         inner.addSubview_(label)
 
-        btn = NSButton.buttonWithTitle_target_action_("", self, b"_hide_update_hud:")
+        btn = NSButton.buttonWithTitle_target_action_("", self, b"hudDismiss:")
         btn.setFrame_(NSMakeRect((w - 96) / 2, 116, 96, 28))
         btn.setHidden_(True)
         inner.addSubview_(btn)
@@ -2281,20 +2377,20 @@ class FigWatch(NSObject):
         self._hud_button = btn
 
     @objc.typedSelector(b"v@:@")
-    def _hide_hud_button_(self, _):
+    def hudHideButton_(self, _):
         """Main-thread selector: hide the action button (download done → can't cancel)."""
         if getattr(self, "_hud_button", None) is not None:
             self._hud_button.setHidden_(True)
 
     @objc.typedSelector(b"v@:@")
-    def _set_update_hud_(self, message):
+    def hudSetText_(self, message):
         """Main-thread selector: update the HUD status line from a bg thread."""
         if getattr(self, "_hud_label", None) is not None:
             self._hud_label.setStringValue_(str(message))
             self._hud_panel.orderFrontRegardless()
 
     @objc.typedSelector(b"v@:@")
-    def _set_update_progress_(self, frac_str):
+    def hudSetProgress_(self, frac_str):
         """Main-thread selector: switch the bar to determinate + set 0..1 fraction.
 
         Passed as a string — strings bridge cleanly through
@@ -2314,7 +2410,7 @@ class FigWatch(NSObject):
         bar.setDoubleValue_(frac)
 
     @objc.typedSelector(b"v@:@")
-    def _hide_update_hud_(self, _):
+    def hudDismiss_(self, _):
         """Main-thread selector: stop the bar and close the HUD."""
         bar = getattr(self, "_hud_bar", None)
         if bar is not None:
@@ -2440,19 +2536,19 @@ class FigWatch(NSObject):
                         last_ui = now
                         frac = got / total
                         self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                            b"_set_update_hud:", f"Downloading update… {int(frac * 100)}%", False)
+                            b"hudSetText:", f"Downloading update… {int(frac * 100)}%", False)
                         self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                            b"_set_update_progress:", str(frac), False)
+                            b"hudSetProgress:", str(frac), False)
                 if total:
                     self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                        b"_set_update_progress:", "1.0", False)
+                        b"hudSetProgress:", "1.0", False)
 
             # Past the download the install is a few fast, non-abortable steps,
             # so drop the Cancel button.
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"_hide_hud_button:", None, False)
+                b"hudHideButton:", None, False)
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"_set_update_hud:", "Installing update…", False)
+                b"hudSetText:", "Installing update…", False)
 
             shutil.rmtree(staging, ignore_errors=True)
             os.makedirs(staging, exist_ok=True)
@@ -2515,18 +2611,18 @@ class FigWatch(NSObject):
 
             # Hold the final state briefly so it's seen before the app vanishes.
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"_set_update_hud:", "Restarting FigWatch…", False)
+                b"hudSetText:", "Restarting FigWatch…", False)
             time.sleep(0.8)
 
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"_quitForUpdate:", None, False)
+                b"quitForUpdate:", None, False)
         except _UpdateCancelled:
             # User hit Cancel mid-download — bin the partial file and close the
             # HUD quietly (no "update failed" alert; nothing went wrong).
             with contextlib.suppress(Exception):
                 os.remove(zip_path)
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
-                b"_hide_update_hud:", None, False)
+                b"hudDismiss:", None, False)
         except Exception as e:
             self._update_error = str(e)
             self.performSelectorOnMainThread_withObject_waitUntilDone_(
@@ -2538,10 +2634,10 @@ class FigWatch(NSObject):
         ev = getattr(self, "_update_cancel", None)
         if ev is not None:
             ev.set()
-        self._hide_update_hud_(None)
+        self.hudDismiss_(None)
 
     @objc.typedSelector(b"v@:@")
-    def _quitForUpdate_(self, _):
+    def quitForUpdate_(self, _):
         # Do NOT run _stop_all_watchers here: it joins every watcher thread with
         # a 5s timeout each, so with N watched files it froze the main thread for
         # up to N*5s (frozen spinner, HUD stuck) right at "Restarting…". Watchers
@@ -2551,7 +2647,7 @@ class FigWatch(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def showInstallError_(self, _):
-        self._hide_update_hud_(None)
+        self.hudDismiss_(None)
         err = getattr(self, "_update_error", "Unknown error")
         NSApp.activateIgnoringOtherApps_(True)
         alert = NSAlert.alloc().init()
@@ -2628,12 +2724,11 @@ class FigWatch(NSObject):
 
     @objc.typedSelector(b"v@:@")
     def doSwitchAI_(self, sender):
-        # Popping an NSMenu inside the live Settings NSAlert modal is unreliable —
-        # it tore the alert down with no follow-up (and read_manual_gateway wasn't
-        # even in scope here, so the click raised). Instead flag the intent and
-        # stop the modal; doSettings_ then shows the chooser as its own alert.
-        self._want_ai_switch = True
-        NSApp.stopModal()
+        # Close the settings panel, then show the backend chooser as its own
+        # alert (a simple button list — no drift risk, so it stays an NSAlert).
+        if getattr(self, "_settings_panel", None) is not None:
+            self._settings_panel.orderOut_(None)
+        self._show_ai_switch_chooser()
 
     def _show_ai_switch_chooser(self):
         """Standalone backend chooser, shown after Settings closes (not nested)."""

@@ -7,6 +7,8 @@ description: Review and fix copy in Figma designs against Joybuy Tone of Voice g
 
 Review and improve copy in Figma app/web UI designs against Joybuy's locale-specific Tone of Voice guidelines, and generate translation tables — all via the Figma CLI.
 
+**Golden rule — you write the copy, you don't hand the work back.** Whenever a slot is empty, placeholder, dummy, or repeated ("Subtitle subtitle subtitle", lorem ipsum), or the reviewer asks you for copy, PROPOSE concrete on-brand copy inferred from the page context (headline, product, offer, price, CTA, locale ToV) — give 1–2 options. Never reply with "replace with real copy", "add the real text", or "fill this in": the reviewer already knows it's a placeholder; telling them to fill it in is useless. Only decline if there is genuinely no context to infer from, and then say exactly what you'd need.
+
 This skill has two modes:
 
 1. **Copy Review** — Extract text from a Figma file, flag copy that sounds unnatural or violates ToV rules, propose replacements, let the user review, then apply approved changes back to Figma.
@@ -394,7 +396,7 @@ This avoids translating copy that's about to be changed.
 - **Mixed-language files:** Some Figma files may contain multiple languages already (e.g. a Benelux file with NL and FR sections). Detect this and review each section against the correct locale's ToV guide.
 - **Component instances:** Text in component instances may be overridden locally. Flag if an override diverges from the main component's copy.
 - **Very long files:** If there are hundreds of text nodes, offer to work page-by-page or frame-by-frame rather than dumping everything at once.
-- **Copy that's placeholder/lorem ipsum:** Skip it — don't flag dummy text as a ToV violation.
+- **Placeholder / dummy / repeated copy (e.g. "Subtitle subtitle subtitle", lorem ipsum, empty slots):** the reviewer already knows it's a placeholder — do NOT reply with "replace with real copy" or "fill this in". Instead WRITE concrete, on-brand copy for that slot, inferred from the surrounding page context (headline, product, offer, price, CTA, locale ToV). Give 1–2 options. Only decline if there is genuinely no context to infer from, and if so say exactly what you'd need.
 - **Brand terms (Joypoints, Joybuy):** These should never be translated or altered. Flag if they've been modified.
 
 ---
@@ -410,3 +412,15 @@ The `references/` directory contains the full Tone of Voice guide for each local
 - `references/tov-benelux.md` — Belgium/Luxembourg (multi-language, softer Dutch, warmer French)
 
 Each guide contains: tone principles, currency/formatting rules, approved CTAs, key phrase glossary, and things-to-avoid tables. These are the source of truth for all copy decisions.
+
+---
+
+## Follow-up / refinement mode (thread conversation)
+
+When the reviewer replies in the thread of a tone review you already posted, you are
+continuing a CONVERSATION. You'll be given the prior transcript and their latest message.
+
+- Respond to their latest message specifically (e.g. "rewrite the CTA more warmly",
+  "why did you flag that line?") — refine or defend the prior suggestion; don't re-run
+  the whole tone pass.
+- Keep the locale's ToV. Plain text, concise, no markdown, no sign-off.

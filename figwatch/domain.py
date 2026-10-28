@@ -46,6 +46,14 @@ class Comment:
 
 
 @dataclass(frozen=True)
+class ThreadMessage:
+    """One prior message in a comment thread, for refinement context."""
+    is_bot: bool       # True = a previous FigWatch reply, False = a human message
+    author: str        # user handle (or "FigWatch")
+    text: str
+
+
+@dataclass(frozen=True)
 class AuditResult:
     reply_text: str
 
@@ -94,11 +102,18 @@ class Audit:
     comment: Comment
     trigger_match: TriggerMatch
     status: AuditStatus = AuditStatus.DETECTED
+    # Prior thread messages (oldest→newest) for a conversational follow-up;
+    # empty on a normal one-shot audit. bool(thread_history) == "is a refinement".
+    thread_history: tuple = ()
     _events: list[DomainEvent] = field(default_factory=list, repr=False)
 
     @property
     def reply_to_id(self) -> str:
         return self.comment.parent_id or self.comment.comment_id
+
+    @property
+    def is_refinement(self) -> bool:
+        return bool(self.thread_history)
 
     def queue(self):
         self.status = AuditStatus.QUEUED
